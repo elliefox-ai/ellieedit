@@ -22,7 +22,7 @@ log = __import__("logging").getLogger("ellieedit.gallery")
 GALLERY_ROOT = Path(os.environ.get("ELLIEEDIT_GALLERY_ROOT", "/mnt/e/comfyui/output"))
 THUMB_CACHE_DIR = Path(os.environ.get(
     "ELLIEEDIT_THUMB_CACHE",
-    str(Path(__file__).resolve().parent.parent / ".thumbcache")))
+    str(Path(__file__).resolve().parents[2] / ".thumbcache")))
 THUMB_SIZE = 256
 PAGE_SIZE = 100
 EXTS = {".jpg", ".jpeg", ".png", ".webp"}
