@@ -20,6 +20,14 @@ Image.MAX_IMAGE_PIXELS = None  # local tool; images may be large
 log = __import__("logging").getLogger("ellieedit.gallery")
 
 GALLERY_ROOT = Path(os.environ.get("ELLIEEDIT_GALLERY_ROOT", "/mnt/e/comfyui/output"))
+# Repaint intermediates land here (ComfyUI writes ellieedit_tmp/ inside its
+# output root, which is shared with the gallery root). Env-overridable for
+# the case where ComfyUI's output root differs from GALLERY_ROOT.
+TMP_DIR = Path(os.environ.get(
+    "ELLIEEDIT_TMP_DIR", str(GALLERY_ROOT / "ellieedit_tmp")))
+TEMP_DIRS = {"ellieedit_tmp"}  # never shown in the gallery
+TMP_MAX_AGE_S = 24 * 3600
+MIGRATE_GLOBS = ("facecycle_repaint_*.png",)
 THUMB_CACHE_DIR = Path(os.environ.get(
     "ELLIEEDIT_THUMB_CACHE",
     str(Path(__file__).resolve().parents[2] / ".thumbcache")))
@@ -75,7 +83,8 @@ def list_images(dir: str = "", cursor: str = ""):
     for entry in sorted(base.iterdir()):
         if entry.name.startswith(".") or entry.is_symlink():
             continue
-            continue
+        if entry.is_dir() and entry.name in TEMP_DIRS and base == root_real:
+            continue  # intermediates, not gallery content
         if entry.is_dir():
             subdirs.append(entry.name)
         elif entry.suffix.lower() in EXTS:
@@ -117,6 +126,43 @@ def list_images(dir: str = "", cursor: str = ""):
     next_cursor = f"{page[-1][0]}:{page[-1][1].name}" if page and start + PAGE_SIZE < len(files) else None
     return {"items": items, "subdirs": subdirs, "next_cursor": next_cursor,
             "root": str(root_real)}
+
+
+def cleanup_tmp_dir():
+    """Startup hygiene for repaint intermediates.
+
+    1. Migrate legacy mess: any facecycle_repaint_*.png the old prefix wrote
+       straight into the output root is deleted (pure intermediates).
+    2. Delete files in TMP_DIR older than TMP_MAX_AGE_S (belt-and-braces for
+       files whose post-repaint unlink was missed).
+    Safe to call repeatedly; tolerates a missing TMP_DIR.
+    """
+    removed = 0
+    root_real = GALLERY_ROOT.resolve()
+    try:
+        for pattern in MIGRATE_GLOBS:
+            for old in root_real.glob(pattern):
+                if old.is_file():
+                    old.unlink()
+                    removed += 1
+        if removed:
+            log.info("tmp sweep: removed %d legacy repaint file(s) from output root", removed)
+    except OSError as e:
+        log.warning("tmp sweep: legacy migration skipped: %s", e)
+    try:
+        now = time.time()
+        for f in TMP_DIR.iterdir():
+            try:
+                if f.is_file() and now - f.stat().st_mtime > TMP_MAX_AGE_S:
+                    f.unlink()
+                    removed += 1
+            except OSError as e:
+                log.warning("tmp sweep: could not remove %s: %s", f, e)
+    except FileNotFoundError:
+        pass  # nothing painted yet
+    except OSError as e:
+        log.warning("tmp sweep: TMP_DIR scan skipped: %s", e)
+    return removed
 
 
 @router.get("/thumb")
