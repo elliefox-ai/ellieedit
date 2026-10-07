@@ -255,6 +255,22 @@ export class FaceCycle {
       if (e.key === 'Enter') { e.preventDefault(); this.generateRepaint(); }
     });
 
+    // Import API: Gallery (or anything) dispatches a window CustomEvent
+    //   'ellieedit:open-in-facecycle' { detail: { url, name } }
+    // and the image is fetched and loaded through the normal file path.
+    window.addEventListener('ellieedit:open-in-facecycle', this.onImportEvent = async e => {
+      const { url, name } = e.detail || {};
+      if (!url || !this.panel.classList.contains('active')) return;
+      try {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(r.status);
+        const blob = await r.blob();
+        await this.handleFiles([new File([blob], name || 'image.png', { type: blob.type })]);
+      } catch (err) {
+        alert('Failed to open image in FaceCycle: ' + err.message);
+      }
+    });
+
     document.addEventListener('keydown', this.onKeyDown = e => {
       if (!this.panel.classList.contains('active')) return;
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
