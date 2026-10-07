@@ -3,8 +3,15 @@
 // { name, label, icon, mount(panelEl, jobbar) } and the shell composes them.
 // Adding a tool = a module file in js/modules/ + a FastAPI router.
 
+// Bump on every deploy — shown in the job bar so a stale-cache client is
+// instantly visible.
+const BUILD = '2026-10-07b';
+
 const registry = [];
 const mounted = new Map(); // name -> { panelEl }
+
+// Build marker: visible proof of which client build is loaded (bumped with sw.js CACHE).
+const BUILD = 'v2-20261007b';
 
 export function registerModule(desc) {
   registry.push(desc);
@@ -14,6 +21,12 @@ export function registerModule(desc) {
 const tabbar = document.getElementById('tabbar');
 const host = document.getElementById('module-host');
 const jobbar = document.getElementById('jobbar');
+
+// Deployed-build marker: first thing in the job bar.
+const buildBadge = document.createElement('span');
+buildBadge.className = 'badge';
+buildBadge.textContent = `build ${BUILD}`;
+jobbar.appendChild(buildBadge);
 
 function activate(name) {
   for (const { name: n } of registry) {
@@ -27,6 +40,10 @@ function activate(name) {
 
 function buildTabs() {
   tabbar.innerHTML = '';
+  const marker = document.createElement('span');
+  marker.style.cssText = 'margin-left:auto;align-self:center;font-size:10px;color:#5a5a7a;padding-right:8px';
+  marker.textContent = `build ${BUILD}`;
+  tabbar.appendChild(marker);
   for (const desc of registry) {
     const btn = document.createElement('button');
     btn.className = 'tab';

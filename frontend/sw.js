@@ -1,6 +1,10 @@
-// EllieEdit service worker — minimal: cache the shell for fast loads,
-// network-first for API and navigation (full offline NOT required).
-const CACHE = 'ellieedit-v1';
+// EllieEdit service worker.
+// Deployment discipline: BUMP CACHE on every deploy. Static JS/CSS are
+// NETWORK-FIRST with cache fallback so a deploy is picked up on the next
+// online load — a cache-first policy here poisoned clients with intermediate
+// builds once already (blank-canvas incident 2026-10-07). Only heavy binary
+// assets (icons, manifest) are cache-first.
+const CACHE = 'ellieedit-v2-20261007b';
 const SHELL = [
   '/',
   '/index.html',
@@ -30,16 +34,21 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.pathname.startsWith('/api/')) return; // network only
 
-  // Navigations & shell documents: network-first, fall back to cache.
-  if (e.request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {
+  // Navigations, shell documents, and all JS: network-first, cache fallback.
+  // This is the deploy-freshness guarantee.
+  if (e.request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html' ||
+      url.pathname.startsWith('/js/')) {
     e.respondWith(
       fetch(e.request)
-        .then(r => { caches.open(CACHE).then(c => c.put('/', r.clone())); return r; })
-        .catch(() => caches.match('/')));
+        .then(r => {
+          if (r.ok) caches.open(CACHE).then(c => c.put(e.request, r.clone()));
+          return r;
+        })
+        .catch(() => caches.match(e.request).then(hit => hit || caches.match('/'))));
     return;
   }
 
-  // Static assets: cache-first, refresh in background.
+  // Heavy binary assets: cache-first, refresh in background.
   e.respondWith(
     caches.match(e.request).then(hit => {
       const net = fetch(e.request).then(r => {
