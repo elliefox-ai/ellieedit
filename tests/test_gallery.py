@@ -120,3 +120,44 @@ def test_pagination(client):
 
 def test_bad_cursor(client):
     assert client.get("/api/gallery/list", params={"cursor": "garbage"}).status_code == 400
+
+
+def test_list_excludes_temp_dir(client):
+    """ellieedit_tmp at the gallery root is never listed or offered."""
+    (gallery_mod.GALLERY_ROOT / "ellieedit_tmp").mkdir(exist_ok=True)
+    (gallery_mod.GALLERY_ROOT / "ellieedit_tmp" / "junk.png").write_bytes(b"x")
+    r = client.get("/api/gallery/list")
+    assert r.status_code == 200
+    assert "ellieedit_tmp" not in r.json()["subdirs"]
+    assert [i["name"] for i in r.json()["items"]] == ["b.jpg", "a.png"]
+    # Deeper inside, a same-named dir is still a normal subdir (root-only filter).
+    (gallery_mod.GALLERY_ROOT / "sub" / "ellieedit_tmp").mkdir(exist_ok=True)
+    assert "ellieedit_tmp" in client.get(
+        "/api/gallery/list", params={"dir": "sub"}).json()["subdirs"]
+
+
+def test_cleanup_tmp_dir_missing_dir_ok(tmp_path, monkeypatch):
+    monkeypatch.setattr(gallery_mod, "TMP_DIR", tmp_path / "nope")
+    monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", tmp_path)
+    assert gallery_mod.cleanup_tmp_dir() == 0
+
+
+def test_cleanup_tmp_dir_deletes_old_keeps_new(tmp_path, monkeypatch):
+    import os
+    root = tmp_path
+    monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", root)
+    tmpd = root / "ellieedit_tmp"
+    tmpd.mkdir()
+    old, new = tmpd / "old.png", tmpd / "new.png"
+    old.write_bytes(b"x")
+    new.write_bytes(b"y")
+    ancient = time.time() - 25 * 3600
+    os.utime(old, (ancient, ancient))
+    # Legacy mess at output root: deleted unconditionally.
+    legacy = root / "facecycle_repaint_00001_.png"
+    legacy.write_bytes(b"z")
+    monkeypatch.setattr(gallery_mod, "TMP_DIR", tmpd)
+    removed = gallery_mod.cleanup_tmp_dir()
+    assert removed == 2
+    assert not old.exists() and not legacy.exists()
+    assert new.exists()

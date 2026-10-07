@@ -65,7 +65,7 @@ def test_graph_shape_matches_original():
     assert g["201"]["inputs"]["channel"] == "red"
     assert g["203"]["class_type"] == "SetLatentNoiseMask"
     assert g["104"]["class_type"] == "SamplerCustomAdvanced"
-    assert g["19"]["inputs"]["filename_prefix"] == "facecycle_repaint"
+    assert g["19"]["inputs"]["filename_prefix"] == "ellieedit_tmp/facecycle_repaint"
     # LoRA stack chain 380 -> 397 -> 385 -> 386
     assert g["397"]["inputs"]["model"] == ["380", 0]
     assert g["385"]["inputs"]["model"] == ["397", 0]
@@ -119,3 +119,37 @@ def test_comfy_repaint_rejects_bad_workflow(no_http, monkeypatch):
     mask = make_png_b64(color=(0, 0, 0))
     with pytest.raises(RuntimeError, match="rejected workflow"):
         comfy.comfy_repaint(img, mask, "p")
+
+
+def test_repaint_deletes_intermediate(no_http, tmp_path, monkeypatch):
+    """After reading the /view bytes, the saved intermediate is unlinked."""
+    from backend.routers import gallery as gallery_mod
+    tmpd = tmp_path / "ellieedit_tmp"
+    tmpd.mkdir()
+    saved = tmpd / "facecycle_repaint_00001_.png"
+    saved.write_bytes(b"ondisk")
+    monkeypatch.setattr(gallery_mod, "TMP_DIR", tmpd)
+
+    # Fake history must report the real saved filename so unlink targets match.
+    orig_urlopen = comfy.urllib.request.urlopen
+    def patched(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else req
+        if "/history/" in url:
+            import backend.routers.gallery as g2
+            class R2:
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+                def read(self):
+                    return json.dumps({"test-pid-1": {
+                        "status": {"status_str": "success"},
+                        "outputs": {"19": {"images": [
+                            {"filename": saved.name, "subfolder": "ellieedit_tmp", "type": "output"}]}}},
+                    }).encode()
+            return R2()
+        return orig_urlopen(req, timeout=timeout)
+    monkeypatch.setattr(comfy.urllib.request, "urlopen", patched)
+    img = make_png_b64()
+    mask = make_png_b64(color=(0, 0, 0))
+    data = comfy.comfy_repaint(img, mask, "p", seed=3)
+    assert data == b"PNGDATA"
+    assert not saved.exists()
