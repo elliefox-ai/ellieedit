@@ -1,6 +1,7 @@
 // CanvasStack — shared canvas layer stack for EllieEdit modules.
-// Layers (bottom→top): base image → edit layer → pending preview → module
-// content (regions etc., via drawContent hook) → interaction overlay.
+// Layers (bottom→top): base image → edit layer → module region-state content
+// (via drawUnder hook) → module overlays (via drawContent hook) → interaction
+// overlay.
 //
 // The overlay is a display-resolution canvas: during strokes/drags only it is
 // touched (coalesced pointer events + dirty-rect clearing per facecycle commit
@@ -43,7 +44,6 @@ export class CanvasStack {
     this.baseData = null;   // ImageData of the base image
     this.editLayer = null;  // canvas, committed repaints
     this.editLayerVisible = true;
-    this.pending = null;    // pending-preview state (see pending.js store)
     this.hideContent = false;
 
     if (opts.cursor) this.canvas.style.cursor = opts.cursor;
@@ -127,31 +127,7 @@ export class CanvasStack {
 
     if (this.editLayerVisible && this.editLayer) this.ctx.drawImage(this.editLayer, 0, 0);
 
-    // Region state (photo variants + kept generations) — under the pending preview.
     if (this.opts.drawUnder && !this.hideContent) this.opts.drawUnder(this.ctx, opts);
-
-    // Pending preview: its own layer, clipped to its box — never baked until Keep.
-    const p = this.pending;
-    if (p && p.vsel >= 0) {
-      if (p.maskCanvas) {
-        drawMaskedSource(this.ctx, p.variants[p.vsel], p);
-        this.ctx.save();
-        this.ctx.strokeStyle = 'rgba(232, 122, 208, 0.9)';
-        this.ctx.lineWidth = 2;
-        this.ctx.setLineDash([8, 5]);
-        this.ctx.strokeRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2);
-        this.ctx.restore();
-      } else {
-        drawFeatheredSource(this.ctx, p.variants[p.vsel], p);
-        this.ctx.save();
-        this.ctx.strokeStyle = 'rgba(125, 224, 138, 0.9)';
-        this.ctx.lineWidth = 2;
-        this.ctx.setLineDash([8, 5]);
-        this.ctx.strokeRect(p.x + 1, p.y + 1, p.w - 2, p.h - 2);
-        this.ctx.restore();
-      }
-    }
-
 
     if (this.opts.drawContent && !this.hideContent) this.opts.drawContent(this.ctx, opts);
     if (this.baseData) this.ensureOverlay();

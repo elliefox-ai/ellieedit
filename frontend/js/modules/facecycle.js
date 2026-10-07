@@ -6,8 +6,7 @@
 // denoise slider driving BasicScheduler server-side.
 
 import { registerModule } from '../shell.js';
-import { CanvasStack, drawFeatheredSource, drawMaskedSource } from '../components/canvas-stack.js';
-import { PendingPreview } from '../components/pending.js';
+import { CanvasStack, drawFeatheredSource } from '../components/canvas-stack.js';
 import { JobPanel } from '../components/jobpanel.js';
 
 const REPAINT_URL = '/api/facecycle/repaint';
@@ -173,7 +172,9 @@ export class FaceCycle {
     this.BADGE_H = 20;
     this.RESIZE_TAB_SIZE = 10;
 
-    // Shared canvas stack + pending preview model
+    // Shared canvas stack. Generation lifecycle lives ON each region object
+    // (region.status: idle|generating|preview|kept) — there is no global
+    // pending preview anywhere in this module.
     this.stack = new CanvasStack(this.el.canvasContainer, {
       onPointerDown: (e, pt) => this.onPointerDown(e, pt),
       onPointerMove: (e, pts) => this.onPointerMove(e, pts),
@@ -184,9 +185,7 @@ export class FaceCycle {
     });
     this.stack.opts.drawUnder = (ctx, opts) => this.drawRegionState(ctx, opts);
     this.stack.opts.drawContent = (ctx, opts) => this.drawOverlays(ctx, opts);
-    this.pendingStore = new PendingPreview(this.stack, () => this.onPendingChange());
-    this.undoLog = []; // stack of region-state changes (keep/discard-generation)
-    this.stack.pending = null;
+    this.undoLog = []; // transitions { region, before, after } for Undo
 
     this.bind();
   }
@@ -273,7 +272,6 @@ export class FaceCycle {
     this.stack.baseData = null;
     this.stack.editLayer = null;
     this.stack.editLayerVisible = true;
-    this.pendingStore.reset();
     this.undoLog = [];
     this.el.layerToggleBtn.textContent = '👁 Edit layer: On';
     this.el.layerToggleBtn.classList.remove('active-toggle');
@@ -478,6 +476,7 @@ export class FaceCycle {
             h: Math.min(h, rh + pad * 2),
             id: this.nextRegionId++,
             manual: false,
+            status: 'idle',
           });
         }
       }
@@ -513,37 +512,34 @@ export class FaceCycle {
   updateStatusBar() {
     const n = this.state.activeRegions.length;
     const manualCount = this.state.activeRegions.filter(r => r.manual).length;
-    const pending = this.pendingStore.current;
 
-    const selGens = this.state.activeRegions.find(r => r.id === this.selectedRegionId)?.gens?.length ?? 0;
-    this.el.keepBtn.disabled = !pending || pending.vsel < 0;
-    this.el.discardBtn.disabled = !pending && !selGens;
-    this.el.undoBtn.disabled = this.undoLog.length === 0;
-    const gensBadge = (selGens && !pending)
-      ? ` <span class="badge" style="color:#7de08a">${(() => { const sr = this.state.activeRegions.find(r => r.id === this.selectedRegionId); return (sr?.gsel ?? -1) >= 0 ? `gen ${(sr?.gsel ?? 0) + 1}/${selGens}` : 'photo shown'; })()} — [/] cycles</span>`
-      : '';
-
-    // Diagnostic: make the pending preview layer unambiguous on-screen — if this
-    // shows dims but the box looks unchanged, the preview layer exists and the
-    // composite (not the transport) is the problem.
-    const pv = pending && pending.vsel >= 0 ? pending.variants[pending.vsel] : null;
-    const previewDiag = pv ? ` · preview ${pv.width}×${pv.height}px @ (${pending.x},${pending.y}) ${pending.w}×${pending.h}` : '';
-    const pendingBadge = pending
-      ? ' <span class="badge" style="color:#7de08a">Preview: ' +
-        (pending.vsel >= 0
-          ? (pending.vsel + 1) + '/' + pending.variants.length + ' — Keep or Discard'
-          : 'generating… ' + pending.generating + ' left') + previewDiag + '</span>'
-      : '';
-
+    // Buttons derive from the SELECTED REGION's status only.
     const selRegion = this.state.activeRegions.find(r => r.id === this.selectedRegionId);
+    const status = selRegion?.status ?? 'idle';
+    const selGens = selRegion?.gens?.length ?? 0;
+    const selPsel = selRegion?.preview?.psel ?? -1;
+    const selVariants = selRegion?.preview?.variants?.length ?? 0;
+    this.el.keepBtn.disabled = !(status === 'preview' && selPsel >= 0);
+    this.el.discardBtn.disabled = !(selRegion && (status === 'preview' || selGens));
+    this.el.undoBtn.disabled = this.undoLog.length === 0;
+
+    const statusBadge = status === 'generating'
+      ? ' <span class="badge" style="color:#8ab4e8">generating… ' + (selVariants ? selVariants + ' variant' + (selVariants > 1 ? 's' : '') + ' in' : '') + '</span>'
+      : status === 'preview'
+        ? ' <span class="badge" style="color:#7de08a">Preview: ' + (selPsel + 1) + '/' + selVariants + ' — Keep or Discard</span>'
+        : '';
+    const gensBadge = (selGens && status !== 'preview' && status !== 'generating')
+      ? ` <span class="badge" style="color:#7de08a">${(() => { return (selRegion?.gsel ?? -1) >= 0 ? `gen ${(selRegion?.gsel ?? 0) + 1}/${selGens}` : 'photo shown'; })()} — [/] cycles</span>`
+      : '';
+
     const maskExists = this.drawMaskMode || this.state.activeRegions.some(r => r.maskCanvas);
     const runBadge = this.lastRunInfo ? ` <span class="badge" style="color:#8ab4e8">${this.lastRunInfo}</span>` : '';
-    const maskHint = (selRegion && !selRegion.maskCanvas && maskExists)
+    const maskHint = (selRegion && !selRegion.maskCanvas && maskExists && status === 'idle')
       ? ' <span class="badge" style="color:#e87ad0">box selected — Generate overrides painted mask</span>'
       : '';
 
     if (n === 0) {
-      this.el.statusBar.innerHTML = '<span class="badge">' + (this.state.images.length < 2 ? 'Editor ready — draw a box (B) or click a region' : 'No changes detected') + '</span> <span class="help">' + (this.state.images.length < 2 ? 'Type a prompt (or leave empty), select a box, Generate to repaint.' : 'Try lowering sensitivity or min region size.') + '</span>' + pendingBadge + maskHint + runBadge + gensBadge;
+      this.el.statusBar.innerHTML = '<span class="badge">' + (this.state.images.length < 2 ? 'Editor ready — draw a box (B) or click a region' : 'No changes detected') + '</span> <span class="help">' + (this.state.images.length < 2 ? 'Type a prompt (or leave empty), select a box, Generate to repaint.' : 'Try lowering sensitivity or min region size.') + '</span>' + statusBadge + maskHint + runBadge + gensBadge;
       return;
     }
 
@@ -555,12 +551,7 @@ export class FaceCycle {
     if (this.drawBoxMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">✏️ Draw Box active</span>';
     if (this.drawMaskMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">🖌️ Draw Mask — click a region to edit its mask · paint adds (box auto-grows) · Enter=apply · Esc=reset · E=erase · ,/. = brush size</span>';
     parts.push('<span class="help">Click a region to cycle • Right-click to go back • Drag tabs to move/resize • H toggles overlays • Del removes selected</span>');
-    this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + pendingBadge + maskHint + runBadge + gensBadge;
-  }
-
-  onPendingChange() {
-    this.updateStatusBar();
-    this.render();
+    this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + statusBadge + maskHint + runBadge + gensBadge;
   }
 
   // ── Rendering ──
@@ -570,8 +561,12 @@ export class FaceCycle {
     this.renderGenStrip();
   }
 
-  // Region state drawn UNDER the pending preview: kept generations + photo variants.
-  // What this paints (minus mask overlays) is exactly what Export produces.
+  // Pure function of region states — the renderer. Per region, per status:
+  //   kept      → its current gen drawn at the EXACT rect the preview displayed
+  //   preview   → the selected preview variant drawn at its rect
+  //   generating→ nothing painted yet (progress affordance is an overlay)
+  //   idle      → photo variant (if cycled) only
+  // What this paints (minus overlays) is exactly what Export produces.
   drawRegionState(ctx, opts = {}) {
     const s = this.state;
     for (const region of s.activeRegions) {
@@ -581,8 +576,12 @@ export class FaceCycle {
         if (region.maskCanvas) this.drawMaskedRegion(ctx, sel, region);
         else drawFeatheredSource(ctx, this.variantCanvas(sel), region);
       }
-      if (region.gens && region.gens.length && (region.gsel ?? -1) >= 0) {
-        ctx.drawImage(region.gens[region.gsel], 0, 0);
+      if (region.status === 'kept' && region.gens?.length && (region.gsel ?? -1) >= 0) {
+        const gen = region.gens[region.gsel];
+        ctx.drawImage(gen.canvas, gen.rect.x, gen.rect.y);
+      } else if (!opts.exporting && region.status === 'preview' && region.preview && region.preview.psel >= 0) {
+        const pv = region.preview.variants[region.preview.psel];
+        ctx.drawImage(pv, region.preview.rect.x, region.preview.rect.y);
       }
     }
   }
@@ -596,6 +595,17 @@ export class FaceCycle {
       for (const region of s.activeRegions) {
         const isSelected = region.id === this.selectedRegionId;
         const accentColor = region.manual ? '#e8b84d' : '#64b4ff';
+        // Status affordances: dashed outline around the live preview rect;
+        // pulsing-style badge for generating regions.
+        if (region.status === 'preview' && region.preview) {
+          const r = region.preview.rect;
+          ctx.save();
+          ctx.strokeStyle = 'rgba(125, 224, 138, 0.9)';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([8, 5]);
+          ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
+          ctx.restore();
+        }
         ctx.save();
         if (isSelected) {
           ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
@@ -685,7 +695,8 @@ export class FaceCycle {
 
   getBadgeText(region) {
     const sel = this.state.selections[region.id] ?? this.state.baseVariant;
-    return `${this.getRegionNumber(region)}:${String.fromCharCode(65 + sel)}`;
+    const st = region.status === 'generating' ? ' ⏳' : region.status === 'preview' ? ' ✓?' : '';
+    return `${this.getRegionNumber(region)}:${String.fromCharCode(65 + sel)}${st}`;
   }
 
   getRegionNumber(region) {
@@ -954,7 +965,7 @@ export class FaceCycle {
           const by = Math.max(0, Math.round(this.strokeBBox.y - pad));
           const bw = Math.min(this.state.width - bx, Math.round(this.strokeBBox.w + pad * 2));
           const bh = Math.min(this.state.height - by, Math.round(this.strokeBBox.h + pad * 2));
-          const region = { x: bx, y: by, w: bw, h: bh, id: this.nextRegionId++, manual: true };
+          const region = { x: bx, y: by, w: bw, h: bh, id: this.nextRegionId++, manual: true, status: 'idle' };
           region.maskCanvas = this.cropCanvas(this.maskPaintCanvas, bx, by, bw, bh);
           this.state.activeRegions.push(region);
           this.state.selections[region.id] = this.state.baseVariant;
@@ -989,7 +1000,7 @@ export class FaceCycle {
       const w = Math.abs(d.curX - d.startX);
       const h = Math.abs(d.curY - d.startY);
       if (w >= 20 && h >= 20) {
-        const region = { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h), id: this.nextRegionId++, manual: true };
+        const region = { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h), id: this.nextRegionId++, manual: true, status: 'idle' };
         this.state.activeRegions.push(region);
         this.state.selections[region.id] = this.state.baseVariant;
         this.selectedRegionId = region.id;
@@ -1031,9 +1042,19 @@ export class FaceCycle {
   }
 
   cycleRegion(region, dir) {
-    // Click cycles a combined ring: kept generations first, then photo
+    // Preview status: cycle that region's own preview variants.
+    if (region.status === 'preview' && region.preview) {
+      const pv = region.preview;
+      const n = pv.variants.length;
+      if (!n) return;
+      pv.psel = ((pv.psel + dir) % n + n) % n;
+      this.render();
+      this.updateStatusBar();
+      return;
+    }
+    // Kept/idle: click cycles a combined ring of kept generations then photo
     // variants. A region with a single gen still responds to taps (gsel -1 =
-    // variant shown; >= 0 = that gen drawn over the variant).
+    // variant shown; >= 0 = that gen drawn at its exact rect).
     const gens = region.gens?.length ?? 0;
     const n = this.state.images.length;
     const total = gens + n;
@@ -1053,14 +1074,7 @@ export class FaceCycle {
   }
 
   cycleAt(x, y, dir) {
-    const pending = this.pendingStore.current;
-    if (pending && pending.variants.length > 0) {
-      if (x >= pending.x && x <= pending.x + pending.w && y >= pending.y && y <= pending.y + pending.h) {
-        this.pendingStore.cycle(dir);
-        this.updateStatusBar();
-        return;
-      }
-    }
+    // Cycling reads ONLY the region under the pointer — no cross-region effects.
     for (let i = this.state.activeRegions.length - 1; i >= 0; i--) {
       const r = this.state.activeRegions[i];
       if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
@@ -1126,20 +1140,10 @@ export class FaceCycle {
       this.flashRegion(this.state.activeRegions[this.focusedRegion]);
     } else if (e.key === '[' || e.key === 'ArrowLeft') {
       e.preventDefault();
-      if (this.pendingStore.current && this.pendingStore.current.variants.length > 0) {
-        this.pendingStore.cycle(-1);
-        this.updateStatusBar();
-        return;
-      }
       const r = this.state.activeRegions[this.focusedRegion];
       if (r) this.cycleRegion(r, -1);
     } else if (e.key === ']' || e.key === 'ArrowRight') {
       e.preventDefault();
-      if (this.pendingStore.current && this.pendingStore.current.variants.length > 0) {
-        this.pendingStore.cycle(1);
-        this.updateStatusBar();
-        return;
-      }
       const r = this.state.activeRegions[this.focusedRegion];
       if (r) this.cycleRegion(r, 1);
     }
@@ -1235,7 +1239,7 @@ export class FaceCycle {
       const mode = this.el.faceModeSelect.value;
       if (mode === 'replace') {
         const manualRegions = this.state.activeRegions.filter(r => r.manual);
-        const newAutoRegions = detectedRegions.map(r => ({ ...r, id: this.nextRegionId++, manual: false }));
+        const newAutoRegions = detectedRegions.map(r => ({ ...r, id: this.nextRegionId++, manual: false, status: 'idle' }));
         this.state.activeRegions = [...newAutoRegions, ...manualRegions];
       } else {
         const existing = [...this.state.activeRegions];
@@ -1246,7 +1250,7 @@ export class FaceCycle {
             const drArea = dr.w * dr.h;
             if (drArea > 0 && overlapArea / drArea > 0.5) { overlaps = true; break; }
           }
-          if (!overlaps) existing.push({ ...dr, id: this.nextRegionId++, manual: false });
+          if (!overlaps) existing.push({ ...dr, id: this.nextRegionId++, manual: false, status: 'idle' });
         }
         this.state.activeRegions = existing;
       }
@@ -1515,25 +1519,45 @@ export class FaceCycle {
     return src;
   }
 
-  addPendingVariant(b64) {
-    const img = new Image();
-    img.onload = () => {
-      const p = this.pendingStore.current;
-      if (!p) return;
-      const c = document.createElement('canvas');
-      c.width = this.state.width;
-      c.height = this.state.height;
-      const cctx = c.getContext('2d');
-      if (p.detail) {
-        // Detail-crop response arrived at working res — composite back at the
-        // exact crop rect (preview + Keep both feather at that rect).
-        cctx.drawImage(img, p.detail.cx, p.detail.cy, p.detail.cw, p.detail.ch);
-      } else {
-        cctx.drawImage(img, 0, 0);
-      }
-      this.pendingStore.addVariant(c);
-    };
-    img.src = 'data:image/png;base64,' + b64;
+  // Composite a raw response image into the region's preview variant at the
+  // EXACT crop rect — masked to the painted mask, or feathered at the rect
+  // edges. This canvas (plus rect) is what previews, what Keep stores, what
+  // renders, and what Export paints. No re-projection ever happens.
+  buildPreviewCanvas(img, rect, maskLocal) {
+    const c = document.createElement('canvas');
+    c.width = rect.w; c.height = rect.h;
+    const g = c.getContext('2d');
+    g.drawImage(img, 0, 0, rect.w, rect.h);
+    if (maskLocal) {
+      g.globalCompositeOperation = 'destination-in';
+      g.drawImage(maskLocal, 0, 0);
+      g.globalCompositeOperation = 'source-over';
+    } else {
+      this.featherEdges(g, rect.w, rect.h);
+    }
+    return c;
+  }
+
+  // Feathered alpha at canvas edges (same profile as drawFeatheredSource),
+  // applied in-place via destination-in.
+  featherEdges(g, fw, fh) {
+    const feather = Math.min(18, Math.min(fw, fh) / 3.5);
+    g.globalCompositeOperation = 'destination-in';
+    const grad = g.createLinearGradient(0, 0, fw, 0);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(Math.min(0.3, feather / fw), 'rgba(0,0,0,1)');
+    grad.addColorStop(Math.max(0.7, 1 - feather / fw), 'rgba(0,0,0,1)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, fw, fh);
+    const gradV = g.createLinearGradient(0, 0, 0, fh);
+    gradV.addColorStop(0, 'rgba(0,0,0,0)');
+    gradV.addColorStop(Math.min(0.3, feather / fh), 'rgba(0,0,0,1)');
+    gradV.addColorStop(Math.max(0.7, 1 - feather / fh), 'rgba(0,0,0,1)');
+    gradV.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = gradV;
+    g.fillRect(0, 0, fw, fh);
+    g.globalCompositeOperation = 'source-over';
   }
 
   scanPaintBBox() {
@@ -1574,13 +1598,15 @@ export class FaceCycle {
   async generateRepaint() {
     if (!this.state.images.length) { alert('Load images first.'); return; }
     this.finalizeMaskEdit(); // bake any in-progress mask edit before priority scan
-    // Source priority: selected box → in-progress painted mask → last painted-mask region.
+    // Source priority: selected box → in-progress painted mask → last
+    // painted-mask region. Every generation lands on a region — if none exists
+    // yet, its region is created NOW (single source of truth).
+    let region = this.state.activeRegions.find(r => r.id === this.selectedRegionId);
     let win = null;
     let maskCropped = null;
-    const selRegion = this.state.activeRegions.find(r => r.id === this.selectedRegionId);
-    if (selRegion) {
-      win = { x: Math.round(selRegion.x), y: Math.round(selRegion.y), w: Math.round(selRegion.w), h: Math.round(selRegion.h) };
-      if (selRegion.maskCanvas) maskCropped = selRegion.maskCanvas;
+    if (region) {
+      win = { x: Math.round(region.x), y: Math.round(region.y), w: Math.round(region.w), h: Math.round(region.h) };
+      if (region.maskCanvas) maskCropped = region.maskCanvas;
     } else {
       const bbox = this.drawMaskMode ? this.scanPaintBBox() : null;
       if (bbox) {
@@ -1590,6 +1616,7 @@ export class FaceCycle {
         for (let i = this.state.activeRegions.length - 1; i >= 0; i--) {
           const r = this.state.activeRegions[i];
           if (r.maskCanvas) {
+            region = r;
             win = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.w), h: Math.round(r.h) };
             maskCropped = r.maskCanvas;
             break;
@@ -1601,6 +1628,17 @@ export class FaceCycle {
       this.jobs.note('Draw a box (B) or paint a mask (M) to generate');
       return;
     }
+    if (!region) {
+      region = { x: win.x, y: win.y, w: win.w, h: win.h, id: this.nextRegionId++, manual: true, status: 'idle' };
+      this.state.activeRegions.push(region);
+      this.state.selections[region.id] = this.state.baseVariant;
+      this.selectedRegionId = region.id;
+      this.el.exportBtn.disabled = false;
+    }
+    if (region.status === 'generating') return; // one live generation per region
+    if (region.status === 'preview') { region.preview = null; region.status = region.gens?.length ? 'kept' : 'idle'; }
+    region.maskCanvas ??= maskCropped ?? null;
+
     const prompt = this.el.repaintPromptInput.value.trim(); // may be empty — conditioning from context only
     const denoise = parseFloat(this.el.denoiseSlider.value);
     const variantCount = parseInt(this.el.variantCountSelect.value) || 1;
@@ -1621,11 +1659,11 @@ export class FaceCycle {
       seeds.push(randomize ? Math.floor(Math.random() * 2 ** 31) : baseSeed + i);
     }
 
-    // Generate always replaces any pending preview; drawing/deleting boxes never touches it.
-    // Unified pipeline (2026-10-07d): both modes crop to bbox + ~32% context ring,
-    // inpaint at working res, scale the result back to the exact crop rect.
-    // Detail crop ON adds a fixed 1.5× enlargement (longest side clamped to 2048);
-    // OFF works at native crop size. No multiplier control.
+    // Region-status transition: region enters 'generating' with its own preview
+    // shell. Unified pipeline (2026-10-07d): crop to bbox + ~32% context ring,
+    // inpaint at working res, result composited back at the exact crop rect.
+    // Detail crop ON adds a fixed 1.5× enlargement (longest side clamped to
+    // 2048); OFF works at native crop size. No multiplier control.
     const useDetail = this.el.detailCrop.checked;
     const pct = 0.32;
     const pad = Math.round(pct * Math.max(win.w, win.h));
@@ -1649,39 +1687,51 @@ export class FaceCycle {
     smc.fillStyle = '#000000';
     smc.fillRect(0, 0, cw2, ch2);
     // maskFull is in full-image coords: copy the win rect out of it, place at
-    // the scaled crop offset. (Fix: source rect must be the win rect in
-    // maskFull — reading scaled coords from the full-size mask sent a
-    // misplaced/empty mask, so the server had nothing to inpaint and the
-    // preview looked identical to the input.)
+    // the scaled crop offset.
     smc.drawImage(maskFull, win.x, win.y, win.w, win.h,
                   (win.x - cx) * scale, (win.y - cy) * scale, win.w * scale, win.h * scale);
 
-    // Pending-preview mask in LOCAL crop coords (drawMaskedSource expects a
-    // mask canvas local to the pending rect — a full-size mask composited to
-    // invisibility at preview time).
-    const pendingMaskLocal = document.createElement('canvas');
-    pendingMaskLocal.width = cw; pendingMaskLocal.height = ch;
-    pendingMaskLocal.getContext('2d').drawImage(maskFull, -cx, -cy);
+    // Preview/kept mask in LOCAL crop coords (rect-sized, like the composited result).
+    const maskLocal = document.createElement('canvas');
+    maskLocal.width = cw; maskLocal.height = ch;
+    maskLocal.getContext('2d').drawImage(maskFull, -cx, -cy);
 
     const image_b64 = sendImg.toDataURL('image/png').split(',')[1];
     const mask_b64 = sendMask.toDataURL('image/png').split(',')[1];
-    const detail = { cx, cy, cw, ch, cw2, ch2 };
     this.lastRunInfo = `${useDetail ? 'detail crop · enlarged 1.5×' : 'full native'} · ring ${Math.round(pct * 100)}%${prompt ? '' : ' · no prompt'}`;
 
-    this.pendingStore.begin({ x: cx, y: cy, w: cw, h: ch }, { maskCanvas: pendingMaskLocal, variantCount, srcWin: win });
-    this.stack.pending.detail = detail;
-    this.stack.pending.regionId = selRegion ? selRegion.id : null;
+    const rect = { x: cx, y: cy, w: cw, h: ch };
+    region.preview = { variants: [], psel: -1, rect, maskCanvas: maskLocal, outstanding: variantCount };
+    region.status = 'generating';
 
     this.el.generateBtn.disabled = true;
     this.el.generateBtn.textContent = '⏳ 0/' + variantCount;
     this.updateStatusBar();
+    this.render();
 
     const jobId = this.jobs.start('repaint', variantCount);
     const done = () => {
-      const p = this.pendingStore.current;
-      if (p) p.generating = Math.max(0, (p.generating || 0) - 1);
-      this.el.generateBtn.textContent = `⏳ ${variantCount - (p ? p.generating : 0)}/${variantCount}`;
+      const pv = region.preview;
+      if (pv) pv.outstanding = Math.max(0, (pv.outstanding || 0) - 1);
+      this.el.generateBtn.textContent = `⏳ ${variantCount - (pv ? pv.outstanding : variantCount)}/${variantCount}`;
       this.jobs.progress(jobId);
+    };
+
+    // Response attaches to THIS region only — structurally incapable of
+    // touching any other region's state.
+    const attachPreview = (b64) => {
+      const img = new Image();
+      img.onload = () => {
+        const pv = region.preview;
+        if (!pv) return; // discarded/replaced mid-flight; drop it
+        const c = this.buildPreviewCanvas(img, pv.rect, pv.maskCanvas);
+        pv.variants.push(c);
+        pv.psel = pv.variants.length - 1;
+        region.status = 'preview';
+        this.updateStatusBar();
+        this.render();
+      };
+      img.src = 'data:image/png;base64,' + b64;
     };
 
     const jobs = [];
@@ -1696,7 +1746,7 @@ export class FaceCycle {
           const body = await r.json();
           if (!r.ok) throw new Error(body.detail || body.error || ('HTTP ' + r.status));
           done();
-          this.addPendingVariant(body.image_b64);
+          attachPreview(body.image_b64);
         }).catch(err => {
           console.error('Repaint failed (seed ' + seed + '):', err);
           done();
@@ -1706,8 +1756,13 @@ export class FaceCycle {
       );
     }
     await Promise.allSettled(jobs);
-    const p = this.pendingStore.current;
-    if (p) p.generating = 0;
+    const pv = region.preview;
+    if (pv) pv.outstanding = 0;
+    if (pv && !pv.variants.length) {
+      // all responses failed: fall back to previous status
+      region.status = region.gens?.length ? 'kept' : 'idle';
+      region.preview = null;
+    }
     this.jobs.finish(jobId);
     this.el.generateBtn.disabled = false;
     this.el.generateBtn.textContent = '⚡ Generate';
@@ -1715,87 +1770,88 @@ export class FaceCycle {
     this.render();
   }
 
-  // Composite a raw response variant into a self-contained generation canvas:
-  // clipped to the mask shape, or feathered at the rect edges. What Keep stores.
-  buildGenerationCanvas(variantCanvas, p) {
-    const c = document.createElement('canvas');
-    c.width = this.state.width;
-    c.height = this.state.height;
-    const g = c.getContext('2d');
-    const rect = p.detail
-      ? { x: p.detail.cx, y: p.detail.cy, w: p.detail.cw, h: p.detail.ch }
-      : { x: 0, y: 0, w: this.state.width, h: this.state.height };
-    if (p.detail) g.drawImage(variantCanvas, rect.x, rect.y, rect.w, rect.h);
-    else g.drawImage(variantCanvas, 0, 0);
-    if (p.maskCanvas) {
-      const tmp = document.createElement('canvas');
-      tmp.width = rect.w; tmp.height = rect.h;
-      const t = tmp.getContext('2d');
-      t.drawImage(c, -rect.x, -rect.y);
-      t.globalCompositeOperation = 'destination-in';
-      t.drawImage(p.maskCanvas, 0, 0);
-      g.clearRect(rect.x, rect.y, rect.w, rect.h);
-      g.drawImage(tmp, rect.x, rect.y);
-    } else if (p.detail) {
-      const scratch = document.createElement('canvas');
-      scratch.width = this.state.width;
-      scratch.height = this.state.height;
-      drawFeatheredSource(scratch.getContext('2d'), c, rect);
-      g.clearRect(rect.x, rect.y, rect.w, rect.h);
-      g.drawImage(scratch, 0, 0);
-    }
-    return c;
-  }
-
+  // Keep: region transition preview → kept. The EXACT previewed canvas and its
+  // rect are stored 1:1 — no re-projection through bbox math. What the preview
+  // showed is what renders and what Export paints.
   commitPending() {
-    const p = this.pendingStore.current;
-    if (!p || p.vsel < 0) { alert('No preview to keep — Generate first.'); return; }
-    let region = this.state.activeRegions.find(r => r.id === p.regionId);
-    if (!region) {
-      // Generated from an in-progress mask with no region yet — create its box control.
-      region = { x: p.srcWin?.x ?? p.x, y: p.srcWin?.y ?? p.y, w: p.srcWin?.w ?? p.w, h: p.srcWin?.h ?? p.h, id: this.nextRegionId++, manual: true };
-      this.state.activeRegions.push(region);
-      this.state.selections[region.id] = this.state.baseVariant;
+    const region = this.state.activeRegions.find(r => r.id === this.selectedRegionId);
+    if (!region || region.status !== 'preview' || !region.preview || region.preview.psel < 0) {
+      alert('No preview to keep — Generate first.');
+      return;
     }
+    const pv = region.preview;
     region.gens ??= [];
-    region.gens.push(this.buildGenerationCanvas(p.variants[p.vsel], p));
+    const entry = {
+      type: 'keep', region,
+      before: { status: region.status, gens: region.gens.slice(), gsel: region.gsel ?? -1 },
+      after: null, // filled below
+    };
+    region.gens.push({ canvas: pv.variants[pv.psel], rect: { ...pv.rect } });
     region.gsel = region.gens.length - 1;
-    this.undoLog.push({ type: 'keep', regionId: region.id });
-    this.pendingStore.discard(); // preview is now region state
-    this.selectedRegionId = region.id;
+    region.status = 'kept';
+    region.preview = null; // preview consumed: the kept gen now carries it
+    // Stash the kept variant so Undo can restore the exact preview transition.
+    entry.after = { status: region.status, gens: region.gens.slice(), gsel: region.gsel };
+    entry.keptVariant = pv.variants[pv.psel];
+    entry.keptRect = { ...pv.rect };
+    entry.keptMask = pv.maskCanvas;
+    this.undoLog.push(entry);
     this.el.exportBtn.disabled = false;
     this.render();
     this.updateStatusBar();
   }
 
   discardAction() {
-    const p = this.pendingStore.current;
-    if (p) { this.pendingStore.discard(); this.render(); this.updateStatusBar(); return; }
-    // No pending: discard the selected region's current generation (undoable).
     const region = this.state.activeRegions.find(r => r.id === this.selectedRegionId);
-    if (region?.gens?.length) {
+    if (!region) return;
+    if (region.status === 'preview') {
+      // Discard the preview: back to previous status (kept w/ prior gen, or idle).
+      region.preview = null;
+      region.status = region.gens?.length ? 'kept' : 'idle';
+      this.render();
+      this.updateStatusBar();
+      return;
+    }
+    // No preview: discard the selected region's current kept generation (undoable).
+    if (region.gens?.length) {
       const idx = (region.gsel ?? -1) >= 0 ? region.gsel : region.gens.length - 1;
       const [gen] = region.gens.splice(idx, 1);
-      this.undoLog.push({ type: 'discard', regionId: region.id, index: idx, gen });
+      this.undoLog.push({
+        type: 'discard', region,
+        before: { status: 'kept', gens: [...region.gens.slice(0, idx), gen, ...region.gens.slice(idx)], gsel: region.gsel ?? -1 },
+        after: { status: region.gens.length ? 'kept' : 'idle', gens: region.gens.slice(), gsel: Math.min(idx, region.gens.length - 1) },
+        removedIndex: idx,
+        removedGen: gen,
+      });
       region.gsel = Math.min(idx, region.gens.length - 1);
       if (!region.gens.length) delete region.gsel;
+      if (!region.gens.length) region.status = 'idle';
       this.render();
       this.updateStatusBar();
     }
   }
 
   undo() {
+    // Global stack of { region, before, after } status transitions.
     const entry = this.undoLog.pop();
     if (!entry) return;
-    const region = this.state.activeRegions.find(r => r.id === entry.regionId);
-    if (entry.type === 'keep' && region) {
-      region.gens.pop();
-      region.gsel = region.gens.length ? region.gens.length - 1 : -1;
-      if (!region.gens.length) delete region.gsel;
-    } else if (entry.type === 'discard' && region) {
-      region.gens ??= [];
-      region.gens.splice(entry.index, 0, entry.gen);
-      region.gsel = entry.index;
+    const region = entry.region;
+    if (!this.state.activeRegions.includes(region)) return; // region deleted
+    const b = entry.before;
+    region.gens = b.gens.slice();
+    if (b.gsel >= 0) region.gsel = b.gsel; else delete region.gsel;
+    if (entry.type === 'keep') {
+      // Reverse the transition: back to preview with the exact kept variant.
+      if (entry.keptVariant) {
+        region.preview = { variants: [entry.keptVariant], psel: 0, rect: entry.keptRect, maskCanvas: entry.keptMask ?? null, outstanding: 0 };
+        region.status = 'preview';
+      } else {
+        region.preview = null;
+        region.status = region.gens.length ? 'kept' : 'idle';
+      }
+    } else if (entry.type === 'discard') {
+      region.preview = null;
+      region.status = region.gens.length ? 'kept' : 'idle';
     }
     this.render();
     this.updateStatusBar();
@@ -1817,17 +1873,20 @@ export class FaceCycle {
       wrap.className = 'gen-thumb' + (i === (region.gsel ?? 0) ? ' current' : '');
       const th = document.createElement('canvas');
       th.width = 64; th.height = 48;
-      th.getContext('2d').drawImage(gen, 0, 0, 64, 48);
+      th.getContext('2d').drawImage(gen.canvas, 0, 0, 64, 48);
       wrap.appendChild(th);
       const del = document.createElement('button');
       del.className = 'gen-del';
       del.textContent = '×';
       del.addEventListener('click', ev => {
         ev.stopPropagation();
-        const [g] = region.gens.splice(i, 1);
-        this.undoLog.push({ type: 'discard', regionId: region.id, index: i, gen: g });
+        const before = { status: region.status, gens: region.gens.slice(), gsel: region.gsel ?? -1 };
+        region.gens.splice(i, 1);
         region.gsel = Math.min(i, region.gens.length - 1);
-        if (!region.gens.length) delete region.gsel;
+        if (!region.gens.length) { delete region.gsel; region.status = 'idle'; }
+        this.undoLog.push({ type: 'discard', region,
+          before,
+          after: { status: region.status, gens: region.gens.slice(), gsel: region.gsel ?? -1 } });
         this.render();
         this.updateStatusBar();
       });
@@ -1852,7 +1911,7 @@ export class FaceCycle {
     const baseV = this.state.baseVariant;
     ectx.putImageData(this.state.images[baseV].processedData, 0, 0);
     if (this.stack.editLayer) ectx.drawImage(this.stack.editLayer, 0, 0);
-    this.drawRegionState(ectx, {});
+    this.drawRegionState(ectx, { exporting: true });
     exp.toBlob(blob => {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
