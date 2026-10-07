@@ -1721,8 +1721,14 @@ export class FaceCycle {
     // touching any other region's state.
     const attachPreview = (b64) => {
       const img = new Image();
+      // Decode accounting: fetch resolution ≠ decode completion. The tail
+      // below runs after allSettled while Image decodes may still be pending;
+      // it must not reset a region whose results are still decoding.
+      const pv0 = region.preview;
+      if (pv0) pv0.decoding = (pv0.decoding || 0) + 1;
       img.onload = () => {
         const pv = region.preview;
+        if (pv) pv.decoding = Math.max(0, (pv.decoding || 0) - 1);
         if (!pv) return; // discarded/replaced mid-flight; drop it
         const c = this.buildPreviewCanvas(img, pv.rect, pv.maskCanvas);
         pv.variants.push(c);
@@ -1730,6 +1736,10 @@ export class FaceCycle {
         region.status = 'preview';
         this.updateStatusBar();
         this.render();
+      };
+      img.onerror = () => {
+        const pv = region.preview;
+        if (pv) pv.decoding = Math.max(0, (pv.decoding || 0) - 1);
       };
       img.src = 'data:image/png;base64,' + b64;
     };
@@ -1758,8 +1768,9 @@ export class FaceCycle {
     await Promise.allSettled(jobs);
     const pv = region.preview;
     if (pv) pv.outstanding = 0;
-    if (pv && !pv.variants.length) {
-      // all responses failed: fall back to previous status
+    if (pv && !pv.variants.length && !(pv.decoding > 0)) {
+      // All responses failed AND nothing is still decoding: fall back to
+      // previous status. (If decodes are pending, onload/onerror settles them.)
       region.status = region.gens?.length ? 'kept' : 'idle';
       region.preview = null;
     }

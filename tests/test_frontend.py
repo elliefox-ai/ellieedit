@@ -27,7 +27,7 @@ def test_js_operator_sequence():
 
 
 def test_no_global_pending_preview():
-    """Region-status refactor (2026-10-07g): the global pending preview store is
+    """Region-status refactor (2026-10-07h): the global pending preview store is
     deleted. Generation lifecycle lives on state.activeRegions[].status only."""
     assert not (HERE.parent / "frontend" / "js" / "components" / "pending.js").exists(), \
         "pending.js (global pending store) must be deleted"

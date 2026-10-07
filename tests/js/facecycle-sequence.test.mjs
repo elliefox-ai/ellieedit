@@ -1,4 +1,4 @@
-// Operator-sequence regression — region-status model (2026-10-07g):
+// Operator-sequence regression — region-status model (2026-10-07h):
 //   tap A → generate → Keep → tap B → generate → Keep, then assert:
 //   #A: A's kept gen survives B's generate/Keep (structurally: per-region state)
 //   #B: B's kept gen == the EXACT preview canvas/geometry (1:1, no re-projection)
