@@ -30,6 +30,7 @@ export class CanvasStack {
     this.canvas.style.boxShadow = '0 4px 20px rgba(0,0,0,0.5)';
     this.canvas.style.display = 'block';
     this.ctx = this.canvas.getContext('2d', { desynchronized: true });
+    this.wrap.appendChild(this.canvas);
 
     this.overlayCanvas = document.createElement('canvas');
     this.overlayCanvas.style.position = 'absolute';
