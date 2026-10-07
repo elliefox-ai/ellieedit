@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>EllieEdit</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #0f0f1a;
+    color: #d4d4e0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #tabbar {
+    display: flex;
+    background: #161628;
+    border-bottom: 1px solid #2a2a44;
+    padding: 6px 10px 0;
+    gap: 4px;
+    flex-shrink: 0;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border: 1px solid #2a2a44;
+    border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    background: #1d1d33;
+    color: #8a8aaa;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .tab.active { background: #0f0f1a; color: #e0e0f0; border-color: #4a4a6c; }
+  .tab .icon { font-size: 15px; }
+  #module-host { flex: 1; min-height: 0; position: relative; }
+  .module-panel { position: absolute; inset: 0; display: none; flex-direction: column; }
+  .module-panel.active { display: flex; }
+  #jobbar {
+    flex-shrink: 0;
+    min-height: 24px;
+    background: #12121f;
+    border-top: 1px solid #2a2a44;
+    font-size: 11px;
+    color: #8a8aaa;
+    padding: 3px 12px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  #jobbar .badge {
+    background: #2a2a44;
+    padding: 2px 8px;
+    border-radius: 10px;
+    color: #b0b0d0;
+  }
+  #jobbar .badge.err { color: #e87a7a; }
+  #jobbar .badge.ok { color: #7de08a; }
+  /* Shared button style available to modules */
+  .ee-btn {
+    background: #3a3a5c; color: #d4d4e0; border: 1px solid #4a4a6c;
+    padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;
+  }
+  .ee-btn:hover:not(:disabled) { background: #4a4a6c; }
+  .ee-btn:disabled { opacity: 0.4; cursor: default; }
+  .ee-btn.primary { background: #5b4a8a; border-color: #7a6aaa; color: #fff; }
+</style>
+</head>
+<body>
+<nav id="tabbar" aria-label="Modules"></nav>
+<main id="module-host"></main>
+<footer id="jobbar"></footer>
+<script type="module" src="/js/shell.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.register('/sw.js').catch(() => {}));
+  }
+</script>
+</body>
+</html>
