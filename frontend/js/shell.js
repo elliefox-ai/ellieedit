@@ -10,8 +10,6 @@ const BUILD = '2026-10-07b';
 const registry = [];
 const mounted = new Map(); // name -> { panelEl }
 
-// Build marker: visible proof of which client build is loaded (bumped with sw.js CACHE).
-const BUILD = 'v2-20261007b';
 
 export function registerModule(desc) {
   registry.push(desc);
@@ -21,12 +19,6 @@ export function registerModule(desc) {
 const tabbar = document.getElementById('tabbar');
 const host = document.getElementById('module-host');
 const jobbar = document.getElementById('jobbar');
-
-// Deployed-build marker: first thing in the job bar.
-const buildBadge = document.createElement('span');
-buildBadge.className = 'badge';
-buildBadge.textContent = `build ${BUILD}`;
-jobbar.appendChild(buildBadge);
 
 function activate(name) {
   for (const { name: n } of registry) {
