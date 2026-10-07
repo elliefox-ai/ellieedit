@@ -96,7 +96,6 @@ function panelHTML() {
       <span class="seed-echo" data-id="seed-echo" title="Click to adopt this seed (turns randomize off)"></span>
       <label><input type="checkbox" data-id="detail-crop" checked> Detail crop</label>
       <label>Variants <select data-id="variant-count"><option value="1" selected>1</option><option value="2">2</option><option value="4">4</option></select></label>
-      <label>Res <select data-id="work-res"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option></select></label>
       <button class="ee-btn primary" data-act="generate">⚡ Generate</button>
       <button class="ee-btn" data-act="keep">✓ Keep</button>
       <button class="ee-btn" data-act="discard">✕ Discard</button>
@@ -135,7 +134,7 @@ export class FaceCycle {
       faceModeSelect: $('face-mode'), repaintPromptInput: $('repaint-prompt'),
       denoiseSlider: $('denoise'), denoiseVal: $('denoise-val'), seedInput: $('seed-input'),
       randomizeSeed: $('randomize-seed'), detailCrop: $('detail-crop'), seedEcho: $('seed-echo'),
-      variantCountSelect: $('variant-count'), workRes: $('work-res'), genStrip: $('gen-strip'),
+      variantCountSelect: $('variant-count'), genStrip: $('gen-strip'),
       generateBtn: act('generate'),
       keepBtn: act('keep'), discardBtn: act('discard'), undoBtn: act('undo'),
       layerToggleBtn: act('layer-toggle'),
@@ -531,11 +530,16 @@ export class FaceCycle {
       ? ` <span class="badge" style="color:#7de08a">gen ${(this.state.activeRegions.find(r => r.id === this.selectedRegionId).gsel ?? 0) + 1}/${selGens} — [/] cycles</span>`
       : '';
 
+    // Diagnostic: make the pending preview layer unambiguous on-screen — if this
+    // shows dims but the box looks unchanged, the preview layer exists and the
+    // composite (not the transport) is the problem.
+    const pv = pending && pending.vsel >= 0 ? pending.variants[pending.vsel] : null;
+    const previewDiag = pv ? ` · preview ${pv.width}×${pv.height}px @ (${pending.x},${pending.y}) ${pending.w}×${pending.h}` : '';
     const pendingBadge = pending
       ? ' <span class="badge" style="color:#7de08a">Preview: ' +
         (pending.vsel >= 0
           ? (pending.vsel + 1) + '/' + pending.variants.length + ' — Keep or Discard'
-          : 'generating… ' + pending.generating + ' left') + '</span>'
+          : 'generating… ' + pending.generating + ' left') + previewDiag + '</span>'
       : '';
 
     const selRegion = this.state.activeRegions.find(r => r.id === this.selectedRegionId);
@@ -1613,64 +1617,53 @@ export class FaceCycle {
     }
 
     // Generate always replaces any pending preview; drawing/deleting boxes never touches it.
+    // Unified pipeline (2026-10-07d): both modes crop to bbox + ~32% context ring,
+    // inpaint at working res, scale the result back to the exact crop rect.
+    // Detail crop ON adds a fixed 1.5× enlargement (longest side clamped to 2048);
+    // OFF works at native crop size. No multiplier control.
     const useDetail = this.el.detailCrop.checked;
-    let pendingWin = win;
-    let pendingMaskLocal = null;
-    let detail = null;
-    let image_b64, mask_b64;
-    if (useDetail) {
-      // Detail crop: bbox + ~32% context ring → working res (long side 1024,
-      // even dims) → inpaint there → composite back at the exact crop rect.
-      const pct = 0.32;
-      const pad = Math.round(pct * Math.max(win.w, win.h));
-      const cx = Math.max(0, win.x - pad);
-      const cy = Math.max(0, win.y - pad);
-      const cw = Math.min(this.state.width, win.x + win.w + pad) - cx;
-      const ch = Math.min(this.state.height, win.y + win.h + pad) - cy;
-      const mult = parseFloat(this.el.workRes.value) || 1;
-      const target = Math.max(1024, Math.min(2048, Math.round(Math.max(cw, ch) * mult)));
-      const scale = target / Math.max(cw, ch);
-      const even = n => Math.max(2, Math.floor(n / 2) * 2);
-      const cw2 = even(cw * scale), ch2 = even(ch * scale);
+    const pct = 0.32;
+    const pad = Math.round(pct * Math.max(win.w, win.h));
+    const cx = Math.max(0, win.x - pad);
+    const cy = Math.max(0, win.y - pad);
+    const cw = Math.min(this.state.width, win.x + win.w + pad) - cx;
+    const ch = Math.min(this.state.height, win.y + win.h + pad) - cy;
+    const target = useDetail ? Math.min(2048, Math.round(Math.max(cw, ch) * 1.5)) : Math.max(cw, ch);
+    const scale = target / Math.max(cw, ch);
+    const even = n => Math.max(2, Math.floor(n / 2) * 2);
+    const cw2 = even(cw * scale), ch2 = even(ch * scale);
 
-      const sendImg = document.createElement('canvas');
-      sendImg.width = cw2; sendImg.height = ch2;
-      sendImg.getContext('2d').drawImage(this.currentSourceCanvas(), cx, cy, cw, ch, 0, 0, cw2, ch2);
+    const sendImg = document.createElement('canvas');
+    sendImg.width = cw2; sendImg.height = ch2;
+    sendImg.getContext('2d').drawImage(this.currentSourceCanvas(), cx, cy, cw, ch, 0, 0, cw2, ch2);
 
-      const maskFull = maskCropped ? this.buildFullSizeMask(maskCropped, win.x, win.y) : this.boxMaskCanvas(win);
-      const sendMask = document.createElement('canvas');
-      sendMask.width = cw2; sendMask.height = ch2;
-      const smc = sendMask.getContext('2d');
-      smc.fillStyle = '#000000';
-      smc.fillRect(0, 0, cw2, ch2);
-      smc.drawImage(maskFull, (win.x - cx) * scale, (win.y - cy) * scale, win.w * scale, win.h * scale,
-                    (win.x - cx) * scale, (win.y - cy) * scale, win.w * scale, win.h * scale);
+    const maskFull = maskCropped ? this.buildFullSizeMask(maskCropped, win.x, win.y) : this.boxMaskCanvas(win);
+    const sendMask = document.createElement('canvas');
+    sendMask.width = cw2; sendMask.height = ch2;
+    const smc = sendMask.getContext('2d');
+    smc.fillStyle = '#000000';
+    smc.fillRect(0, 0, cw2, ch2);
+    // maskFull is in full-image coords: copy the win rect out of it, place at
+    // the scaled crop offset. (Fix: source rect must be the win rect in
+    // maskFull — reading scaled coords from the full-size mask sent a
+    // misplaced/empty mask, so the server had nothing to inpaint and the
+    // preview looked identical to the input.)
+    smc.drawImage(maskFull, win.x, win.y, win.w, win.h,
+                  (win.x - cx) * scale, (win.y - cy) * scale, win.w * scale, win.h * scale);
 
-      // Preview mask in native crop coords (for mask-shaped pending preview)
-      pendingMaskLocal = document.createElement('canvas');
-      pendingMaskLocal.width = cw; pendingMaskLocal.height = ch;
-      const pmc = pendingMaskLocal.getContext('2d');
-      pmc.drawImage(maskFull, -cx, -cy);
+    // Pending-preview mask in LOCAL crop coords (drawMaskedSource expects a
+    // mask canvas local to the pending rect — a full-size mask composited to
+    // invisibility at preview time).
+    const pendingMaskLocal = document.createElement('canvas');
+    pendingMaskLocal.width = cw; pendingMaskLocal.height = ch;
+    pendingMaskLocal.getContext('2d').drawImage(maskFull, -cx, -cy);
 
-      image_b64 = sendImg.toDataURL('image/png').split(',')[1];
-      mask_b64 = sendMask.toDataURL('image/png').split(',')[1];
-      pendingWin = { x: cx, y: cy, w: cw, h: ch };
-      detail = { cx, cy, cw, ch, cw2, ch2 };
-      this.lastRunInfo = `detail crop ${cw2}×${ch2} @ ${mult}× · ring ${Math.round(pct * 100)}%${prompt ? '' : ' · no prompt'}`;
-    } else {
-      // Legacy full-image behavior.
-      image_b64 = this.currentSourceCanvas().toDataURL('image/png').split(',')[1];
-      mask_b64 = (maskCropped
-        ? this.buildFullSizeMask(maskCropped, win.x, win.y)
-        : this.boxMaskCanvas(win)
-      ).toDataURL('image/png').split(',')[1];
-      pendingMaskLocal = maskCropped
-        ? (() => { const c = document.createElement('canvas'); c.width = this.state.width; c.height = this.state.height; c.getContext('2d').drawImage(maskCropped, win.x, win.y); return c; })()
-        : null;
-      this.lastRunInfo = `full-image${prompt ? '' : ' · no prompt'}`;
-    }
+    const image_b64 = sendImg.toDataURL('image/png').split(',')[1];
+    const mask_b64 = sendMask.toDataURL('image/png').split(',')[1];
+    const detail = { cx, cy, cw, ch, cw2, ch2 };
+    this.lastRunInfo = `${useDetail ? 'detail crop · enlarged 1.5×' : 'full native'} · ring ${Math.round(pct * 100)}%${prompt ? '' : ' · no prompt'}`;
 
-    this.pendingStore.begin(pendingWin, { maskCanvas: pendingMaskLocal, variantCount });
+    this.pendingStore.begin({ x: cx, y: cy, w: cw, h: ch }, { maskCanvas: pendingMaskLocal, variantCount, srcWin: win });
     this.stack.pending.detail = detail;
     this.stack.pending.regionId = selRegion ? selRegion.id : null;
 
@@ -1758,7 +1751,7 @@ export class FaceCycle {
     let region = this.state.activeRegions.find(r => r.id === p.regionId);
     if (!region) {
       // Generated from an in-progress mask with no region yet — create its box control.
-      region = { x: p.x, y: p.y, w: p.w, h: p.h, id: this.nextRegionId++, manual: true };
+      region = { x: p.srcWin?.x ?? p.x, y: p.srcWin?.y ?? p.y, w: p.srcWin?.w ?? p.w, h: p.srcWin?.h ?? p.h, id: this.nextRegionId++, manual: true };
       this.state.activeRegions.push(region);
       this.state.selections[region.id] = this.state.baseVariant;
     }

@@ -16,7 +16,7 @@ function fakeCtx() {
       if (p === 'measureText') return () => ({ width: 10 });
       if (p === 'getImageData') return (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h });
       if (p === 'drawImage' || p === 'putImageData') {
-        return (...a) => { (t2._calls ??= []).push([p, a[0]]); };
+        return (...a) => { (t2._calls ??= []).push([p, ...a]); };
       }
       if (!(p in t2)) t2[p] = () => {};
       return t2[p];
@@ -38,6 +38,7 @@ function fakeEl(tag = 'div') {
     addEventListener() {}, removeEventListener() {},
     setPointerCapture() {}, releasePointerCapture() {},
     getContext: () => fakeCtx(),
+    toDataURL: () => 'data:image/png;base64,AAAA',
     getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
     querySelector: () => fakeEl(),
     querySelectorAll: () => [],
@@ -178,5 +179,53 @@ assert.equal(region.gens.length, 2, 'undo restores discarded generation');
 region.gsel = 0;
 fc.cycleRegion(region, 1);
 assert.equal(region.gsel, 1, 'cycle advances generation selection');
+
+// ── Detail-crop simplification + preview visibility (2026-10-07d) ──
+assert.ok(!('workRes' in fc.el), 'Res dropdown removed from control map');
+
+// Generate → pending preview drawn above base inside the box (visibility
+// regression: the prior build could pass draw-order checks while the preview
+// composited invisible via a full-size mask). Fresh headless flow:
+fc.state.width = 300; fc.state.height = 200;
+fc.state.images = [{ processedData: new ImageData(new Uint8ClampedArray(300 * 200 * 4), 300, 200) }];
+fc.state.baseVariant = 0;
+fc.state.selections = {};
+fc.state.activeRegions = [{ x: 40, y: 40, w: 80, h: 80, id: 996, manual: true }];
+fc.selectedRegionId = 996;
+fc.el.detailCrop.checked = true;
+for (const [k, v] of Object.entries({ repaintPromptInput: { value: '' }, denoiseSlider: { value: '0.5' }, variantCountSelect: { value: '1' }, randomizeSeed: { checked: true }, seedInput: { value: '' }, generateBtn: fakeEl('button'), statusBar: fakeEl('div'), seedEcho: fakeEl('span') })) {
+  if (!fc.el[k] || fc.el[k].value === undefined && !('checked' in v)) fc.el[k] = Object.assign(fakeEl(v._tag || 'input'), v);
+}
+fc.stack.pending = null;
+fc.undoLog.length = 0;
+await fc.generateRepaint();
+const pend = fc.pendingStore.current;
+assert.ok(pend, 'pending preview created');
+assert.equal(pend.variants.length, 1, 'mock endpoint returned a variant');
+assert.ok(pend.vsel >= 0, 'variant selected for preview');
+assert.ok(pend.maskCanvas && pend.maskCanvas.width === pend.w && pend.maskCanvas.height === pend.h,
+  'pending mask is LOCAL to the pending rect (full-size mask composited invisible — root cause)');
+fc.render();
+const calls2 = fc.stack.ctx._calls ?? [];
+const idxBase2 = calls2.findIndex(c => c[0] === 'putImageData');
+// The pending layer composites through a scratch canvas sized to the pending
+// rect and drawn at the pending origin — find that call (the variant itself is
+// an input to the scratch, not a direct stack draw).
+const idxPrev = calls2.findIndex(c => c[0] === 'drawImage' && c[1] && c[1].width === pend.w && c[1].height === pend.h && c[2] === pend.x && c[3] === pend.y);
+assert.ok(idxPrev >= 0, 'pending preview layer drawn onto the stack');
+assert.ok(idxPrev > idxBase2, 'preview drawn above base');
+assert.ok(fc.el.statusBar.innerHTML.includes('preview 300×200px'), 'status line carries preview diagnostics');
+assert.ok(fc.lastRunInfo.includes('enlarged 1.5×'), 'detail-crop status line shows fixed enlargement');
+
+// Unchecked: native crop size — same pipeline, no enlargement.
+fc.el.detailCrop.checked = false;
+fc.pendingStore.discard();
+await fc.generateRepaint();
+const pend2 = fc.pendingStore.current;
+assert.ok(pend2 && pend2.variants.length === 1, 'native-mode variant returned');
+assert.ok(fc.lastRunInfo.includes('full native'), 'native status line');
+fc.render();
+assert.ok((fc.stack.ctx._calls ?? []).some(c => c[0] === 'drawImage' && c[1] && c[1].width === pend2.w && c[1].height === pend2.h && c[2] === pend2.x && c[3] === pend2.y),
+  'native-mode preview layer drawn');
 
 console.log('load-path regression test: PASS');

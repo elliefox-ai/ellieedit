@@ -13,11 +13,12 @@ export class PendingPreview {
     this.keepHistory = []; // edit-layer snapshots (max 10) for Undo of Keep
   }
 
-  begin(win, { maskCanvas = null, variantCount = 1 } = {}) {
+  begin(win, { maskCanvas = null, variantCount = 1, srcWin = null } = {}) {
     this.stack.pending = {
       x: win.x, y: win.y, w: win.w, h: win.h,
       maskCanvas,
       variants: [], vsel: -1, generating: variantCount,
+      srcWin: srcWin || { x: win.x, y: win.y, w: win.w, h: win.h }, // original bbox for region creation on Keep
     };
     this.onChange();
   }
