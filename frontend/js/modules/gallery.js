@@ -26,7 +26,7 @@ function panelHTML() {
     }
     .gal-cell { position: relative; border-radius: 6px; overflow: hidden; cursor: pointer;
       background: #1a1a2e; aspect-ratio: 1; }
-    .gal-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .gal-cell img { width: 100%; height: 100%; object-fit: contain; display: block; }
     .gal-cell .name {
       position: absolute; bottom: 0; left: 0; right: 0; padding: 2px 6px;
       background: rgba(0,0,0,0.6); color: #b0b0d0; font-size: 9px;
