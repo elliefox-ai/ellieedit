@@ -6,6 +6,7 @@
 
 import { registerModule } from '../shell.js';
 import { computeEdgeMap, buildRectMask } from '../edge-stop.js';
+import { ChampionLadder } from '../champion-ladder.js';
 
 function panelHTML() {
   return `
@@ -27,7 +28,7 @@ function panelHTML() {
     }
     .rv-cell { position: relative; border-radius: 6px; overflow: hidden; cursor: pointer;
       background: #1a1a2e; aspect-ratio: 1; border: 2px solid transparent; }
-    .rv-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .rv-cell img { width: 100%; height: 100%; object-fit: contain; display: block; }
     .rv-cell.sel { border-color: #7a7aff; }
     .rv-cell .check {
       position: absolute; top: 4px; right: 4px; width: 22px; height: 22px;
@@ -59,13 +60,23 @@ function panelHTML() {
       border-radius: 50%; width: 30px; height: 30px; line-height: 30px; text-align: center; }
     .rv-mask-box { position: absolute; border: 2px dashed #e8b84d; background: rgba(232,184,77,0.12);
       display: none; pointer-events: none; }
-    .rv-compare { flex: 1; display: none; flex-direction: row; gap: 2px; min-height: 0; }
-    .rv-compare .half { flex: 1; position: relative; display: flex; align-items: center;
+    .rv-compare { flex: 1; display: none; flex-direction: column; min-height: 0; }
+    .rv-duel { flex: 1; display: flex; flex-direction: row; gap: 2px; min-height: 0; }
+    .rv-duel .half { flex: 1; position: relative; display: flex; align-items: center;
       justify-content: center; overflow: hidden; }
-    .rv-compare .half img { max-width: 100%; max-height: 100%; object-fit: contain; }
-    .rv-compare .half .tag { position: absolute; top: 6px; left: 8px; font-size: 11px;
+    .rv-duel .half img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    .rv-duel .half .tag { position: absolute; top: 6px; left: 8px; font-size: 11px;
       color: #b0b0d0; background: rgba(0,0,0,0.5); padding: 2px 8px; border-radius: 4px; }
-    .rv-compare .half .pick { position: absolute; bottom: 10px; }
+    .rv-duel .half.champ { border-right: 1px solid #2a2a44; }
+    .rv-duel .half.champ .tag { color: #e8b84d; font-weight: 600; }
+    .rv-duel .half .pick { position: absolute; bottom: 10px; }
+    .rv-rejected { display: flex; gap: 6px; padding: 6px 10px; overflow-x: auto;
+      background: #101020; border-top: 1px solid #2a2a44; min-height: 54px; align-items: center; }
+    .rv-rejected .rj-cell { flex: 0 0 44px; height: 44px; border-radius: 4px; overflow: hidden;
+      cursor: pointer; background: #1a1a2e; border: 2px solid transparent; position: relative; }
+    .rv-rejected .rj-cell img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .rv-rejected .rj-cell.runner { border-color: #5a5aff; }
+    .rv-rejected .rj-label { font-size: 10px; color: #6c6c8e; flex: 0 0 auto; }
     input.rv-name-in {
       background: #22223a; color: #d4d4e0; border: 1px solid #4a4a6c;
       border-radius: 4px; padding: 4px 8px; font-size: 12px; width: 180px;
@@ -90,15 +101,20 @@ function panelHTML() {
       <button class="ee-btn" data-act="exit">✕ Done</button>
     </div>
     <div class="rv-compare" data-id="compare">
-      <div class="half">
-        <span class="tag">A</span>
-        <img data-id="img-a" alt="">
-        <button class="ee-btn primary pick" data-act="pick-a">Keep A</button>
+      <div class="rv-duel">
+        <div class="half champ">
+          <span class="tag">Champion</span>
+          <img data-id="img-a" alt="">
+          <button class="ee-btn primary pick" data-act="keep-champion">Keep Champion</button>
+        </div>
+        <div class="half">
+          <span class="tag" data-id="challenger-tag">Challenger</span>
+          <img data-id="img-b" alt="">
+          <button class="ee-btn primary pick" data-act="keep-challenger">Keep Challenger</button>
+        </div>
       </div>
-      <div class="half">
-        <span class="tag">B</span>
-        <img data-id="img-b" alt="">
-        <button class="ee-btn primary pick" data-act="pick-b">Keep B</button>
+      <div class="rv-rejected" data-id="rejected">
+        <span class="rj-label" data-id="rejected-label">Rejected — tap to make Blend partner</span>
       </div>
     </div>
     <div class="rv-stage" data-id="stage">
@@ -138,12 +154,14 @@ export class Review {
       useMask: panel.querySelector('[data-id="use-mask"]'),
       saveName: panel.querySelector('[data-id="save-name"]'),
       blendHint: panel.querySelector('[data-id="blend-hint"]'),
+      challengerTag: panel.querySelector('[data-id="challenger-tag"]'),
+      rejected: panel.querySelector('[data-id="rejected"]'),
+      rejectedLabel: panel.querySelector('[data-id="rejected-label"]'),
     };
     this.items = [];
     this.selected = new Map(); // path -> item
-    this.pairs = [];          // compare queue
-    this.pairIdx = 0;
-    this.winners = [];        // paths kept in the compare loop
+    this.ladder = null;       // ChampionLadder state for the compare loop
+    this.ladderSel = [];      // selections the ladder runs over
     this.blendPair = null;    // {a, b, imgA, imgB}
     this.splitFrac = 0.5;
     this.maskRect = null;     // {x,y,w,h} in image coords
@@ -248,55 +266,89 @@ export class Review {
     this.el.blendBtn.disabled = n !== 2;
   }
 
-  // ---- compare loop -----------------------------------------------------
+  // ---- compare loop: champion ladder -----------------------------------
+  // First selection is the CHAMPION (fixed left). Each other selection cycles
+  // through as CHALLENGER (right). Keep Champion discards the challenger;
+  // Keep Challenger promotes it and discards the old champion. The last image
+  // that lost to the champion stays as runner-up so Blend always has two
+  // images; tapping a rejected-strip thumb swaps the Blend partner.
   async startReview() {
-    const sel = [...this.selected.values()];
-    // Queue: every unordered pair (small N is typical for twin sets).
-    this.pairs = [];
-    for (let i = 0; i < sel.length; i++)
-      for (let j = i + 1; j < sel.length; j++)
-        this.pairs.push([sel[i], sel[j]]);
-    this.pairIdx = 0;
-    this.winners = [];
+    this.ladderSel = [...this.selected.values()];
+    this.ladder = new ChampionLadder(this.ladderSel);
     this.showFull('Compare');
     this.showPair();
   }
 
   async showPair() {
-    if (this.pairIdx >= this.pairs.length) {
-      this.finishReview();
-      return;
-    }
-    const [a, b] = this.pairs[this.pairIdx];
+    const l = this.ladder;
+    if (!l) return;
+    if (l.done) { this.finishReview(); return; }
     this.el.phaseLabel.textContent =
-      `Compare ${this.pairIdx + 1}/${this.pairs.length} — ${a.name} vs ${b.name}`;
-    this.el.imgA.src = this.fileUrl(a.path);
-    this.el.imgB.src = this.fileUrl(b.path);
+      `Challenger ${l.k} of ${l.total - 1} — ${l.challenger.name}`;
+    this.el.imgA.src = this.fileUrl(l.champion.path);
+    this.el.imgB.src = this.fileUrl(l.challenger.path);
+    this.el.challengerTag.textContent = `Challenger ${l.k}/${l.total - 1}`;
+    this.renderRejected();
     this.el.compare.style.display = 'flex';
     this.el.stage.style.display = 'none';
   }
 
+  renderRejected() {
+    const l = this.ladder;
+    const cont = this.el.rejected;
+    cont.innerHTML = '';
+    const label = document.createElement('span');
+    label.className = 'rj-label';
+    label.textContent = l.done
+      ? `Final champion: ${l.champion.name}`
+      : 'Rejected — tap to make Blend partner';
+    cont.appendChild(label);
+    for (const r of l.rejected) {
+      const cell = document.createElement('div');
+      cell.className = 'rj-cell' + (l.runnerUp && r.item.path === l.runnerUp.path ? ' runner' : '');
+      cell.title = r.item.name;
+      const img = document.createElement('img');
+      img.src = `/api/gallery/thumb?path=${encodeURIComponent(r.item.path)}`;
+      img.alt = r.item.name;
+      cell.appendChild(img);
+      cell.addEventListener('click', () => {
+        l.setRunnerUp(r.item);
+        this.renderRejected();
+        this.toast(`Blend partner: ${r.item.name}`);
+      });
+      cont.appendChild(cell);
+    }
+  }
+
   pick(which) {
-    if (this.pairIdx >= this.pairs.length) return;
-    const [a, b] = this.pairs[this.pairIdx];
-    const w = which === 'a' ? a : b;
-    if (!this.winners.includes(w.path)) this.winners.push(w.path);
-    this.pairIdx++;
+    const l = this.ladder;
+    if (!l || l.done) return;
+    if (which === 'a') l.keepChampion(); else l.keepChallenger();
     this.showPair();
   }
 
   finishReview() {
+    const l = this.ladder;
+    this.renderRejected();
     this.el.phaseLabel.textContent =
-      `Done — ${this.winners.length} winner${this.winners.length === 1 ? '' : 's'}: ` +
-      this.winners.map(p => p.split('/').pop()).join(', ');
+      `Done — champion: ${l.champion.name}` +
+      (l.runnerUp ? ` · runner-up: ${l.runnerUp.name}` : '');
     this.el.compare.style.display = 'none';
     this.el.stage.style.display = 'none';
   }
 
   // ---- blend -------------------------------------------------------------
+  // Blend the ladder's champion vs runner-up (or the two grid selections if
+  // the ladder hasn't run).
   async startBlend() {
-    const [a, b] = [...this.selected.values()];
-    if (!a || !b) return;
+    let a, b;
+    if (this.ladder && this.ladder.done) {
+      a = this.ladder.champion;
+      b = this.ladder.runnerUp || this.ladder.rejected[0]?.item;
+    } else {
+      [a, b] = [...this.selected.values()];
+    }
+    if (!a || !b) { this.toast('Need two images to blend', true); return; }
     this.blendPair = { a, b };
     this._edgeMap = null; // edge map is per-pair; recompute on new blend
     this.showFull('Blend');
@@ -507,28 +559,28 @@ export class Review {
   bindFull() {
     const act = n => this.panel.querySelector(`[data-act="${n}"]`);
     act('exit').addEventListener('click', () => this.exitFull());
-    act('pick-a').addEventListener('click', () => this.pick('a'));
-    act('pick-b').addEventListener('click', () => this.pick('b'));
+    act('keep-champion').addEventListener('click', () => this.pick('a'));
+    act('keep-challenger').addEventListener('click', () => this.pick('b'));
     act('mode-compare').addEventListener('click', () => {
-      this.el.compare.style.display = 'flex';
-      this.el.stage.style.display = 'none';
+      if (this.ladder) { this.showPair(); return; }
+      this.toast('Select images and start a Review first', true);
     });
     act('mode-blend').addEventListener('click', () => {
-      if (!this.blendPair) {
-        // From compare mode: blend the current pair.
-        const [a, b] = this.pairs[this.pairIdx] || [];
-        if (a && b) {
-          this.selected.set(a.path, a);
-          this.selected.set(b.path, b);
-          this.startBlend();
-          return;
-        }
-        this.toast('Select exactly 2 images to blend', true);
+      if (this.ladder && this.ladder.done) {
+        this.startBlend();
         return;
       }
-      this.el.compare.style.display = 'none';
-      this.el.stage.style.display = 'flex';
-      this.renderBlend();
+      if (this.ladder && !this.ladder.done) {
+        // Mid-ladder: blend the current duel pair.
+        const l = this.ladder;
+        this.selected.set(l.champion.path, l.champion);
+        this.selected.set(l.challenger.path, l.challenger);
+        this.startBlend();
+        return;
+      }
+      const [a, b] = [...this.selected.values()];
+      if (a && b) { this.startBlend(); return; }
+      this.toast('Select exactly 2 images to blend', true);
     });
     this.el.useMask.addEventListener('change', () => this.renderBlend());
     act('save').addEventListener('click', () => this.saveBlend());
