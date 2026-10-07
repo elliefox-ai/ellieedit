@@ -45,7 +45,7 @@ function panelHTML() {
     .fc-status { font-size: 12px; color: #6c6c8e; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
     .fc-status .badge { background: #2a2a44; padding: 2px 8px; border-radius: 10px; font-size: 11px; color: #b0b0d0; }
     .fc-status .help { color: #6c6c8e; }
-    .fc-canvaswrap { flex: 1; display: flex; justify-content: center; align-items: center; overflow: auto; min-height: 0; }
+    .fc-canvas-wrap { flex: 1; display: flex; justify-content: center; align-items: center; overflow: auto; min-height: 0; }
     .fc-thumbs {
       display: flex; gap: 6px; padding: 8px 10px; background: #161628; border-radius: 8px;
       overflow-x: auto; border: 1px solid #2a2a44; transition: border-color .2s, background .2s;
@@ -105,7 +105,7 @@ function panelHTML() {
   </div>
   <div class="fc-main" data-id="main-view">
     <div class="fc-status" data-id="status-bar"></div>
-    <div class="fc-canvaswrap" data-id="canvas-container"></div>
+    <div class="fc-canvas-wrap" data-id="canvas-container"></div>
     <div class="fc-thumbs" data-id="thumbnail-strip"></div>
   </div>`;
 }

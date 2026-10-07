@@ -37,7 +37,7 @@ export class CanvasStack {
     this.overlayCanvas.style.pointerEvents = 'none';
     this.overlayCanvas.style.borderRadius = '6px';
     this.wrap.appendChild(this.overlayCanvas);
-    let octx = null;
+    this._octx = null;
 
     // Offscreen layers
     this.baseData = null;   // ImageData of the base image
@@ -76,7 +76,7 @@ export class CanvasStack {
     if (this.overlayCanvas.width !== w || this.overlayCanvas.height !== h) {
       this.overlayCanvas.width = w;
       this.overlayCanvas.height = h;
-      octx = this.overlayCanvas.getContext('2d', { desynchronized: true });
+      this._octx = this.overlayCanvas.getContext('2d', { desynchronized: true });
     }
     this.overlayCanvas.style.left = this.canvas.offsetLeft + 'px';
     this.overlayCanvas.style.top = this.canvas.offsetTop + 'px';
@@ -85,12 +85,13 @@ export class CanvasStack {
   }
 
   get overlayCtx() {
-    if (!octx) { this.ensureOverlay(); }
-    return octx;
+    if (!this._octx) { this.ensureOverlay(); }
+    return this._octx;
   }
 
   /** Clear the overlay, optionally only a world-space dirty rect. */
   clearOverlay(dirtyWorldRect = null) {
+    const octx = this._octx;
     if (!octx) return;
     if (!dirtyWorldRect) {
       octx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
