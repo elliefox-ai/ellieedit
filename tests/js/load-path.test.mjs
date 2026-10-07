@@ -193,7 +193,7 @@ fc.state.selections = {};
 fc.state.activeRegions = [{ x: 40, y: 40, w: 80, h: 80, id: 996, manual: true }];
 fc.selectedRegionId = 996;
 fc.el.detailCrop.checked = true;
-for (const [k, v] of Object.entries({ repaintPromptInput: { value: '' }, denoiseSlider: { value: '0.5' }, variantCountSelect: { value: '1' }, randomizeSeed: { checked: true }, seedInput: { value: '' }, generateBtn: fakeEl('button'), statusBar: fakeEl('div'), seedEcho: fakeEl('span') })) {
+for (const [k, v] of Object.entries({ repaintPromptInput: { value: '' }, denoiseSlider: { value: '0.5' }, variantCountSelect: { value: '1' }, randomizeSeed: { checked: true }, seedInput: { value: '' }, generateBtn: fakeEl('button'), statusBar: fakeEl('div') })) {
   if (!fc.el[k] || fc.el[k].value === undefined && !('checked' in v)) fc.el[k] = Object.assign(fakeEl(v._tag || 'input'), v);
 }
 fc.stack.pending = null;
@@ -205,6 +205,11 @@ assert.equal(pend.variants.length, 1, 'mock endpoint returned a variant');
 assert.ok(pend.vsel >= 0, 'variant selected for preview');
 assert.ok(pend.maskCanvas && pend.maskCanvas.width === pend.w && pend.maskCanvas.height === pend.h,
   'pending mask is LOCAL to the pending rect (full-size mask composited invisible — root cause)');
+// Seed unification (2026-10-07e): randomize on → fresh seed written INTO the
+// box before generating; the box is the echo (seed-echo element removed).
+const usedSeed = parseInt(fc.el.seedInput.value);
+assert.ok(Number.isInteger(usedSeed) && usedSeed >= 0, 'randomize writes the used seed into the box');
+assert.ok(!('seedEcho' in fc.el), 'seed-echo element removed — seed box is the echo');
 fc.render();
 const calls2 = fc.stack.ctx._calls ?? [];
 const idxBase2 = calls2.findIndex(c => c[0] === 'putImageData');
