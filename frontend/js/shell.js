@@ -5,7 +5,7 @@
 
 // Bump on every deploy — shown in the job bar so a stale-cache client is
 // instantly visible.
-const BUILD = '2026-10-07n';
+const BUILD = '2026-10-07o';
 
 const registry = [];
 const mounted = new Map(); // name -> { panelEl }
@@ -61,10 +61,12 @@ function mountAll() {
 }
 
 // Import modules (self-registering) then build.
+// ?v=${BUILD} stamps every module import so served code can never be a
+// different version than the badge — mixed-version caches are impossible.
 Promise.all([
-  import('./modules/gallery.js'),
-  import('./modules/facecycle.js'),
-  import('./modules/review.js'),
+  import(`./modules/gallery.js?v=${BUILD}`),
+  import(`./modules/facecycle.js?v=${BUILD}`),
+  import(`./modules/review.js?v=${BUILD}`),
 ]).then(() => {
   buildTabs();
   mountAll();
