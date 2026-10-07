@@ -520,7 +520,7 @@ export class FaceCycle {
     this.el.discardBtn.disabled = !pending && !selGens;
     this.el.undoBtn.disabled = this.undoLog.length === 0;
     const gensBadge = (selGens && !pending)
-      ? ` <span class="badge" style="color:#7de08a">gen ${(this.state.activeRegions.find(r => r.id === this.selectedRegionId).gsel ?? 0) + 1}/${selGens} — [/] cycles</span>`
+      ? ` <span class="badge" style="color:#7de08a">${(() => { const sr = this.state.activeRegions.find(r => r.id === this.selectedRegionId); return (sr?.gsel ?? -1) >= 0 ? `gen ${(sr?.gsel ?? 0) + 1}/${selGens}` : 'photo shown'; })()} — [/] cycles</span>`
       : '';
 
     // Diagnostic: make the pending preview layer unambiguous on-screen — if this
@@ -1031,19 +1031,25 @@ export class FaceCycle {
   }
 
   cycleRegion(region, dir) {
-    // Generations first: cycling pages through kept results like photo variants.
-    if (region.gens && region.gens.length > 1) {
-      const g = region.gsel ?? 0;
-      region.gsel = ((g + dir) % region.gens.length + region.gens.length) % region.gens.length;
-      this.renderGenStrip();
-      this.render();
-      this.updateStatusBar();
-      return;
-    }
-    const cur = this.state.selections[region.id] ?? this.state.baseVariant;
+    // Click cycles a combined ring: kept generations first, then photo
+    // variants. A region with a single gen still responds to taps (gsel -1 =
+    // variant shown; >= 0 = that gen drawn over the variant).
+    const gens = region.gens?.length ?? 0;
     const n = this.state.images.length;
-    this.state.selections[region.id] = ((cur + dir) % n + n) % n;
+    const total = gens + n;
+    if (total <= 1) return;
+    const sel = this.state.selections[region.id] ?? this.state.baseVariant;
+    let pos = (region.gsel ?? -1) >= 0 ? region.gsel : gens + sel;
+    pos = ((pos + dir) % total + total) % total;
+    if (pos < gens) {
+      region.gsel = pos;
+    } else {
+      region.gsel = -1;
+      this.state.selections[region.id] = pos - gens;
+    }
+    this.renderGenStrip();
     this.render();
+    this.updateStatusBar();
   }
 
   cycleAt(x, y, dir) {
@@ -1768,7 +1774,7 @@ export class FaceCycle {
     // No pending: discard the selected region's current generation (undoable).
     const region = this.state.activeRegions.find(r => r.id === this.selectedRegionId);
     if (region?.gens?.length) {
-      const idx = region.gsel ?? region.gens.length - 1;
+      const idx = (region.gsel ?? -1) >= 0 ? region.gsel : region.gens.length - 1;
       const [gen] = region.gens.splice(idx, 1);
       this.undoLog.push({ type: 'discard', regionId: region.id, index: idx, gen });
       region.gsel = Math.min(idx, region.gens.length - 1);
