@@ -56,6 +56,20 @@ def test_repaint_endpoint(client):
     assert out.startswith(b"\x89PNG")
 
 
+def test_repaint_promptless(client):
+    """Generate with empty prompt is accepted (conditioning from context only)."""
+    payload = {
+        "image_b64": base64.b64encode(make_png_bytes()).decode(),
+        "mask_b64": base64.b64encode(make_png_bytes()).decode(),
+        "prompt": "",
+        "denoise": 0.5,
+        "seed": 2,
+    }
+    r = client.post("/api/facecycle/repaint", json=payload)
+    assert r.status_code == 200
+    assert base64.b64decode(r.json()["image_b64"]).startswith(b"\x89PNG")
+
+
 def test_repaint_error_propagates(client, monkeypatch):
     def boom(*a, **kw):
         raise RuntimeError("ComfyUI down")

@@ -88,6 +88,19 @@ def test_build_repaint_workflow_patches(no_http):
     assert comfy.REPAINT_GRAPH["112"]["inputs"]["text"] == ""
 
 
+def test_build_repaint_workflow_empty_prompt_is_valid():
+    """Promptless generate: CLIPTextEncode (node 112) accepts an empty string —
+    conditioning comes from the surrounding context only. No neutral-prompt
+    hack needed."""
+    img = make_png_b64()
+    mask = make_png_b64(color=(0, 0, 0))
+    wf = comfy.build_repaint_workflow(img, mask, "", denoise=0.5, seed=1)
+    assert wf["112"]["inputs"]["text"] == ""
+    assert wf["112"]["class_type"] == "CLIPTextEncode"
+    # Workflow still structurally intact for the backend sampler
+    assert wf["114"]["inputs"]["positive"] == ["112", 0]
+
+
 def test_comfy_repaint_roundtrip(no_http):
     img = make_png_b64()
     mask = make_png_b64(color=(0, 0, 0))
