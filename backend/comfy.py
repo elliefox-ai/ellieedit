@@ -17,6 +17,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+from pathlib import Path
+
 import numpy as np
 from PIL import Image
 
@@ -64,7 +66,10 @@ REPAINT_GRAPH = {
             "inputs": {"noise": ["106", 0], "guider": ["114", 0], "sampler": ["103", 0],
                        "sigmas": ["115", 0], "latent_image": ["203", 0]}},
     "105": {"class_type": "VAEDecode", "inputs": {"samples": ["104", 0], "vae": ["382", 0]}},
-    "19":  {"class_type": "SaveImage", "inputs": {"images": ["105", 0], "filename_prefix": "facecycle_repaint"}},
+    # SaveImage writes into an output subfolder so intermediates never land
+    # in the gallery root; cleaned up by gallery.cleanup_tmp_dir().
+    "19":  {"class_type": "SaveImage", "inputs": {"images": ["105", 0],
+            "filename_prefix": "ellieedit_tmp/facecycle_repaint"}},
 }
 
 
@@ -112,6 +117,22 @@ def _comfy_upload(png_bytes, name, image_type="input", overwrite=True):
         return json.loads(r.read())["name"]
 
 
+def _delete_saved_file(im):
+    """Unlink the repaint intermediate once its bytes are in hand.
+
+    ComfyUI writes to the shared output root mounted at GALLERY_ROOT, so the
+    saved file is addressable locally. Best-effort: never fail the repaint.
+    """
+    try:
+        from .routers.gallery import TMP_DIR
+        p = TMP_DIR / Path(im["filename"]).name
+        if p.is_file():
+            p.unlink()
+            print(f"[repaint] cleaned intermediate {p.name}", flush=True)
+    except Exception as e:
+        print(f"[repaint] intermediate cleanup skipped: {e}", flush=True)
+
+
 def comfy_repaint(image_b64, mask_b64, prompt, denoise=0.5, seed=0, timeout=600):
     """Run one Krea2 inpaint. Returns PNG bytes of the repainted full image."""
     wf = build_repaint_workflow(image_b64, mask_b64, prompt, denoise, seed)
@@ -152,6 +173,7 @@ def comfy_repaint(image_b64, mask_b64, prompt, denoise=0.5, seed=0, timeout=600)
                         with urllib.request.urlopen(url, timeout=120) as r2:
                             data = r2.read()
                         print(f"[repaint] done {pid} in {time.time()-t0:.0f}s", flush=True)
+                        _delete_saved_file(im)
                         return data
             raise RuntimeError(f"Output had no output-type image: {json.dumps(outputs)[:1000]}")
     raise RuntimeError(f"Repaint timed out after {timeout}s (pid {pid})")
