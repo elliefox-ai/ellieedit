@@ -24,10 +24,10 @@ function panelHTML() {
     .rv-status { font-size: 11px; color: #6c6c8e; flex: 1; }
     .rv-grid {
       display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-      gap: 8px; padding: 12px 16px; overflow-y: auto; flex: 1; align-content: start;
+      grid-auto-rows: 130px; gap: 8px; padding: 12px 16px; overflow-y: auto; flex: 1; align-content: start;
     }
     .rv-cell { position: relative; border-radius: 6px; overflow: hidden; cursor: pointer;
-      background: #1a1a2e; aspect-ratio: 1; border: 2px solid transparent; }
+      background: #1a1a2e; border: 2px solid transparent; }
     .rv-cell img { width: 100%; height: 100%; object-fit: contain; display: block; }
     .rv-cell.sel { border-color: #7a7aff; }
     .rv-cell .check {

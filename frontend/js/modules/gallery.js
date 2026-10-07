@@ -22,10 +22,10 @@ function panelHTML() {
     .gal-status { font-size: 11px; color: #6c6c8e; }
     .gal-grid {
       display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-      gap: 8px; padding: 12px 16px; overflow-y: auto; flex: 1; align-content: start;
+      grid-auto-rows: 130px; gap: 8px; padding: 12px 16px; overflow-y: auto; flex: 1; align-content: start;
     }
     .gal-cell { position: relative; border-radius: 6px; overflow: hidden; cursor: pointer;
-      background: #1a1a2e; aspect-ratio: 1; }
+      background: #1a1a2e; }
     .gal-cell img { width: 100%; height: 100%; object-fit: contain; display: block; }
     .gal-cell .name {
       position: absolute; bottom: 0; left: 0; right: 0; padding: 2px 6px;
