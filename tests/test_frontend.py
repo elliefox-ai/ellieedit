@@ -15,6 +15,29 @@ def test_js_load_path():
     assert "PASS" in r.stdout
 
 
+def test_js_operator_sequence():
+    """Full operator flow (select A → generate → Keep → select B → generate →
+    Keep) with real dimension math — the test that models the iPad failure."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "facecycle-sequence.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+    assert "PASS" in r.stdout
+
+
+def test_no_global_pending_preview():
+    """Region-status refactor (2026-10-07g): the global pending preview store is
+    deleted. Generation lifecycle lives on state.activeRegions[].status only."""
+    assert not (HERE.parent / "frontend" / "js" / "components" / "pending.js").exists(), \
+        "pending.js (global pending store) must be deleted"
+    fc = (HERE.parent / "frontend" / "js" / "modules" / "facecycle.js").read_text()
+    for banned in ("PendingPreview", "pendingStore", "stack.pending", "addPendingVariant"):
+        assert banned not in fc, f"facecycle.js still references global pending API: {banned}"
+    stack = (HERE.parent / "frontend" / "js" / "components" / "canvas-stack.js").read_text()
+    assert "this.pending" not in stack, "canvas-stack still carries a global pending layer"
+
+
 def test_sw_cache_version_matches_build_marker():
     """The SW cache name and the UI build marker must move together on deploy —
     this is the stale-cache guard (blank-canvas incident 2026-10-07)."""
