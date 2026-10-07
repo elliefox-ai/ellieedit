@@ -13,7 +13,6 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .routers import facecycle, gallery, review
-
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -25,6 +24,16 @@ app = FastAPI(title="EllieEdit", version="0.1.0")
 app.include_router(facecycle.router)
 app.include_router(gallery.router)
 app.include_router(review.router)
+
+
+@app.on_event("startup")
+def _tmp_sweep():
+    # Startup hygiene: migrate legacy repaint files out of the output root and
+    # sweep stale intermediates (>24h) that a missed unlink left behind.
+    removed = gallery.cleanup_tmp_dir()
+    if removed:
+        logging.getLogger("ellieedit").info(
+            "startup tmp sweep: removed %d file(s)", removed)
 
 
 @app.get("/health")
