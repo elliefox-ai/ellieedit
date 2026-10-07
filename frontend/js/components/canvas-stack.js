@@ -127,6 +127,9 @@ export class CanvasStack {
 
     if (this.editLayerVisible && this.editLayer) this.ctx.drawImage(this.editLayer, 0, 0);
 
+    // Region state (photo variants + kept generations) — under the pending preview.
+    if (this.opts.drawUnder && !this.hideContent) this.opts.drawUnder(this.ctx, opts);
+
     // Pending preview: its own layer, clipped to its box — never baked until Keep.
     const p = this.pending;
     if (p && p.vsel >= 0) {
@@ -148,6 +151,7 @@ export class CanvasStack {
         this.ctx.restore();
       }
     }
+
 
     if (this.opts.drawContent && !this.hideContent) this.opts.drawContent(this.ctx, opts);
     if (this.baseData) this.ensureOverlay();
