@@ -58,6 +58,8 @@ function panelHTML() {
     .thumb-del { position: absolute; top: 2px; right: 2px; width: 16px; height: 16px; background: rgba(0,0,0,0.75); color: #d4d4e0; border: none; border-radius: 50%; font-size: 13px; line-height: 14px; text-align: center; cursor: pointer; opacity: 0; transition: opacity .15s; padding: 0; }
     .thumb:hover .thumb-del { opacity: 1; }
     .thumb-del:hover { background: rgba(200,60,60,0.85); }
+    .seed-echo { font-size: 11px; color: #7de08a; cursor: pointer; }
+    .seed-echo:empty { display: none; }
   </style>
   <div class="fc-header">
     <div class="fc-row top">
@@ -84,6 +86,9 @@ function panelHTML() {
       <label>Prompt <input type="text" data-id="repaint-prompt" placeholder="repaint prompt… (select a box, then Generate)" size="44"></label>
       <label>Denoise <input type="range" data-id="denoise" min="0.3" max="0.8" step="0.05" value="0.5"><span class="val" data-id="denoise-val">0.5</span></label>
       <label>Seed <input type="number" data-id="seed-input" placeholder="random"></label>
+      <label><input type="checkbox" data-id="randomize-seed" checked> Randomize each</label>
+      <span class="seed-echo" data-id="seed-echo" title="Click to adopt this seed (turns randomize off)"></span>
+      <label><input type="checkbox" data-id="detail-crop" checked> Detail crop</label>
       <label>Variants <select data-id="variant-count"><option value="1" selected>1</option><option value="2">2</option><option value="4">4</option></select></label>
       <button class="ee-btn primary" data-act="generate">⚡ Generate</button>
       <button class="ee-btn" data-act="keep">✓ Keep</button>
@@ -121,6 +126,7 @@ class FaceCycle {
       brushSizeVal: $('brush-size-val'), eraseToggleBtn: act('erase'),
       faceModeSelect: $('face-mode'), repaintPromptInput: $('repaint-prompt'),
       denoiseSlider: $('denoise'), denoiseVal: $('denoise-val'), seedInput: $('seed-input'),
+      randomizeSeed: $('randomize-seed'), detailCrop: $('detail-crop'), seedEcho: $('seed-echo'),
       variantCountSelect: $('variant-count'), generateBtn: act('generate'),
       keepBtn: act('keep'), discardBtn: act('discard'), undoBtn: act('undo'),
       layerToggleBtn: act('layer-toggle'),
@@ -153,6 +159,10 @@ class FaceCycle {
     this.mouseCanvasY = 0;
     this.focusedRegion = 0;
     this.hideOverlays = false;
+    this.maskEditId = null;   // region id whose mask is being edited
+    this.strokeBBox = null;   // bbox of current paint strokes (auto-grow)
+    this.paintArm = null;     // armed paint: { x0, y0, mode } — tap vs stroke disambiguation
+    this.lastRunInfo = null;  // 'detail crop …' / 'full-image' status for the last generate
     this.faceModelsLoaded = false;
     this.faceApiLoading = false;
     this.BADGE_H = 20;
@@ -237,6 +247,10 @@ class FaceCycle {
     this.el.exportBtn.addEventListener('click', () => this.exportComposite());
     this.el.repaintPromptInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); this.generateRepaint(); }
+    });
+    this.el.seedEcho.addEventListener('click', () => {
+      const s = parseInt(this.el.seedEcho.dataset.seed);
+      if (!isNaN(s)) { this.el.seedInput.value = s; this.el.randomizeSeed.checked = false; }
     });
 
     document.addEventListener('keydown', this.onKeyDown = e => {
@@ -510,12 +524,13 @@ class FaceCycle {
 
     const selRegion = this.state.activeRegions.find(r => r.id === this.selectedRegionId);
     const maskExists = this.drawMaskMode || this.state.activeRegions.some(r => r.maskCanvas);
+    const runBadge = this.lastRunInfo ? ` <span class="badge" style="color:#8ab4e8">${this.lastRunInfo}</span>` : '';
     const maskHint = (selRegion && !selRegion.maskCanvas && maskExists)
       ? ' <span class="badge" style="color:#e87ad0">box selected — Generate overrides painted mask</span>'
       : '';
 
     if (n === 0) {
-      this.el.statusBar.innerHTML = '<span class="badge">' + (this.state.images.length < 2 ? 'Editor ready — draw a box (B) or click a region' : 'No changes detected') + '</span> <span class="help">' + (this.state.images.length < 2 ? 'Select a box, type a prompt, Generate to repaint.' : 'Try lowering sensitivity or min region size.') + '</span>' + pendingBadge + maskHint;
+      this.el.statusBar.innerHTML = '<span class="badge">' + (this.state.images.length < 2 ? 'Editor ready — draw a box (B) or click a region' : 'No changes detected') + '</span> <span class="help">' + (this.state.images.length < 2 ? 'Type a prompt (or leave empty), select a box, Generate to repaint.' : 'Try lowering sensitivity or min region size.') + '</span>' + pendingBadge + maskHint + runBadge;
       return;
     }
 
@@ -525,9 +540,9 @@ class FaceCycle {
     let modeIndicator = '';
     if (this.clickToAddMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">👆 Click Face active</span>';
     if (this.drawBoxMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">✏️ Draw Box active</span>';
-    if (this.drawMaskMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">🖌️ Draw Mask — Enter=commit · Esc=clear · E=erase · ,/. = brush size</span>';
+    if (this.drawMaskMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">🖌️ Draw Mask — click a region to edit its mask · paint adds (box auto-grows) · Enter=apply · Esc=reset · E=erase · ,/. = brush size</span>';
     parts.push('<span class="help">Click a region to cycle • Right-click to go back • Drag tabs to move/resize • H toggles overlays • Del removes selected</span>');
-    this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + pendingBadge + maskHint;
+    this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + pendingBadge + maskHint + runBadge;
   }
 
   onPendingChange() {
@@ -757,16 +772,34 @@ class FaceCycle {
     if (this.drawMaskMode) {
       if (e.button === 0) {
         e.preventDefault();
-        this.isPainting = true;
-        this.lastPaintX = x;
-        this.lastPaintY = y;
-        this.paintBrush(x, y, null, null);
-        this.stack.ensureOverlay();
-        this.render({ skipMask: true });
-        this.drawMaskOverlay();
+        const hit = this.topmostRegionAt(x, y);
+        if (this.maskEditId != null && (!hit || hit.id === this.maskEditId)) {
+          // Arm paint on the region already in mask-edit. A tap (no drag) on
+          // empty space exits mask-edit; a drag paints and the box auto-grows.
+          this.paintArm = { x0: x, y0: y, mode: hit ? 'attach' : 'deselect-on-tap' };
+        } else if (hit) {
+          this.finalizeMaskEdit();
+          this.selectedRegionId = hit.id;
+          this.maskEditId = hit.id;
+          this.initMaskCanvas();
+          if (hit.maskCanvas) this.maskPaintCtx.drawImage(hit.maskCanvas, hit.x, hit.y);
+          this.strokeBBox = null;
+          this.updateStatusBar();
+          this.render();
+        } else {
+          // Empty space with no active edit: start a fresh mask region.
+          this.finalizeMaskEdit();
+          this.selectedRegionId = null;
+          this.maskEditId = null;
+          this.initMaskCanvas();
+          this.strokeBBox = null;
+          this.paintArm = { x0: x, y0: y, mode: 'new' };
+        }
       } else if (e.button === 2) {
         e.preventDefault();
-        this.commitMaskRegion();
+        this.finalizeMaskEdit();
+        this.render();
+        this.updateStatusBar();
       }
       return;
     }
@@ -826,19 +859,30 @@ class FaceCycle {
     }
 
     if (this.drawMaskMode) {
-      // Coalesced samples (pts) — stroke to mask canvas, blit overlay once
-      for (const c of pts) {
-        this.mouseCanvasX = c.x;
-        this.mouseCanvasY = c.y;
-        this.mouseInCanvas = true;
-        if (this.isPainting) {
-          this.paintBrush(c.x, c.y, this.lastPaintX, this.lastPaintY);
-          this.lastPaintX = c.x;
-          this.lastPaintY = c.y;
+      // Armed paint becomes a real stroke once the pointer moves a threshold —
+      // taps without movement never paint (tap = select/deselect only).
+      if (this.paintArm && !this.isPainting) {
+        if (Math.hypot(x - this.paintArm.x0, y - this.paintArm.y0) > 6) {
+          this.beginPaint(this.paintArm.x0, this.paintArm.y0);
         }
       }
-      if (this.isPainting) this.drawMaskOverlay();
-      else this.render({ skipMask: true });
+      if (this.isPainting) {
+        // Coalesced samples (pts) — stroke to mask canvas, blit overlay once
+        for (const c of pts) {
+          this.mouseCanvasX = c.x;
+          this.mouseCanvasY = c.y;
+          this.mouseInCanvas = true;
+          if (this.isPainting) {
+            this.paintBrush(c.x, c.y, this.lastPaintX, this.lastPaintY);
+            this.lastPaintX = c.x;
+            this.lastPaintY = c.y;
+          }
+        }
+        this.autoGrowBox();
+        this.drawMaskOverlay();
+      } else {
+        this.render({ skipMask: true });
+      }
       return;
     }
 
@@ -870,13 +914,49 @@ class FaceCycle {
   }
 
   onPointerUp(e, pt) {
-    if (this.drawMaskMode && this.isPainting) {
-      this.isPainting = false;
-      this.lastPaintX = null;
-      this.lastPaintY = null;
-      this.stack.clearOverlay();
-      this.render();
-      return;
+    if (this.drawMaskMode) {
+      if (this.isPainting) {
+        // Finish stroke: commit the working mask into the region (box = current
+        // grown bbox; mask cropped from the full-size working canvas).
+        this.isPainting = false;
+        this.lastPaintX = null;
+        this.lastPaintY = null;
+        const r = this.state.activeRegions.find(r => r.id === this.maskEditId);
+        if (r) {
+          r.maskCanvas = this.cropCanvas(this.maskPaintCanvas, r.x, r.y, r.w, r.h);
+        } else if (this.strokeBBox) {
+          // Fresh mask finished: create its box control from the stroke bbox.
+          const pad = 2;
+          const bx = Math.max(0, Math.round(this.strokeBBox.x - pad));
+          const by = Math.max(0, Math.round(this.strokeBBox.y - pad));
+          const bw = Math.min(this.state.width - bx, Math.round(this.strokeBBox.w + pad * 2));
+          const bh = Math.min(this.state.height - by, Math.round(this.strokeBBox.h + pad * 2));
+          const region = { x: bx, y: by, w: bw, h: bh, id: this.nextRegionId++, manual: true };
+          region.maskCanvas = this.cropCanvas(this.maskPaintCanvas, bx, by, bw, bh);
+          this.state.activeRegions.push(region);
+          this.state.selections[region.id] = this.state.baseVariant;
+          this.selectedRegionId = region.id;
+          this.maskEditId = region.id;
+        }
+        this.strokeBBox = null;
+        this.stack.clearOverlay();
+        this.updateStatusBar();
+        this.render();
+        return;
+      }
+      if (this.paintArm && !this.isPainting) {
+        // Tap without drag:
+        const mode = this.paintArm.mode;
+        this.paintArm = null;
+        if (mode === 'deselect-on-tap') {
+          this.finalizeMaskEdit();
+          this.selectedRegionId = null;
+          this.updateStatusBar();
+          this.render();
+        }
+        // mode 'new': tap did nothing (intentional — no accidental dot regions)
+        return;
+      }
     }
     if (this.drawBoxMode && this.drawBoxDrag && this.drawBoxDrag.active) {
       const d = this.drawBoxDrag;
@@ -919,6 +999,7 @@ class FaceCycle {
   onPointerCancel() {
     this.drawBoxDrag = null;
     this.isPainting = false;
+    this.paintArm = null;
     this.lastPaintX = null;
     this.lastPaintY = null;
     this.moveDrag = null;
@@ -957,7 +1038,7 @@ class FaceCycle {
     if (e.key === 'm' || e.key === 'M') { if (this.state.images.length) this.toggleDrawMask(); return; }
 
     if (this.drawMaskMode) {
-      if (e.key === 'Enter') { e.preventDefault(); this.commitMaskRegion(); return; }
+      if (e.key === 'Enter') { e.preventDefault(); this.finalizeMaskEdit(); this.render(); this.updateStatusBar(); return; }
       if (e.key === 'Escape') { e.preventDefault(); this.clearMaskCanvas(); return; }
       if (e.key === 'e' || e.key === 'E') { this.toggleErase(); return; }
       if (e.key === ',') {
@@ -989,6 +1070,7 @@ class FaceCycle {
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (this.selectedRegionId !== null) {
         e.preventDefault();
+        if (this.maskEditId === this.selectedRegionId) this.maskEditId = null;
         this.state.activeRegions = this.state.activeRegions.filter(r => r.id !== this.selectedRegionId);
         delete this.state.selections[this.selectedRegionId];
         this.selectedRegionId = null;
@@ -1246,6 +1328,7 @@ class FaceCycle {
       this.stack.setCursor('crosshair');
       this.initMaskCanvas();
     } else {
+      this.finalizeMaskEdit();
       this.el.drawMaskBtn.classList.remove('active-toggle');
       this.el.brushControls.style.display = 'none';
       this.el.eraseToggleBtn.style.display = 'none';
@@ -1275,6 +1358,17 @@ class FaceCycle {
 
   paintBrush(x, y, prevX, prevY) {
     if (!this.maskPaintCtx) return;
+    if (!this.eraseMode) {
+      // Track stroke bbox (paint only — erasing never grows the box)
+      const r = this.brushSize / 2;
+      const b = this.strokeBBox;
+      if (!b) this.strokeBBox = { x: x - r, y: y - r, w: this.brushSize, h: this.brushSize };
+      else {
+        const nx = Math.min(b.x, x - r), ny = Math.min(b.y, y - r);
+        const mx = Math.max(b.x + b.w, x + r), my = Math.max(b.y + b.h, y + r);
+        this.strokeBBox = { x: nx, y: ny, w: mx - nx, h: my - ny };
+      }
+    }
     const mctx = this.maskPaintCtx;
     mctx.lineWidth = this.brushSize;
     mctx.lineCap = 'round';
@@ -1300,51 +1394,62 @@ class FaceCycle {
     mctx.globalCompositeOperation = 'source-over';
   }
 
-  commitMaskRegion() {
-    if (!this.maskPaintCtx) return;
-    const imgData = this.maskPaintCtx.getImageData(0, 0, this.state.width, this.state.height);
-    const data = imgData.data;
-    let minX = this.state.width, minY = this.state.height, maxX = 0, maxY = 0;
-    let found = false;
-    for (let y = 0; y < this.state.height; y++) {
-      for (let x = 0; x < this.state.width; x++) {
-        if (data[(y * this.state.width + x) * 4 + 3] > 0) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-          found = true;
-        }
-      }
+  // ── Region/mask unification helpers ──
+
+  topmostRegionAt(x, y) {
+    for (let i = this.state.activeRegions.length - 1; i >= 0; i--) {
+      const r = this.state.activeRegions[i];
+      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return r;
     }
-    if (!found) return;
+    return null;
+  }
+
+  beginPaint(x, y) {
+    this.paintArm = null;
+    this.isPainting = true;
+    this.lastPaintX = x;
+    this.lastPaintY = y;
+    this.paintBrush(x, y, null, null);
+    this.stack.ensureOverlay();
+    this.render({ skipMask: true });
+    this.drawMaskOverlay();
+  }
+
+  autoGrowBox() {
+    // Box auto-grows to contain strokes that extend outside it.
+    const r = this.state.activeRegions.find(r => r.id === this.maskEditId);
+    const b = this.strokeBBox;
+    if (!r || !b) return;
     const pad = 2;
-    minX = Math.max(0, minX - pad);
-    minY = Math.max(0, minY - pad);
-    maxX = Math.min(this.state.width - 1, maxX + pad);
-    maxY = Math.min(this.state.height - 1, maxY + pad);
-    const rw = maxX - minX + 1;
-    const rh = maxY - minY + 1;
-    const croppedMask = document.createElement('canvas');
-    croppedMask.width = rw;
-    croppedMask.height = rh;
-    croppedMask.getContext('2d').drawImage(this.maskPaintCanvas, minX, minY, rw, rh, 0, 0, rw, rh);
-    const region = { x: minX, y: minY, w: rw, h: rh, id: this.nextRegionId++, manual: true, maskCanvas: croppedMask };
-    this.state.activeRegions.push(region);
-    this.state.selections[region.id] = this.state.baseVariant;
-    this.selectedRegionId = region.id;
-    this.maskPaintCtx.clearRect(0, 0, this.state.width, this.state.height);
-    this.updateStatusBar();
-    this.el.exportBtn.disabled = this.state.activeRegions.length === 0;
-    this.render();
+    const nx = Math.max(0, Math.min(r.x, Math.floor(b.x) - pad));
+    const ny = Math.max(0, Math.min(r.y, Math.floor(b.y) - pad));
+    const mx = Math.min(this.state.width, Math.max(r.x + r.w, Math.ceil(b.x + b.w) + pad));
+    const my = Math.min(this.state.height, Math.max(r.y + r.h, Math.ceil(b.y + b.h) + pad));
+    if (nx !== r.x || ny !== r.y || mx !== r.x + r.w || my !== r.y + r.h) {
+      r.x = nx; r.y = ny; r.w = mx - nx; r.h = my - ny;
+    }
+  }
+
+  finalizeMaskEdit() {
+    // Bake the working mask into the region currently being edited (if any).
+    const r = this.state.activeRegions.find(r => r.id === this.maskEditId);
+    if (r && this.maskPaintCanvas && this.maskPaintCtx) {
+      r.maskCanvas = this.cropCanvas(this.maskPaintCanvas, r.x, r.y, r.w, r.h);
+    }
+    this.maskEditId = null;
+    this.strokeBBox = null;
+    this.paintArm = null;
   }
 
   clearMaskCanvas() {
-    if (this.maskPaintCtx) {
-      this.maskPaintCtx.clearRect(0, 0, this.state.width, this.state.height);
-      this.stack.clearOverlay();
-      this.render();
-    }
+    // Esc: reset the working mask to the region's last committed mask (or blank).
+    if (!this.maskPaintCtx) return;
+    this.maskPaintCtx.clearRect(0, 0, this.state.width, this.state.height);
+    const r = this.state.activeRegions.find(r => r.id === this.maskEditId);
+    if (r && r.maskCanvas) this.maskPaintCtx.drawImage(r.maskCanvas, r.x, r.y);
+    this.strokeBBox = null;
+    this.stack.clearOverlay();
+    this.render();
   }
 
   // ── Repaint (ComfyUI Krea2 inpaint via EllieEdit relay) ──
@@ -1380,7 +1485,14 @@ class FaceCycle {
       const c = document.createElement('canvas');
       c.width = this.state.width;
       c.height = this.state.height;
-      c.getContext('2d').drawImage(img, 0, 0);
+      const cctx = c.getContext('2d');
+      if (p.detail) {
+        // Detail-crop response arrived at working res — composite back at the
+        // exact crop rect (preview + Keep both feather at that rect).
+        cctx.drawImage(img, p.detail.cx, p.detail.cy, p.detail.cw, p.detail.ch);
+      } else {
+        cctx.drawImage(img, 0, 0);
+      }
       this.pendingStore.addVariant(c);
     };
     img.src = 'data:image/png;base64,' + b64;
@@ -1423,6 +1535,7 @@ class FaceCycle {
 
   async generateRepaint() {
     if (!this.state.images.length) { alert('Load images first.'); return; }
+    this.finalizeMaskEdit(); // bake any in-progress mask edit before priority scan
     // Source priority: selected box → in-progress painted mask → last painted-mask region.
     let win = null;
     let maskCropped = null;
@@ -1450,26 +1563,78 @@ class FaceCycle {
       this.jobs.note('Draw a box (B) or paint a mask (M) to generate');
       return;
     }
-    const prompt = this.el.repaintPromptInput.value.trim();
-    if (!prompt) { alert('Enter a repaint prompt.'); return; }
+    const prompt = this.el.repaintPromptInput.value.trim(); // may be empty — conditioning from context only
     const denoise = parseFloat(this.el.denoiseSlider.value);
     const variantCount = parseInt(this.el.variantCountSelect.value) || 1;
+    const randomize = this.el.randomizeSeed.checked;
     let baseSeed = parseInt(this.el.seedInput.value);
-    if (isNaN(baseSeed)) {
+    if (!randomize && isNaN(baseSeed)) {
       baseSeed = Math.floor(Math.random() * 2 ** 31);
       this.el.seedInput.value = baseSeed;
     }
+    const seeds = [];
+    for (let i = 0; i < variantCount; i++) {
+      seeds.push(randomize ? Math.floor(Math.random() * 2 ** 31) : baseSeed + i);
+    }
 
     // Generate always replaces any pending preview; drawing/deleting boxes never touches it.
-    this.pendingStore.begin(win, { maskCanvas: maskCropped || null, variantCount });
+    const useDetail = this.el.detailCrop.checked;
+    let pendingWin = win;
+    let pendingMaskLocal = null;
+    let detail = null;
+    let image_b64, mask_b64;
+    if (useDetail) {
+      // Detail crop: bbox + ~32% context ring → working res (long side 1024,
+      // even dims) → inpaint there → composite back at the exact crop rect.
+      const pct = 0.32;
+      const pad = Math.round(pct * Math.max(win.w, win.h));
+      const cx = Math.max(0, win.x - pad);
+      const cy = Math.max(0, win.y - pad);
+      const cw = Math.min(this.state.width, win.x + win.w + pad) - cx;
+      const ch = Math.min(this.state.height, win.y + win.h + pad) - cy;
+      const scale = 1024 / Math.max(cw, ch);
+      const even = n => Math.max(2, Math.floor(n / 2) * 2);
+      const cw2 = even(cw * scale), ch2 = even(ch * scale);
 
-    // Always source from the COMMITTED base (base variant + edit layer) so
-    // re-rolling the same box never compounds drift off earlier previews.
-    const image_b64 = this.currentSourceCanvas().toDataURL('image/png').split(',')[1];
-    const mask_b64 = (maskCropped
-      ? this.buildFullSizeMask(maskCropped, win.x, win.y)
-      : this.boxMaskCanvas(win)
-    ).toDataURL('image/png').split(',')[1];
+      const sendImg = document.createElement('canvas');
+      sendImg.width = cw2; sendImg.height = ch2;
+      sendImg.getContext('2d').drawImage(this.currentSourceCanvas(), cx, cy, cw, ch, 0, 0, cw2, ch2);
+
+      const maskFull = maskCropped ? this.buildFullSizeMask(maskCropped, win.x, win.y) : this.boxMaskCanvas(win);
+      const sendMask = document.createElement('canvas');
+      sendMask.width = cw2; sendMask.height = ch2;
+      const smc = sendMask.getContext('2d');
+      smc.fillStyle = '#000000';
+      smc.fillRect(0, 0, cw2, ch2);
+      smc.drawImage(maskFull, (win.x - cx) * scale, (win.y - cy) * scale, win.w * scale, win.h * scale,
+                    (win.x - cx) * scale, (win.y - cy) * scale, win.w * scale, win.h * scale);
+
+      // Preview mask in native crop coords (for mask-shaped pending preview)
+      pendingMaskLocal = document.createElement('canvas');
+      pendingMaskLocal.width = cw; pendingMaskLocal.height = ch;
+      const pmc = pendingMaskLocal.getContext('2d');
+      pmc.drawImage(maskFull, -cx, -cy);
+
+      image_b64 = sendImg.toDataURL('image/png').split(',')[1];
+      mask_b64 = sendMask.toDataURL('image/png').split(',')[1];
+      pendingWin = { x: cx, y: cy, w: cw, h: ch };
+      detail = { cx, cy, cw, ch, cw2, ch2 };
+      this.lastRunInfo = `detail crop ${cw2}×${ch2} · ring ${Math.round(pct * 100)}%${prompt ? '' : ' · no prompt'}`;
+    } else {
+      // Legacy full-image behavior.
+      image_b64 = this.currentSourceCanvas().toDataURL('image/png').split(',')[1];
+      mask_b64 = (maskCropped
+        ? this.buildFullSizeMask(maskCropped, win.x, win.y)
+        : this.boxMaskCanvas(win)
+      ).toDataURL('image/png').split(',')[1];
+      pendingMaskLocal = maskCropped
+        ? (() => { const c = document.createElement('canvas'); c.width = this.state.width; c.height = this.state.height; c.getContext('2d').drawImage(maskCropped, win.x, win.y); return c; })()
+        : null;
+      this.lastRunInfo = `full-image${prompt ? '' : ' · no prompt'}`;
+    }
+
+    this.pendingStore.begin(pendingWin, { maskCanvas: pendingMaskLocal, variantCount });
+    this.stack.pending.detail = detail;
 
     this.el.generateBtn.disabled = true;
     this.el.generateBtn.textContent = '⏳ 0/' + variantCount;
@@ -1485,7 +1650,7 @@ class FaceCycle {
 
     const jobs = [];
     for (let i = 0; i < variantCount; i++) {
-      const seed = baseSeed + i;
+      const seed = seeds[i];
       jobs.push(
         fetch(REPAINT_URL, {
           method: 'POST',
@@ -1510,6 +1675,9 @@ class FaceCycle {
     this.jobs.finish(jobId);
     this.el.generateBtn.disabled = false;
     this.el.generateBtn.textContent = '⚡ Generate';
+    // Seed echo: show what actually ran; click adopts it (reproducible).
+    this.el.seedEcho.textContent = 'seed ' + seeds.join(', ');
+    this.el.seedEcho.dataset.seed = seeds[0];
     this.updateStatusBar();
     this.render();
   }
