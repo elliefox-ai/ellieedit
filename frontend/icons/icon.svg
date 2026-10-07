@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- EllieEdit mark: fox head + pen nib -->
+  <rect width="512" height="512" rx="96" fill="#161628"/>
+  <g>
+    <!-- fox ears -->
+    <path d="M120 110 L205 175 L128 215 Z" fill="#e8823a"/>
+    <path d="M392 110 L307 175 L384 215 Z" fill="#e8823a"/>
+    <!-- fox head -->
+    <path d="M112 190 Q256 120 400 190 L330 320 L256 392 L182 320 Z" fill="#f09a4e"/>
+    <!-- muzzle -->
+    <path d="M256 300 L318 330 L256 392 L194 330 Z" fill="#fbe3c8"/>
+    <path d="M256 348 l16 14 -16 12 -16 -12 Z" fill="#2a2a44"/>
+    <!-- eyes -->
+    <circle cx="192" cy="248" r="16" fill="#2a2a44"/>
+    <circle cx="320" cy="248" r="16" fill="#2a2a44"/>
+  </g>
+  <!-- pen, diagonal -->
+  <g transform="rotate(45 340 340)">
+    <rect x="322" y="230" width="36" height="180" rx="10" fill="#7a6aaa"/>
+    <path d="M322 410 h36 l-18 44 Z" fill="#c9bfe8"/>
+    <circle cx="340" cy="430" r="5" fill="#161628"/>
+  </g>
+</svg>
