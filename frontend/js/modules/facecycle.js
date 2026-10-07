@@ -64,8 +64,6 @@ function panelHTML() {
     .thumb-del { position: absolute; top: 2px; right: 2px; width: 16px; height: 16px; background: rgba(0,0,0,0.75); color: #d4d4e0; border: none; border-radius: 50%; font-size: 13px; line-height: 14px; text-align: center; cursor: pointer; opacity: 0; transition: opacity .15s; padding: 0; }
     .thumb:hover .thumb-del { opacity: 1; }
     .thumb-del:hover { background: rgba(200,60,60,0.85); }
-    .seed-echo { font-size: 11px; color: #7de08a; cursor: pointer; }
-    .seed-echo:empty { display: none; }
   </style>
   <div class="fc-header">
     <div class="fc-row top">
@@ -90,10 +88,9 @@ function panelHTML() {
     </div>
     <div class="fc-row" data-group="repaint">
       <label>Prompt <input type="text" data-id="repaint-prompt" placeholder="repaint prompt… (select a box, then Generate)" size="44"></label>
-      <label>Denoise <input type="range" data-id="denoise" min="0.3" max="0.8" step="0.05" value="0.5"><span class="val" data-id="denoise-val">0.5</span></label>
+      <label>Denoise <input type="range" data-id="denoise" min="0.2" max="0.8" step="0.05" value="0.5"><span class="val" data-id="denoise-val">0.5</span></label>
       <label>Seed <input type="number" data-id="seed-input" placeholder="random"></label>
       <label><input type="checkbox" data-id="randomize-seed" checked> Randomize each</label>
-      <span class="seed-echo" data-id="seed-echo" title="Click to adopt this seed (turns randomize off)"></span>
       <label><input type="checkbox" data-id="detail-crop" checked> Detail crop</label>
       <label>Variants <select data-id="variant-count"><option value="1" selected>1</option><option value="2">2</option><option value="4">4</option></select></label>
       <button class="ee-btn primary" data-act="generate">⚡ Generate</button>
@@ -133,7 +130,7 @@ export class FaceCycle {
       brushSizeVal: $('brush-size-val'), eraseToggleBtn: act('erase'),
       faceModeSelect: $('face-mode'), repaintPromptInput: $('repaint-prompt'),
       denoiseSlider: $('denoise'), denoiseVal: $('denoise-val'), seedInput: $('seed-input'),
-      randomizeSeed: $('randomize-seed'), detailCrop: $('detail-crop'), seedEcho: $('seed-echo'),
+      randomizeSeed: $('randomize-seed'), detailCrop: $('detail-crop'),
       variantCountSelect: $('variant-count'), genStrip: $('gen-strip'),
       generateBtn: act('generate'),
       keepBtn: act('keep'), discardBtn: act('discard'), undoBtn: act('undo'),
@@ -257,10 +254,6 @@ export class FaceCycle {
     this.el.exportBtn.addEventListener('click', () => this.exportComposite());
     this.el.repaintPromptInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); this.generateRepaint(); }
-    });
-    this.el.seedEcho.addEventListener('click', () => {
-      const s = parseInt(this.el.seedEcho.dataset.seed);
-      if (!isNaN(s)) { this.el.seedInput.value = s; this.el.randomizeSeed.checked = false; }
     });
 
     document.addEventListener('keydown', this.onKeyDown = e => {
@@ -1607,7 +1600,13 @@ export class FaceCycle {
     const variantCount = parseInt(this.el.variantCountSelect.value) || 1;
     const randomize = this.el.randomizeSeed.checked;
     let baseSeed = parseInt(this.el.seedInput.value);
-    if (!randomize && isNaN(baseSeed)) {
+    if (randomize) {
+      // Pick a fresh seed now and write it into the box BEFORE generating:
+      // the box always shows the seed actually used, so unchecking random
+      // afterward reproduces this exact run.
+      baseSeed = Math.floor(Math.random() * 2 ** 31);
+      this.el.seedInput.value = baseSeed;
+    } else if (isNaN(baseSeed)) {
       baseSeed = Math.floor(Math.random() * 2 ** 31);
       this.el.seedInput.value = baseSeed;
     }
@@ -1706,9 +1705,6 @@ export class FaceCycle {
     this.jobs.finish(jobId);
     this.el.generateBtn.disabled = false;
     this.el.generateBtn.textContent = '⚡ Generate';
-    // Seed echo: show what actually ran; click adopts it (reproducible).
-    this.el.seedEcho.textContent = 'seed ' + seeds.join(', ');
-    this.el.seedEcho.dataset.seed = seeds[0];
     this.updateStatusBar();
     this.render();
   }
