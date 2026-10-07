@@ -127,10 +127,10 @@ await fc.handleFiles([{ type: 'image/png', name: 'a.png' }]);
 assert.ok(fc.stack.baseData, 'base layer set on load');
 assert.equal(fc.stack.width, 300, 'stack sized from image');
 
-// A region with a kept generation renders its gen canvas above base (#4:
+// A kept region renders its gen canvas above base (#4:
 // "generations not taking" would show as drawImage never being called).
 const genCanvas = fakeEl('canvas');
-const region = { x: 10, y: 10, w: 60, h: 60, id: 999, manual: true, gens: [genCanvas], gsel: 0 };
+const region = { x: 10, y: 10, w: 60, h: 60, id: 999, manual: true, status: 'kept', gens: [{ canvas: genCanvas, rect: { x: 10, y: 10, w: 60, h: 60 } }], gsel: 0 };
 fc.state.activeRegions.push(region);
 fc.state.selections[999] = 0;
 fc.selectedRegionId = 999;
@@ -142,23 +142,25 @@ assert.ok(idxGen >= 0, 'generation canvas drawn');
 assert.ok(idxGen > idxBase, 'generation drawn above base');
 // (With no pending preview active, nothing else drawImages above the gen — correct.)
 
-// Keep flow: pending → Keep appends a generation per region, Undo reverses.
-fc.pendingStore.begin({ x: 10, y: 10, w: 60, h: 60 }, { variantCount: 1 });
-fc.stack.pending.regionId = 999;
-fc.stack.pending.variants = [fakeEl('canvas')];
-fc.stack.pending.vsel = 0;
+// Keep flow: region preview → Keep appends a generation per region, Undo reverses.
+region.status = 'preview';
+region.preview = { variants: [fakeEl('canvas')], psel: 0, rect: { x: 10, y: 10, w: 60, h: 60 }, maskCanvas: null };
 fc.commitPending();
 assert.equal(region.gens.length, 2, 'Keep appends generation to region state');
+assert.equal(region.status, 'kept', 'Keep transitions region to kept');
 assert.equal(fc.undoLog.length, 1, 'undo log records keep');
-assert.equal(fc.pendingStore.current, null, 'preview cleared after keep');
+assert.equal(region.preview, null, 'preview cleared after keep');
+fc.undo();
+assert.equal(region.gens.length, 1, 'Undo reverses the keep');
+assert.equal(region.status, 'preview', 'Undo restores preview status');
+fc.commitPending(); // re-keep for the cross-region test
 
 // Generating on another region must not revert this one (#1).
-const regionB = { x: 100, y: 100, w: 40, h: 40, id: 998, manual: true, gens: [], gsel: -1 };
+const regionB = { x: 100, y: 100, w: 40, h: 40, id: 998, manual: true, status: 'idle', gens: [] };
 fc.state.activeRegions.push(regionB);
-fc.pendingStore.begin({ x: 100, y: 100, w: 40, h: 40 }, { variantCount: 1 });
-fc.stack.pending.regionId = 998;
-fc.stack.pending.variants = [fakeEl('canvas')];
-fc.stack.pending.vsel = 0;
+fc.selectedRegionId = 998;
+regionB.status = 'preview';
+regionB.preview = { variants: [fakeEl('canvas')], psel: 0, rect: { x: 100, y: 100, w: 40, h: 40 }, maskCanvas: null };
 fc.commitPending();
 assert.equal(region.gens.length, 2, 'region A keeps its generations (#1)');
 assert.equal(regionB.gens.length, 1, 'region B got its own generation');
@@ -183,28 +185,30 @@ assert.equal(region.gsel, 1, 'cycle advances generation selection');
 // ── Detail-crop simplification + preview visibility (2026-10-07d) ──
 assert.ok(!('workRes' in fc.el), 'Res dropdown removed from control map');
 
-// Generate → pending preview drawn above base inside the box (visibility
-// regression: the prior build could pass draw-order checks while the preview
-// composited invisible via a full-size mask). Fresh headless flow:
+// Generate → region enters 'generating' with its own preview; the selected
+// variant renders above base inside the region's rect (visibility regression:
+// the prior build could pass draw-order checks while the preview composited
+// invisible via a full-size mask). Fresh headless flow:
 fc.state.width = 300; fc.state.height = 200;
 fc.state.images = [{ processedData: new ImageData(new Uint8ClampedArray(300 * 200 * 4), 300, 200) }];
 fc.state.baseVariant = 0;
 fc.state.selections = {};
-fc.state.activeRegions = [{ x: 40, y: 40, w: 80, h: 80, id: 996, manual: true }];
+fc.state.activeRegions = [{ x: 40, y: 40, w: 80, h: 80, id: 996, manual: true, status: 'idle' }];
 fc.selectedRegionId = 996;
 fc.el.detailCrop.checked = true;
 for (const [k, v] of Object.entries({ repaintPromptInput: { value: '' }, denoiseSlider: { value: '0.5' }, variantCountSelect: { value: '1' }, randomizeSeed: { checked: true }, seedInput: { value: '' }, generateBtn: fakeEl('button'), statusBar: fakeEl('div') })) {
   if (!fc.el[k] || fc.el[k].value === undefined && !('checked' in v)) fc.el[k] = Object.assign(fakeEl(v._tag || 'input'), v);
 }
-fc.stack.pending = null;
 fc.undoLog.length = 0;
 await fc.generateRepaint();
-const pend = fc.pendingStore.current;
-assert.ok(pend, 'pending preview created');
+const regionR = fc.state.activeRegions[0];
+const pend = regionR.preview;
+assert.ok(pend, 'region preview shell created');
+assert.equal(regionR.status, 'preview', 'region entered preview status');
 assert.equal(pend.variants.length, 1, 'mock endpoint returned a variant');
-assert.ok(pend.vsel >= 0, 'variant selected for preview');
-assert.ok(pend.maskCanvas && pend.maskCanvas.width === pend.w && pend.maskCanvas.height === pend.h,
-  'pending mask is LOCAL to the pending rect (full-size mask composited invisible — root cause)');
+assert.ok(pend.psel >= 0, 'variant selected for preview');
+assert.ok(pend.maskCanvas && pend.maskCanvas.width === pend.rect.w && pend.maskCanvas.height === pend.rect.h,
+  'preview mask is LOCAL to the preview rect');
 // Seed unification (2026-10-07e): randomize on → fresh seed written INTO the
 // box before generating; the box is the echo (seed-echo element removed).
 const usedSeed = parseInt(fc.el.seedInput.value);
@@ -213,24 +217,21 @@ assert.ok(!('seedEcho' in fc.el), 'seed-echo element removed — seed box is the
 fc.render();
 const calls2 = fc.stack.ctx._calls ?? [];
 const idxBase2 = calls2.findIndex(c => c[0] === 'putImageData');
-// The pending layer composites through a scratch canvas sized to the pending
-// rect and drawn at the pending origin — find that call (the variant itself is
-// an input to the scratch, not a direct stack draw).
-const idxPrev = calls2.findIndex(c => c[0] === 'drawImage' && c[1] && c[1].width === pend.w && c[1].height === pend.h && c[2] === pend.x && c[3] === pend.y);
-assert.ok(idxPrev >= 0, 'pending preview layer drawn onto the stack');
+const variant = pend.variants[pend.psel];
+const idxPrev = calls2.findIndex(c => c[0] === 'drawImage' && c[1] === variant && c[2] === pend.rect.x && c[3] === pend.rect.y);
+assert.ok(idxPrev >= 0, 'preview variant drawn onto the stack');
 assert.ok(idxPrev > idxBase2, 'preview drawn above base');
-assert.ok(fc.el.statusBar.innerHTML.includes('preview 300×200px'), 'status line carries preview diagnostics');
 assert.ok(fc.lastRunInfo.includes('enlarged 1.5×'), 'detail-crop status line shows fixed enlargement');
 
 // Unchecked: native crop size — same pipeline, no enlargement.
 fc.el.detailCrop.checked = false;
-fc.pendingStore.discard();
+regionR.preview = null; regionR.status = 'idle';
 await fc.generateRepaint();
-const pend2 = fc.pendingStore.current;
+const pend2 = regionR.preview;
 assert.ok(pend2 && pend2.variants.length === 1, 'native-mode variant returned');
 assert.ok(fc.lastRunInfo.includes('full native'), 'native status line');
 fc.render();
-assert.ok((fc.stack.ctx._calls ?? []).some(c => c[0] === 'drawImage' && c[1] && c[1].width === pend2.w && c[1].height === pend2.h && c[2] === pend2.x && c[3] === pend2.y),
-  'native-mode preview layer drawn');
+assert.ok((fc.stack.ctx._calls ?? []).some(c => c[0] === 'drawImage' && c[1] === pend2.variants[pend2.psel] && c[2] === pend2.rect.x && c[3] === pend2.rect.y),
+  'native-mode preview drawn');
 
 console.log('load-path regression test: PASS');

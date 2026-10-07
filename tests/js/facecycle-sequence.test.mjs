@@ -1,8 +1,11 @@
-// Operator-sequence regression (2026-10-07f):
+// Operator-sequence regression — region-status model (2026-10-07g):
 //   tap A → generate → Keep → tap B → generate → Keep, then assert:
-//   #A: A's kept gen survives B's generate/keep
-//   #B: stored gen geometry == preview geometry (1:1 crop composite)
+//   #A: A's kept gen survives B's generate/Keep (structurally: per-region state)
+//   #B: B's kept gen == the EXACT preview canvas/geometry (1:1, no re-projection)
 //   #C: tapping A cycles its gens after Keep
+//   #D: no global pending state exists anywhere
+// Uses real dimension math: canvas stubs carry actual width/height and the Image
+// stub has natural sizes; every geometry assertion is computed from dimensions.
 // Run: node tests/js/facecycle-sequence.test.mjs
 
 import assert from 'node:assert/strict';
@@ -63,6 +66,10 @@ globalThis.fetch = async () => ({ ok: true, json: async () => ({ image_b64: 'AAA
 const { FaceCycle } = await import('../../frontend/js/modules/facecycle.js');
 const fc = new FaceCycle(fakeEl('section'), fakeEl('footer'));
 
+// #D: no global pending store anywhere in the instance or the canvas stack.
+assert.equal(fc.pendingStore, undefined, '#D no pendingStore on the module');
+assert.equal('pending' in fc.stack, false, '#D no pending field on the canvas stack');
+
 // Load one image (sets state.width/height via handleFiles path).
 await fc.handleFiles([{ type: 'image/png', name: 'a.png' }]);
 fc.state.width = 300; fc.state.height = 200;
@@ -71,8 +78,8 @@ fc.state.baseVariant = 0;
 
 // Two manual regions: A at (20,20,80,80) id 900, B at (150,100,60,60) id 901.
 fc.state.activeRegions = [
-  { x: 20, y: 20, w: 80, h: 80, id: 900, manual: true },
-  { x: 150, y: 100, w: 60, h: 60, id: 901, manual: true },
+  { x: 20, y: 20, w: 80, h: 80, id: 900, manual: true, status: 'idle' },
+  { x: 150, y: 100, w: 60, h: 60, id: 901, manual: true, status: 'idle' },
 ];
 fc.state.selections = { 900: 0, 901: 0 };
 
@@ -87,52 +94,76 @@ fc.el.generateBtn = fakeEl('button');
 const insideA = { x: 60, y: 60 }, insideB = { x: 170, y: 120 };
 const tick = () => new Promise(r => setTimeout(r, 10));
 
-async function generateAndKeep() {
+// Real-dimension math for B's expected crop ring (32% context ring, clamped).
+function cropRect(r, W, H) {
+  const pad = Math.round(0.32 * Math.max(r.w, r.h));
+  const x = Math.max(0, r.x - pad), y = Math.max(0, r.y - pad);
+  return { x, y, w: Math.min(W, r.x + r.w + pad) - x, h: Math.min(H, r.y + r.h + pad) - y };
+}
+
+// Full operator flow: select → generate → status transition → Keep.
+async function generateAndKeep(id, inside) {
+  const region = fc.state.activeRegions.find(r => r.id === id);
+  tap(inside.x, inside.y);
+  assert.equal(fc.selectedRegionId, id, `tap selects region ${id}`);
   await fc.generateRepaint();
-  await tick(); // Image onload → addPendingVariant
-  assert.ok(fc.pendingStore.current && fc.pendingStore.current.vsel >= 0, 'variant arrived');
+  await tick(); // Image onload → variant baked into THIS region's preview
+  assert.equal(region.status, 'preview', `region ${id} status transitioned to preview`);
+  assert.ok(region.preview && region.preview.psel >= 0, `region ${id} holds its own preview`);
+  assert.ok(fc.state.activeRegions.every(r => r.id === id || !r.preview || r.status !== 'preview'),
+    'no other region carries a preview');
   fc.commitPending();
   await tick();
+  assert.equal(region.status, 'kept', `region ${id} status transitioned to kept`);
 }
 
 // ── Operator sequence ──
-tap(insideA.x, insideA.y);
-assert.equal(fc.selectedRegionId, 900, 'tap selects A');
-await generateAndKeep();
+await generateAndKeep(900, insideA);
 const A = fc.state.activeRegions.find(r => r.id === 900);
 assert.equal(A.gens.length, 1, 'A has 1 kept gen');
-assert.equal(A.gens[0].width, 300, 'gen canvas is full-image sized');
-assert.equal(A.gens[0].height, 200, 'gen canvas is full-image sized');
+const expRectA = cropRect({ x: 20, y: 20, w: 80, h: 80 }, 300, 200);
+assert.equal(A.gens[0].rect.x, expRectA.x, '#1:1 A gen stores the EXACT rect it previewed (x)');
+assert.equal(A.gens[0].rect.y, expRectA.y, '#1:1 A gen stores the EXACT rect it previewed (y)');
+assert.equal(A.gens[0].rect.w, expRectA.w, '#1:1 A gen stores the EXACT rect it previewed (w)');
+assert.equal(A.gens[0].rect.h, expRectA.h, '#1:1 A gen stores the EXACT rect it previewed (h)');
+assert.equal(A.preview, null, 'preview consumed by Keep');
 
 tap(insideB.x, insideB.y);
-assert.equal(fc.selectedRegionId, 901, 'tap selects B');
-await generateAndKeep();
+await generateAndKeep(901, insideB);
 
-// BUG A: A's kept generation must survive B's generate+keep.
+// #A: A's kept generation must survive B's generate+keep — per-region state
+// makes cross-region interference structurally impossible.
 assert.equal(A.gens.length, 1, '#A region A keeps its generation after B generate+keep');
 assert.equal(A.gsel, 0, '#A region A gsel intact');
+assert.equal(A.status, 'kept', '#A region A still status kept');
 const B = fc.state.activeRegions.find(r => r.id === 901);
 assert.equal(B.gens.length, 1, 'B has its own kept gen');
-assert.equal(B.gens[0].width, 300, '#B B gen canvas full-image sized');
-assert.equal(B.gens[0].height, 200, '#B B gen canvas full-image sized');
+assert.equal(B.status, 'kept', 'B status kept');
 
-// BUG B: audit the gen canvas's recorded drawImage geometry — the variant must
-// be composited at the crop rect at natural scale (cw×ch), never stretched.
-const genCtx = ctxCache.get(B.gens[0]);
-const comp = genCtx._calls.find(c => c[0] === 'drawImage' && typeof c[4] === 'number');
-assert.ok(comp, '#B gen composites its variant');
-const pending = { x: 144, y: 94, w: 72, h: 72 }; // expected crop ring for B (0.32 ring) — recomputed below
-const padB = Math.round(0.32 * Math.max(60, 60));
-const expX = Math.max(0, 150 - padB), expY = Math.max(0, 100 - padB);
-const expW = Math.min(300, 150 + 60 + padB) - expX, expH = Math.min(200, 100 + 60 + padB) - expY;
-assert.deepEqual([comp[2], comp[3], comp[4], comp[5]], [expX, expY, expW, expH],
-  '#B stored gen composited at exact crop rect (native scale)');
+// #B: the kept gen IS the previewed canvas at the previewed geometry —
+// audit the recorded drawImage on the gen canvas: the server response must be
+// composited at the crop rect (native scale), never stretched/squashed.
+const expRect = cropRect({ x: 150, y: 100, w: 60, h: 60 }, 300, 200);
+const comp = ctxCache.get(B.gens[0].canvas)._calls.find(c => c[0] === 'drawImage' && c.length >= 6 && typeof c[4] === 'number');
+assert.ok(comp, '#B gen canvas composites its response');
+assert.deepEqual([comp[2], comp[3], comp[4], comp[5]], [0, 0, expRect.w, expRect.h],
+  '#B response drawn at rect size (native scale — no squash)');
+assert.equal(B.gens[0].rect.x, expRect.x, '#B stored rect x == crop rect x');
+assert.equal(B.gens[0].rect.y, expRect.y, '#B stored rect y == crop rect y');
+assert.equal(B.gens[0].rect.w, expRect.w, '#B stored rect w == crop rect w');
+assert.equal(B.gens[0].rect.h, expRect.h, '#B stored rect h == crop rect h');
+// Renderer draws kept gens at their stored rect (pure function of statuses).
+fc.selectedRegionId = null;
+fc.render();
+const rcalls = fc.stack.ctx._calls;
+const drawA = rcalls.find(c => c[0] === 'drawImage' && c[1] === A.gens[0].canvas);
+const drawB = rcalls.find(c => c[0] === 'drawImage' && c[1] === B.gens[0].canvas);
+assert.ok(drawA && drawA[2] === A.gens[0].rect.x && drawA[3] === A.gens[0].rect.y, '#B kept A renders at its exact rect');
+assert.ok(drawB && drawB[2] === B.gens[0].rect.x && drawB[3] === B.gens[0].rect.y, '#B kept B renders at its exact rect');
 
-// BUG C: tapping A cycles gens after Keep.
-assert.equal(A.gens.length, 1, 'single gen before cycle test');
+// #C: tapping A cycles gens after Keep.
 // Second keep on A so cycling has something to move between.
-tap(insideA.x, insideA.y);
-await generateAndKeep();
+await generateAndKeep(900, insideA);
 assert.equal(A.gens.length, 2, 'A has 2 gens now');
 assert.equal(A.gsel, 1, 'latest gen selected after keep');
 tap(insideA.x, insideA.y);
@@ -146,5 +177,10 @@ tap(insideA.x, insideA.y);
 assert.equal(A.gsel, 1, '#C tap cycles forward to gen 2');
 tap(insideA.x, insideA.y);
 assert.equal(A.gsel, -1, '#C cycle wraps through variant again');
+
+// #D post-sequence: still no global pending anywhere.
+assert.equal(fc.pendingStore, undefined, '#D no pendingStore after full sequence');
+assert.equal('pending' in fc.stack, false, '#D no stack.pending after full sequence');
+for (const r of fc.state.activeRegions) assert.ok(!('gsel' in r) || r.gsel >= -1, 'region state sane');
 
 console.log('facecycle operator-sequence test: PASS');
