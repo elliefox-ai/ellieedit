@@ -5,6 +5,7 @@
 // wipe (all of B right of the slider) or a rectangle mask (only that rect of B).
 
 import { registerModule } from '../shell.js';
+import { computeEdgeMap, buildRectMask } from '../edge-stop.js';
 
 function panelHTML() {
   return `
@@ -297,6 +298,7 @@ export class Review {
     const [a, b] = [...this.selected.values()];
     if (!a || !b) return;
     this.blendPair = { a, b };
+    this._edgeMap = null; // edge map is per-pair; recompute on new blend
     this.showFull('Blend');
     this.el.compare.style.display = 'none';
     this.el.stage.style.display = 'flex';
@@ -330,25 +332,36 @@ export class Review {
     this.el.split.style.display = useMask ? 'none' : 'block';
     this.el.maskBox.style.display = useMask ? 'block' : 'none';
     if (useMask) {
-      if (this.maskRect && this.maskRect.w > 1 && this.maskRect.h > 1) {
-        const { x, y, w, h } = this.maskRect;
-        // Feathered rect: blurred white rect as alpha mask over B.
-        const feather = Math.max(6, Math.round(Math.min(w, h) * 0.08));
-        const out = document.createElement('canvas');
-        out.width = cv.width; out.height = cv.height;
-        const octx = out.getContext('2d');
-        octx.drawImage(imgB, 0, 0);
-        const m = document.createElement('canvas');
-        m.width = cv.width; m.height = cv.height;
-        const mctx = m.getContext('2d');
-        mctx.filter = `blur(${feather}px)`;
-        mctx.fillStyle = '#fff';
-        mctx.fillRect(x + feather, y + feather,
-          Math.max(1, w - 2 * feather), Math.max(1, h - 2 * feather));
-        octx.globalCompositeOperation = 'destination-in';
-        octx.drawImage(m, 0, 0);
-        ctx.drawImage(out, 0, 0);
+      // Edge-stopped containment (ported from Meld): the feather stops at the
+      // base image's strong linework instead of bleeding across it. estop 0.8
+      // matches Meld's default strength; edge map is cached per blend pair.
+      const ESTOP = 0.8;
+    if (this.maskRect && this.maskRect.w > 1 && this.maskRect.h > 1) {
+      const { x, y, w, h } = this.maskRect;
+      const out = document.createElement('canvas');
+      out.width = cv.width; out.height = cv.height;
+      const octx = out.getContext('2d');
+      octx.drawImage(imgB, 0, 0);
+      if (!this._edgeMap) {
+        const ed = document.createElement('canvas');
+        ed.width = cv.width; ed.height = cv.height;
+        const ectx = ed.getContext('2d', { willReadFrequently: true });
+        ectx.drawImage(imgA, 0, 0);
+        this._edgeMap = computeEdgeMap(
+          ectx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height);
       }
+      const feather = Math.max(6, Math.round(Math.min(w, h) * 0.08));
+      const alpha = buildRectMask(cv.width, cv.height, this.maskRect, this._edgeMap, ESTOP, feather);
+      const m = document.createElement('canvas');
+      m.width = cv.width; m.height = cv.height;
+      const mctx = m.getContext('2d');
+      const idata = mctx.createImageData(cv.width, cv.height);
+      for (let i = 0; i < alpha.length; i++) idata.data[i * 4 + 3] = Math.round(alpha[i] * 255);
+      mctx.putImageData(idata, 0, 0);
+      octx.globalCompositeOperation = 'destination-in';
+      octx.drawImage(m, 0, 0);
+      ctx.drawImage(out, 0, 0);
+    }
       this.drawMaskOverlay();
       return;
     }
