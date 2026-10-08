@@ -118,14 +118,31 @@ def confirm_pending():
         try:
             src = jailed(rel)
         except HTTPException:
-            continue  # manifest entry that no longer resolves: skip
+            # Entries can also come from the Dupe view, whose pool root is a
+            # different tree than GALLERY_ROOT. Confirm remains the ONLY
+            # destructive endpoint — it just resolves through the dupe jail
+            # too, so those members are actually deletable.
+            try:
+                from .dupe import jailed as dupe_jailed
+                src = dupe_jailed(rel)
+            except Exception:
+                continue  # resolves under neither root: skip
         try:
             size = src.stat().st_size
             src.unlink()
             deleted += 1
             bytes_freed += size
         except FileNotFoundError:
-            continue
+            # Passes the gallery jail but lives in the dupe pool instead.
+            try:
+                from .dupe import jailed as dupe_jailed
+                dsrc = dupe_jailed(rel)
+                size = dsrc.stat().st_size
+                dsrc.unlink()
+                deleted += 1
+                bytes_freed += size
+            except Exception:
+                continue
         except OSError as e:
             log.warning("pending confirm: could not unlink %s: %s", rel, e)
     _save({})
