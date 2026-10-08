@@ -330,6 +330,9 @@ registerModule({
       console.log(`[dupe trace] ${msg}`);
     }
     // ── draft state (nothing persists before commit) ──
+    // Per-family drafts survive tab switches: switching away no longer
+    // wipes an in-progress verdict when a family detail is open.
+    const familyDrafts = new Map(); // family_id -> {verdicts, picks, melded}
     let draft = null;          // { verdicts:{path:v}, picks:[path], melded:[a,b]|null }
     let championIdx = 0;       // index into current.members
     let committed = false;
@@ -1681,7 +1684,12 @@ registerModule({
         current = f;
         committed = false;
         commitSummary = null;
-        draft = { verdicts: {}, picks: [], melded: null };
+        // Restore a tab-switched draft, else start fresh.
+        const saved = familyDrafts.get(fid);
+        draft = saved ? { verdicts: { ...saved.verdicts },
+                         picks: [...saved.picks], melded: saved.melded || null }
+                      : { verdicts: {}, picks: [], melded: null };
+        familyDrafts.delete(fid);
         loadSignals(fid);   // lazy, non-blocking — detail renders first
         // resolved families: pre-load existing verdicts as the committed truth
         for (const [p, v] of Object.entries(f.verdicts || {})) {
@@ -1723,7 +1731,7 @@ registerModule({
       }
     }
 
-    el.back.addEventListener('click', () => renderList());
+    el.back.addEventListener('click', () => { familyDrafts.delete(current?.id); renderList(); });
 
     el.commit.addEventListener('click', async () => {
       if (!current || committed) return;
@@ -1798,7 +1806,18 @@ registerModule({
       }).catch(err => job(`meld re-open failed: ${err.message}`, 'err'));
     });
     window.addEventListener('ellieedit:tab-activated', e => {
-      if (e.detail?.name === 'dupe') renderList();
+      if (e.detail?.name !== 'dupe') return;
+      // A family is open: stash its draft and leave the detail untouched —
+      // re-rendering the list here used to wipe the in-progress verdict.
+      if (current && !committed && draft) {
+        familyDrafts.set(current.id, {
+          verdicts: { ...draft.verdicts },
+          picks: [...draft.picks],
+          melded: draft.melded,
+        });
+        return;
+      }
+      if (!current) renderList();
     });
     renderStatus();
     renderList();

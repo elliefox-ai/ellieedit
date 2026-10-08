@@ -132,6 +132,34 @@ async def main():
             await pg.screenshot(path=".probes/ss-02b-detail-open-viewport.png")
             await pg.screenshot(path=".probes/ss-02-champion-fan.png")
 
+            # ── 2a (10-08l). Tab switch must NOT wipe the draft ──────────
+            # Regression: ellieedit:tab-activated called renderList() even
+            # with a family open, destroying the in-progress verdict.
+            await pg.evaluate("() => document.querySelector('.ss-champ').dispatchEvent("
+                "new PointerEvent('pointerup', {bubbles: true}))")
+            await pg.wait_for_timeout(400)
+            await pg.tap(".ss-champ")
+            await pg.wait_for_timeout(600)
+            before = await pg.evaluate(
+                "() => document.querySelectorAll('.ss-pick-chip').length")
+            assert before >= 1, "pick failed — probe precondition"
+            await pg.evaluate("() => document.querySelector('.tab[data-name=gallery]').click()")
+            await pg.wait_for_timeout(1200)
+            await pg.evaluate("() => document.querySelector('.tab[data-name=dupe]').click()")
+            await pg.wait_for_timeout(2500)
+            after = await pg.evaluate(
+                "() => document.querySelectorAll('.ss-pick-chip').length")
+            detail_open = await pg.evaluate(
+                "() => document.querySelector('#dupe-detail').classList.contains('open')")
+            report["tab_switch_draft"] = {"picks_before": before, "picks_after": after,
+                                          "detail_open": detail_open}
+            assert detail_open and after == before, \
+                f"tab switch lost the draft: {before} picks -> {after}, detail_open={detail_open}"
+            await pg.screenshot(path=".probes/ss-02a-tab-switch-draft.png")
+            # undo the pick so later sections start from a clean draft
+            await pg.tap(".ss-champ")
+            await pg.wait_for_timeout(400)
+
             # ── 2b. Binding growth: re-open browser→detail twice; card click
             # handlers are re-created per render, but a double-mount would
             # double-fire renderDetail — detect via viewSeq trace deltas and
