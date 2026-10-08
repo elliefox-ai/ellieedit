@@ -109,6 +109,7 @@ function panelHTML() {
     /* Pending filter sticky bottom bar — destructive action lives LOW and LEFT
        (iPad thumb-zone rule): never top-right under the operator's thumb. */
     .gal-bar.pendingbar { background: #2a1216; border-top-color: #a02020; }
+    .gal-bar.pendingbar .msg { white-space: pre-wrap; }
     .gal-bar.pendingbar .ee-btn.primary { background: #6a2020; border-color: #d04040; }
     .gal-bar.pendingbar.confirming .ee-btn.primary { background: #a02020; }
     /* Viewer */
@@ -159,6 +160,7 @@ function panelHTML() {
   </div>
   <div class="gal-bar pendingbar" data-id="pending-bar">
     <button class="ee-btn primary" data-act="pd-delete-all">Delete all</button>
+    <button class="ee-btn" data-act="pd-audit" title="Last pending-manifest mutations">◷ audit</button>
     <span class="msg" data-id="pd-msg"></span>
   </div>
   <div class="gal-viewer" data-id="viewer">
@@ -253,6 +255,18 @@ export class Gallery {
       this.el.viewBtns[v].addEventListener('click', () => this.setViewFilter(v));
     }
     this.el.pdDeleteAll.addEventListener('click', () => this.pdConfirmStep());
+    act('pd-audit').addEventListener('click', () => this.pdAudit());
+  }
+
+  async pdAudit() {
+    // Last manifest mutations, inline (reads GET /api/pending/audit).
+    try {
+      const r = await fetch('/api/pending/audit?limit=10');
+      const { lines } = await r.json();
+      this.el.pdMsg.textContent = (lines || []).map(l =>
+        `${l.ts} ${l.ip ?? '-'} ${l.action} n=${l.count}${(l.paths || []).length ? ' ' + l.paths.join(', ') : ''}`
+      ).join('\n') || 'no audit entries';
+    } catch { this.el.pdMsg.textContent = 'audit fetch failed'; }
   }
 
   setViewFilter(v) {
