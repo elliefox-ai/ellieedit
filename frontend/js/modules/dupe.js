@@ -22,7 +22,7 @@
 // NOTHING persists before Commit; commit = verdict POST + send-pending.
 import { registerModule } from '../shell.js';
 import { sigIsOverride, sigChipText } from './dupe-signals.js';
-import { familyVerdictState, inDeletionManifest } from './dupe-view.js';
+import { zoomMembers } from './dupe-view.js';
 
 const api = (p, opts) => fetch(`/api/dupe${p}`, opts).then(r => {
   if (!r.ok) return r.json().then(e => Promise.reject(new Error(e.detail || r.status)));
@@ -50,15 +50,6 @@ registerModule({
       .dupe-top { display:flex; gap:8px; align-items:center; padding:8px 12px;
                   border-bottom:1px solid #2a2a44; flex-wrap:wrap; flex-shrink:0; }
       .dupe-top .status { font-size:11px; color:#8a8aaa; }
-      /* view-mode segmented control (2026-10-08j) — 40px touch targets */
-      .viewseg { display:inline-flex; gap:4px; align-items:center; }
-      .viewseg .lbl { font-size:10px; color:#5a5a7a; }
-      .viewseg .pill { min-height:40px; display:inline-flex; align-items:center; }
-      .dupe-top .pill.muted { opacity:0.4; pointer-events:none; }
-      .verdict-tag.deletion { background:#3a1d1d; color:#e87a7a; font-weight:700; }
-      .fam-card.in-manifest { opacity:0.45; }
-      .dupe-empty { text-align:center; color:#8a8aaa; font-size:13px;
-                    padding:32px 16px; }
       .pill { background:#1d1d33; border:1px solid #2a2a44; color:#8a8aaa;
               padding:4px 12px; border-radius:14px; cursor:pointer; font-size:12px; }
       .pill.active { background:#5b4a8a; border-color:#7a6aaa; color:#fff; }
@@ -225,6 +216,10 @@ registerModule({
       .ss-focus img { max-width:100%; max-height:100%; object-fit:contain; pointer-events:none; }
       .ss-focus .dots { position:absolute; bottom:10px; left:50%; transform:translateX(-50%);
                         display:flex; gap:4px; }
+      /* zoom view filter (2026-10-08j re-scope) */
+      .zoom-mode-btn.active { background:#5b4a8a; border-color:#7a6aaa; color:#fff; }
+      .zoom-empty-hint { color:#8a8aaa; font-size:13px; text-align:center;
+                         padding:20px; }
       .ss-focus .dots .ss-dot { width:14px; height:14px; }
       .ss-focus-tools { position:absolute; top:8px; right:8px; display:flex; gap:6px; }
       .ss-nav { position:absolute; top:0; bottom:0; width:64px; display:flex; align-items:center;
@@ -288,12 +283,6 @@ registerModule({
         <span class="pill" data-f="unresolved">Unresolved</span>
         <span class="pill" data-f="resolved">Resolved</span>
         <span class="pill" data-f="all">All</span>
-        <span class="viewseg" id="dupe-viewseg">
-          <span class="lbl">view</span>
-          <span class="pill" data-v="all">All</span>
-          <span class="pill" data-v="accepted">Accepted</span>
-          <span class="pill" data-v="rejected">Rejected</span>
-        </span>
         <span class="status" id="dupe-status"></span>
       </div>
       <div class="dupe-scroll" id="dupe-scroll">
@@ -324,26 +313,6 @@ registerModule({
       commit: panel.querySelector('#dupe-commit'),
     };
     let filter = 'unresolved';
-    // View mode (2026-10-08j): All | Accepted | Rejected, a lens over the
-    // committed ledger. Remembered per session in-memory here; best-effort
-    // localStorage so a PWA relaunch reopens the working pool.
-    let viewMode = 'all';
-    try {
-      if (['all', 'accepted', 'rejected'].includes(localStorage.eeDupeView))
-        viewMode = localStorage.eeDupeView;
-    } catch (_) {}
-    const saveViewMode = (v) => {
-      viewMode = v;
-      try { localStorage.eeDupeView = v; } catch (_) {}
-    };
-    const elView = {
-      seg: panel.querySelector('#dupe-viewseg'),
-      pills: [...panel.querySelectorAll('#dupe-viewseg .pill')],
-    };
-    elView.pills.forEach(p => p.addEventListener('click', () => {
-      saveViewMode(p.dataset.v);
-      renderList();
-    }));
     let cursor = '';
     let exhausted = false;
     let current = null;        // detail family (API shape)
@@ -423,10 +392,8 @@ registerModule({
     }
 
     function cardFor(f) {
-      const vs = familyVerdictState(f.verdict_counts);
       const card = document.createElement('div');
-      card.className = `fam-card ${f.state === 'resolved' ? 'resolved' : ''}`
-        + (viewMode === 'rejected' && inDeletionManifest(f) ? ' in-manifest' : '');
+      card.className = `fam-card ${f.state === 'resolved' ? 'resolved' : ''}`;
       const strip = document.createElement('div');
       strip.className = 'fam-strip';
       for (const m of (f.members || [])) {
@@ -443,11 +410,7 @@ registerModule({
         `<span>${f.id}</span><span>${f.size} members</span>` +
         (f.tiers || []).map(t => `<span class="tier-badge ${t}">${t}</span>`).join('') +
         (f.conflict ? '<span class="sig-flag" title="signal conflict — prior verdict splits members the hashes call near-identical">⚡</span>' : '') +
-        (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '') +
-        (viewMode !== 'all' && vs.accepted ? '<span class="verdict-tag kept">accepted</span>' : '') +
-        (viewMode !== 'all' && vs.rejected ? '<span class="verdict-tag rejected">rejected</span>' : '') +
-        (viewMode === 'rejected' && inDeletionManifest(f)
-          ? '<span class="verdict-tag deletion" title="files queued on the Pending Delete manifest — reversible until Delete all">DELETION</span>' : '');
+        (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '');
       card.append(strip, meta);
       card.addEventListener('click', () => renderDetail(f.id));
       return card;
@@ -457,10 +420,6 @@ registerModule({
       const seq = ++viewSeq;
       trace(`renderList(seq=${seq})`);
       el.pills.forEach(p => p.classList.toggle('active', p.dataset.f === filter));
-      // view pills: active state; state pills mute outside All view (the
-      // server ignores `state` when a view lens is active)
-      elView.pills.forEach(p => p.classList.toggle('active', p.dataset.v === viewMode));
-      el.pills.forEach(p => p.classList.toggle('muted', viewMode !== 'all'));
       el.detail.classList.remove('open');
       el.list.classList.remove('open');
       el.bottom.style.display = 'none';
@@ -477,14 +436,11 @@ registerModule({
       el.more.style.display = 'none';
       job(firstPage ? 'loading families…' : 'loading more…');
       try {
-        const data = await api(`/families?state=${filter}&view=${viewMode}&cursor=${encodeURIComponent(nextCursor)}`);
+        const data = await api(`/families?state=${filter}&cursor=${encodeURIComponent(nextCursor)}`);
         if (seq !== viewSeq) { trace(`renderList(${seq}) stale — a newer render won`); return; }
         el.pills[0].textContent = `Unresolved (${data.counts.unresolved})`;
         el.pills[1].textContent = `Resolved (${data.counts.resolved})`;
         el.pills[2].textContent = `All (${data.total})`;
-        elView.pills[0].textContent = `All (${data.total})`;
-        elView.pills[1].textContent = `Accepted (${data.counts.accepted})`;
-        elView.pills[2].textContent = `Rejected (${data.counts.rejected})`;
         let grid = el.list.querySelector('.fam-grid');
         if (firstPage || !grid) {
           el.list.innerHTML = '';
@@ -503,17 +459,6 @@ registerModule({
             grid.appendChild(ec);
             console.error('dupe card render failed', f.id, cardErr);
           }
-        }
-        // Empty state (2026-10-08j): a view lens with zero families shows a
-        // plain hint, never a blank screen.
-        if (firstPage && !grid.children.length && viewMode !== 'all') {
-          const hint = document.createElement('div');
-          hint.className = 'dupe-empty';
-          hint.dataset.empty = viewMode;
-          hint.textContent = viewMode === 'accepted'
-            ? 'No accepted families yet — commit a family with keeps or a meld and it lands here.'
-            : 'No rejected families yet — commit rejects (or send them to Pending Delete) and they show here.';
-          el.list.appendChild(hint);
         }
         cursor = data.next_cursor || '';
         exhausted = !data.next_cursor;
@@ -873,10 +818,20 @@ registerModule({
     // restores the origin (spread or survey) with draft intact; swipe-down
     // or tap on the top bar also dismisses. Each level has exactly one exit
     // to its parent: families ← spread ← survey ← zoom.
-    function openZoom(startIdx, origin) {
-      const list = current.members;
+    //
+    // ZOOM VIEW FILTER (2026-10-08j re-scope): a segmented All | Accepted |
+    // Rejected control in the zoom chrome limits which members the cycle
+    // visits — accepted = kept/melded, rejected = rejected (dupe-view.js).
+    // Filtering only changes the visited set: never verdicts, ledger, or
+    // the detail layout. Arrow/swipe cycling inherits the existing bindings
+    // and works within the filtered set; label reads 'Accepted 3/7'. An
+    // empty filtered set shows an inline hint, never a blank frame.
+    const ZOOM_MODES = ['all', 'accepted', 'rejected'];
+    function openZoom(startIdx, origin, startMode = 'all') {
+      let zoomMode = ZOOM_MODES.includes(startMode) ? startMode : 'all';
+      let list = zoomMembers(current.members, draft ? draft.verdicts : {}, zoomMode);
       let idx = Math.max(0, Math.min(startIdx, list.length - 1));
-      trace(`zoom open idx=${idx + 1}/${list.length} origin=${origin}`);
+      trace(`zoom open idx=${idx + 1}/${list.length} mode=${zoomMode} origin=${origin}`);
       const ov = document.createElement('div');
       ov.className = 'ss-overlay';
       ov.id = 'ss-zoom';
@@ -921,9 +876,32 @@ registerModule({
       rejBtn.id = 'ss-zoom-reject';
       rejBtn.dataset.kbd = 'F';
       const paint = () => {
+        if (!list.length) {
+          // Empty state: plain inline hint in the stage, never a blank frame.
+          img.removeAttribute('src');
+          info.textContent = zoomMode === 'accepted' ? 'Accepted 0/0'
+                           : zoomMode === 'rejected' ? 'Rejected 0/0' : '0/0';
+          const hint = stage.querySelector('.zoom-empty-hint') ||
+            Object.assign(document.createElement('div'),
+                          { className: 'zoom-empty-hint' });
+          hint.dataset.empty = zoomMode;
+          hint.textContent = zoomMode === 'accepted'
+            ? 'No accepted members in this family yet.'
+            : zoomMode === 'rejected'
+              ? 'No rejected members in this family yet.'
+              : 'No members in this family.';
+          if (!hint.isConnected) stage.insertBefore(hint, prev);
+          pickBtn.disabled = rejBtn.disabled = true;
+          dots.innerHTML = '';
+          return;
+        }
+        stage.querySelector('.zoom-empty-hint')?.remove();
+        pickBtn.disabled = rejBtn.disabled = false;
         const m = list[idx];
         img.src = fileUrl(m.path);
-        info.textContent = `${idx + 1} / ${list.length} · ${m.name}`;        const v = verdictOf(m);
+        const modeLbl = zoomMode === 'all' ? 'All'
+                      : zoomMode === 'accepted' ? 'Accepted' : 'Rejected';
+        info.textContent = `${modeLbl} ${idx + 1} / ${list.length} · ${m.name}`;        const v = verdictOf(m);
         pickBtn.textContent = v === 'kept' ? `Un-pick ✓ (#${draft.picks.indexOf(m.path) + 1})`
                             : v ? `verdict: ${v}` : '✓ Pick';
         pickBtn.disabled = !!v && v !== 'kept';
@@ -956,6 +934,27 @@ registerModule({
         delete draft.verdicts[m.path];
         draft.picks = draft.picks.filter(p => p !== m.path);
       }
+      const setZoomMode = (mode) => {
+        if (mode === zoomMode) return;
+        zoomMode = mode;
+        list = zoomMembers(current.members, draft ? draft.verdicts : {}, zoomMode);
+        idx = 0;
+        trace(`zoom mode → ${zoomMode} (${list.length} members)`);
+        modeBtns.forEach(b => b.classList.toggle('active', b.dataset.zm === zoomMode));
+        paint();
+      };
+      const modeBtns = ZOOM_MODES.map(mode => {
+        const b = document.createElement('button');
+        b.className = 'ee-btn zoom-mode-btn';
+        b.dataset.zm = mode;
+        b.style.minHeight = '40px';
+        b.style.minWidth = '40px';
+        b.textContent = mode[0].toUpperCase() + mode.slice(1);
+        b.title = `zoom cycles ${mode} members only`;
+        b.addEventListener('click', () => setZoomMode(mode));
+        return b;
+      });
+      modeBtns.forEach(b => b.classList.toggle('active', b.dataset.zm === zoomMode));
       const cycle = (dir) => {
         idx = (idx + dir + list.length) % list.length;
         trace(`zoom cycle → ${idx + 1}/${list.length}`);
@@ -988,7 +987,7 @@ registerModule({
       });
       stage.append(img, prev, next, dots, tools);
       tools.append(pickBtn, rejBtn);
-      top.append(back, info,
+      top.append(back, ...modeBtns, info,
         kbdLegendBtn([
           ['←/→', 'cycle members'],
           ['A', 'pick this member'],
