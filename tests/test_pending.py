@@ -1,5 +1,7 @@
 """Pending Delete manifest tests — add/dedupe/pardon/confirm + path jail."""
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -23,6 +25,7 @@ def env(tmp_path, monkeypatch):
     (root / "dir.png").mkdir()  # a directory, not a file
     monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", root)
     monkeypatch.setattr(pending_mod, "MANIFEST", tmp_path / "pending.json")
+    monkeypatch.setattr(pending_mod, "AUDIT", tmp_path / "audit.jsonl")
     return root, tmp_path / "secret.png"
 
 
@@ -101,6 +104,66 @@ def test_confirm_idempotent_when_missing(client, env):
     r = client.post("/api/pending/confirm", json={})
     assert r.json()["deleted"] == 0
     assert client.get("/api/pending").json()["count"] == 0
+
+
+def test_audit_lines_for_add_unmark_confirm(client, env):
+    """Every manifest mutation appends one well-formed JSONL audit line
+    (ts, ip, action, count, paths) to the append-only audit file."""
+    import json
+    root, _ = env
+    audit = pending_mod.AUDIT
+    client.post("/api/pending", json={"paths": ["keepme.png", "two.png"]})
+    lines = [json.loads(l) for l in audit.read_text().splitlines()]
+    assert len(lines) == 1
+    e = lines[0]
+    assert e["action"] == "add" and e["count"] == 2
+    assert e["ip"] == "testclient"  # TestClient host recorded
+    assert sorted(e["paths"]) == ["keepme.png", "two.png"]
+    assert e["ts"].startswith(time.strftime("%Y"))  # ISO-ish UTC stamp
+
+    client.request("DELETE", "/api/pending", json={"paths": ["keepme.png"]})
+    e = [json.loads(l) for l in audit.read_text().splitlines()][-1]
+    assert e["action"] == "unmark" and e["paths"] == ["keepme.png"]
+
+    client.post("/api/pending/confirm", json={})
+    e = [json.loads(l) for l in audit.read_text().splitlines()][-1]
+    assert e["action"] == "confirm" and e["count"] == 1
+    assert e["paths"] == ["two.png"]
+
+
+def test_audit_read_endpoint(client, env):
+    import json
+    root, _ = env
+    client.post("/api/pending", json={"paths": ["keepme.png"]})
+    r = client.get("/api/pending/audit", params={"limit": 10})
+    assert r.status_code == 200
+    lines = r.json()["lines"]
+    assert lines[-1]["action"] == "add"
+    assert lines[-1]["paths"] == ["keepme.png"]
+    # fresh/missing audit file: empty, not an error
+    pending_mod.AUDIT.unlink()
+    assert client.get("/api/pending/audit").json() == {"lines": [], "count": 0}
+
+
+def test_audit_failure_never_fails_mutation(client, env, monkeypatch):
+    """Audit append is best-effort: a broken audit sink can't break the op."""
+    root, _ = env
+    # Point AUDIT at an uncreatable location: append must be swallowed.
+    monkeypatch.setattr(pending_mod, "AUDIT", root / "no-dir" / "x" / "a.jsonl")
+    r = client.post("/api/pending", json={"paths": ["keepme.png"]})
+    assert r.status_code == 200 and r.json() == {"added": 1, "count": 1}
+    assert (root / "keepme.png").is_file()
+
+
+def test_audit_truncates_long_path_lists(client, env):
+    import json
+    root, _ = env
+    for i in range(25):
+        (root / f"m{i}.png").write_bytes(b"x")
+    client.post("/api/pending", json={"paths": [f"m{i}.png" for i in range(25)]})
+    e = [json.loads(l) for l in pending_mod.AUDIT.read_text().splitlines()][-1]
+    assert e["count"] == 25
+    assert len(e["paths"]) == 21 and e["paths"][-1] == "... +5 more"
 
 
 def test_dupe_pool_fallback_listing(monkeypatch, tmp_path):
