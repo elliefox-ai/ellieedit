@@ -3,7 +3,7 @@
 # from the probe are pardoned at the end (manifest restored byte-for-byte).
 # Run: .venv/bin/python tests/dupe-probe.py   (server on 127.0.0.1:8800)
 
-import asyncio, json, os
+import asyncio, json, os, subprocess, sys, tempfile
 from pathlib import Path
 from playwright.async_api import async_playwright
 
@@ -30,6 +30,9 @@ async def main():
             }""")
             await pg.wait_for_timeout(4000)  # thumbnails over /mnt are slow
             report = {"status": await pg.inner_text("#dupe-status")}
+            console_errors = []
+            pg.on("console", lambda m: console_errors.append(m.text)
+                  if m.type in ("error",) else None)
 
             # ── 1a. Latency + render proof ───────────────────────────
             # Cards must render with N>0 and families+thumb latency must be
@@ -52,6 +55,15 @@ async def main():
             }""")
             report["latency"] = latency
             assert latency["cards"] > 0, "no family cards rendered"
+            # Cards must be VISIBLE (non-zero height) — a display:none grid
+            # (the 2026-10-07x .fam-list.open inversion) still 'renders' in DOM.
+            visibility = await pg.evaluate("""() =>
+              [...document.querySelectorAll('.fam-card:not(.skel)')]
+                .map(c => Math.round(c.getBoundingClientRect().height))
+            """)
+            report["card_heights_min"] = min(visibility) if visibility else 0
+            assert report["card_heights_min"] > 0, \
+                f"cards present but invisible (height=0): {visibility[:5]}"
             assert latency["families_ms"] < 3000, f"families too slow: {latency}"
             await pg.screenshot(path=".probes/dupe-01-browser.png")
 
@@ -103,6 +115,10 @@ async def main():
             report["badged_cells"] = await pg.evaluate(
                 "() => document.querySelectorAll('.gal-cell.ispending').length")
             await pg.screenshot(path=".probes/dupe-04-gallery-badges.png")
+
+            # ── 5. Zero console errors during the whole session ────────
+            report["console_errors"] = console_errors
+            assert not console_errors, f"console errors: {console_errors}"
 
             print(json.dumps(report, indent=1))
             await b.close()
