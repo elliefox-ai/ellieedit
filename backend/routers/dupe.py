@@ -183,6 +183,19 @@ def _member_view(m: dict) -> dict:
     }
 
 
+def _missing_member(v: dict) -> dict:
+    """Null the thumb of a member whose file vanished (confirmed deletes
+    leave stale family entries; a dead thumb URL logs a 404 console error
+    on every render). Marks exists=False so the client skips it."""
+    try:
+        if not jailed(v["path"]).is_file():
+            v["thumb"] = None
+            v["exists"] = False
+    except HTTPException:
+        pass
+    return v
+
+
 def _jailed_cheap(rel: str) -> bool:
     """String-level jail check for LISTING paths — no /mnt stat per member.
     Full resolve-based jail stays in jailed() for anything actually opened."""
@@ -294,18 +307,21 @@ def _family_preview(fid: str) -> list[dict]:
     except OSError:
         mt = -1.0
     hit = _preview_cache.get(fid)
-    if hit and hit[0] == mt:
-        return [dict(m) for m in hit[1]]
+    # TTL: a confirmed delete removes member files WITHOUT touching the
+    # family file, so mtime alone would cache dead thumbs indefinitely.
+    if hit and hit[0] == mt and time.time() - hit[1] < 10:
+        return [dict(m) for m in hit[2]]
     try:
         fam = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError) as e:
         raise HTTPException(500, f"family unreadable: {e}")
-    members = [_member_view(m) for m in fam.get("members", [])[:6]]
+    members = [_missing_member(_member_view(m))
+               for m in fam.get("members", [])[:6]]
     for m in members:
         if _jailed_cheap(m["path"]):
             m["thumb"] = None  # jailed member: no thumbnail, flag it
             m["jailed"] = True
-    _preview_cache[fid] = (mt, members)
+    _preview_cache[fid] = (mt, time.time(), members)
     return [dict(m) for m in members]
 
 
@@ -373,6 +389,10 @@ def family_detail(fid: str):
             v["thumb"] = None
             v["jailed"] = True
             v["exists"] = False
+        else:
+            _missing_member(v)
+            if "exists" not in v:
+                v["exists"] = True
         members.append(v)
     fam_verdict = verdicts.get(fid, {})
     note = fam_verdict.get("note", "")
