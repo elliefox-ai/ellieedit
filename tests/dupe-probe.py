@@ -1,30 +1,60 @@
 # Dupe view probe (2026-10-07y) — STACK-SPREAD family detail.
 # Family browser, champion+fan duel, pick/reject, picks strip ordinals,
 # survey grid, focus deck full-size serving, commit → pending + ledger.
-# Non-destructive: pending additions and ledger entries from the probe are
-# pardoned at the end (manifest + ledger restored byte-for-byte).
+# Non-destructive: whole-probe byte snapshot at start; teardown pardons via
+# API, restores captured bytes, and VERIFIES hashes — any drift fails the
+# probe instead of leaking (hardened 2026-10-08h).
 # Run: .venv/bin/python tests/dupe-probe.py   (server on 127.0.0.1:8800)
 
-import asyncio, json, os, shutil, sys, tempfile
+import asyncio, hashlib, json, os, shutil, sys, tempfile, time
 from pathlib import Path
 from playwright.async_api import async_playwright
 
 BASE = "http://127.0.0.1:8800"
 MANIFEST = Path(__file__).resolve().parents[1] / ".pending-delete.json"
 LEDGER = Path(__file__).resolve().parents[1] / ".dupe-verdicts.jsonl"
+SIGNALS_LOG = Path(__file__).resolve().parents[1] / ".dupe-signals.jsonl"
 os.makedirs(".probes", exist_ok=True)
 
 # iPad PWA viewport — the operator's device. Mandatory for screenshots.
 VIEWPORT = {"width": 1024, "height": 768}
 
 
+def _sig_data_dir():
+    return Path(os.environ.get(
+        "ELLIEEDIT_DUPE_DATA",
+        str(Path(os.environ.get("ELLIEEDIT_DUPE_ROOT",
+            "/mnt/shared/_Incoming/DupeReview")) / ".dupes")))
+
+
+def snapshot_state():
+    """Whole-probe byte snapshot of every file the probe may mutate.
+    Restore always uses these captured bytes — never re-derived content.
+    """
+    snap = {}
+    for p in (LEDGER, SIGNALS_LOG):
+        snap[p] = p.read_bytes() if p.exists() else None
+    fam_dir = _sig_data_dir() / "families"
+    if fam_dir.is_dir():
+        for fp in sorted(fam_dir.glob("*.json")):
+            snap[fp] = fp.read_bytes()
+    return snap
+
+
+def manifest_snapshot():
+    return MANIFEST.read_bytes() if MANIFEST.exists() else None
+
+
+async def wait_grid_ready(pg, timeout=30000):
+    """Wait until the family grid has re-rendered past its skeletons — fixed
+    sleeps click skeleton cards (no handlers) when /mnt is slow."""
+    await pg.wait_for_selector(".fam-card:not(.skel)", timeout=timeout)
+
+
 async def main():
-    manifest_backup = MANIFEST.read_bytes() if MANIFEST.exists() else None
-    ledger_backup = LEDGER.read_bytes() if LEDGER.exists() else None
-    SIGNALS_LOG = Path(__file__).resolve().parents[1] / ".dupe-signals.jsonl"
-    signals_backup = SIGNALS_LOG.read_bytes() if SIGNALS_LOG.exists() else None
+    snap = snapshot_state()
+    manifest_backup = manifest_snapshot()
     fam_file = None          # seeded family file (section 10), restored exactly
-    fam_backup = None
     probe_paths = []
     try:
         async with async_playwright() as p:
@@ -107,9 +137,10 @@ async def main():
             # by asserting only ONE detail load per tap (status not erroring).
             for _ in range(2):
                 await pg.evaluate("() => document.querySelector('#dupe-back').click()")
-                await pg.wait_for_timeout(1200)
-                await pg.evaluate("() => document.querySelector('.fam-card').click()")
-                await pg.wait_for_timeout(2000)
+                await wait_grid_ready(pg)
+                await pg.evaluate(
+                    "() => document.querySelector('.fam-card:not(.skel)').click()")
+                await pg.wait_for_selector(".ss-header", timeout=20000)
                 reopen = await pg.evaluate("""() => ({
                   detail_open: document.querySelector('#dupe-detail').classList.contains('open'),
                   header: !!document.querySelector('.ss-header'),
@@ -376,7 +407,7 @@ async def main():
             assert sift_fam and sift_fam["size"] >= 4, \
                 f"no multi-member unresolved family for the sift pass: {sift_fam}"
             await pg.evaluate("() => document.querySelector('#dupe-back').click()")
-            await pg.wait_for_timeout(1500)
+            await wait_grid_ready(pg)
             opened = await pg.evaluate("""(fid) => {
               const card = [...document.querySelectorAll('.fam-card')]
                 .find(c => c.textContent.includes(fid));
@@ -572,7 +603,7 @@ async def main():
             }""")
             if big and big["size"] >= 6:
                 await pg.evaluate("() => document.querySelector('#dupe-back').click()")
-                await pg.wait_for_timeout(1500)
+                await wait_grid_ready(pg)
                 opened = await pg.evaluate("""(fid) => {
                   const card = [...document.querySelectorAll('.fam-card')]
                     .find(c => c.textContent.includes(fid));
@@ -642,10 +673,7 @@ async def main():
             # finally). Assert: ⚡ badge on the family card, conflict chips in
             # the detail signals bar, suggestion ONLY on strong agreement —
             # Apply fills the DRAFT (ledger untouched), Dismiss removes it.
-            sig_data = Path(os.environ.get(
-                "ELLIEEDIT_DUPE_DATA",
-                str(Path(os.environ.get("ELLIEEDIT_DUPE_ROOT",
-                    "/mnt/shared/_Incoming/DupeReview")) / ".dupes")))
+            sig_data = _sig_data_dir()
             fam_dir = sig_data / "families"
             import urllib.request
             items = json.loads(urllib.request.urlopen(
@@ -678,7 +706,6 @@ async def main():
             report["signal_seed"] = seed["id"] if seed else "none found"
             assert seed, "no unresolved family with an addressable strict edge"
             fam_file = seed["file"]
-            fam_backup = fam_file.read_bytes()
             entry_members = {m: "rejected" for m in
                              [mm["path"].replace("\\", "/")
                               for mm in seed["json"]["members"]]}
@@ -758,7 +785,7 @@ async def main():
                                      "probe": True}, ensure_ascii=False) + "\n")
             fam_file.write_text(json.dumps(seed["json"]))
             await pg.evaluate("() => document.querySelector('#dupe-back').click()")
-            await pg.wait_for_timeout(1500)
+            await wait_grid_ready(pg)
             await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
               .find(c => c.textContent.includes('{seed['id']}')).click()""")
             await pg.wait_for_selector("#ss-suggest", timeout=20000)
@@ -795,7 +822,7 @@ async def main():
             # the detail — the suggestion re-shows for the fresh visit — and
             # DISMISS it there.
             await pg.evaluate("() => document.querySelector('#dupe-back').click()")
-            await pg.wait_for_timeout(1500)
+            await wait_grid_ready(pg)
             await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
               .find(c => c.textContent.includes('{seed['id']}')).click()""")
             await pg.wait_for_selector("#ss-suggest", timeout=20000)
@@ -819,28 +846,76 @@ async def main():
             print(json.dumps(report, indent=1))
             await b.close()
     finally:
-        # restore manifest + ledger exactly; pardon via API first
-        if probe_paths:
-            import urllib.request
-            req = urllib.request.Request(
-                BASE + "/api/pending",
-                data=json.dumps({"paths": probe_paths}).encode(),
-                headers={"Content-Type": "application/json"}, method="DELETE")
-            urllib.request.urlopen(req)
-        if manifest_backup is None:
-            MANIFEST.unlink(missing_ok=True)
-        else:
-            MANIFEST.write_bytes(manifest_backup)
-        if ledger_backup is None:
-            LEDGER.unlink(missing_ok=True)
-        else:
-            LEDGER.write_bytes(ledger_backup)
-        if signals_backup is None:
-            SIGNALS_LOG.unlink(missing_ok=True)
-        else:
-            SIGNALS_LOG.write_bytes(signals_backup)
-        if fam_file is not None and fam_backup is not None:
-            fam_file.write_bytes(fam_backup)
+        # HARDENED TEARDOWN (2026-10-08h): the old single-pass restore leaked
+        # manifest entries written after the section-7 probe_paths snapshot —
+        # anything landing post-restore survived, and a restore that changed
+        # bytes passed silently. Now: the manifest is RECONCILED entry-by-entry
+        # (pardon everything added relative to the snapshot, re-add any
+        # snapshot entry that vanished — from captured bytes, never re-derived)
+        # with retries, because a live second client can write the manifest
+        # concurrently; wholesale overwrite would destroy real operator marks.
+        # Probe-exclusive files (ledger, signals, family JSONs) are restored
+        # byte-for-byte from the snapshot and hash-verified: any drift FAILS
+        # the probe instead of leaking.
+        import urllib.request
+
+        def _read_manifest():
+            try:
+                return json.loads(MANIFEST.read_text()) \
+                    if MANIFEST.exists() else {}
+            except (OSError, json.JSONDecodeError):
+                return {}
+
+        base = json.loads(manifest_backup.decode()) if manifest_backup else {}
+        manifest_bad = {}
+        for attempt in range(6):
+            cur = _read_manifest()
+            added = [k for k in cur if k not in base]
+            if added:
+                req = urllib.request.Request(
+                    BASE + "/api/pending",
+                    data=json.dumps({"paths": added}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="DELETE")
+                try:
+                    urllib.request.urlopen(req)
+                except urllib.error.HTTPError:
+                    pass  # jail edge: fall back to direct merge below
+            # re-add snapshot entries that vanished, captured bytes only
+            cur = _read_manifest()
+            missing = {k: v for k, v in base.items() if cur.get(k) != v}
+            if missing:
+                merged = dict(cur)
+                merged.update(missing)
+                MANIFEST.write_text(json.dumps(merged, indent=1))
+            manifest_bad = {k: cur.get(k) for k in base
+                            if _read_manifest().get(k) != base[k]}
+            probe_left = [k for k in _read_manifest() if k not in base]
+            if not manifest_bad and not probe_left:
+                break
+            time.sleep(1.0)  # let a concurrent writer settle, then retry
+        if manifest_bad or probe_left:
+            raise AssertionError(
+                f"PROBE RESTORE LEAK (manifest): base entries wrong "
+                f"{manifest_bad} / probe entries survived {probe_left}")
+        # probe-exclusive files: byte restore + hash verify
+        for attempt in range(6):
+            for p, data in snap.items():
+                if data is None:
+                    p.unlink(missing_ok=True)
+                else:
+                    p.write_bytes(data)
+            bad = {str(p): ("missing" if not p.exists() else
+                            hashlib.sha256(p.read_bytes()).hexdigest()[:16])
+                   for p, data in snap.items()
+                   if (p.read_bytes() if p.exists() else None) != data}
+            if not bad:
+                break
+            time.sleep(1.0)
+        if bad:
+            raise AssertionError(
+                f"PROBE RESTORE LEAK: state not byte-identical after "
+                f"teardown (6 attempts): {bad}")
 
 
 asyncio.run(main())
