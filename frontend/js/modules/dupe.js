@@ -22,7 +22,8 @@
 // NOTHING persists before Commit; commit = verdict POST + send-pending.
 import { registerModule } from '../shell.js';
 import { sigIsOverride, sigChipText } from './dupe-signals.js';
-import { zoomMembers } from './dupe-view.js';
+import { zoomMembers, orderBySimilarity, twinInfo, nextUnhandled,
+         TWIN_NEAR } from './dupe-view.js';
 
 const api = (p, opts) => fetch(`/api/dupe${p}`, opts).then(r => {
   if (!r.ok) return r.json().then(e => Promise.reject(new Error(e.detail || r.status)));
@@ -345,6 +346,12 @@ registerModule({
     let meldMode = false;      // survey multi-select for the FaceCycle meld
     let meldSel = new Set();   // member paths chosen as merge candidates
     let sigShownLogged = false;
+    // TWIN-CLEARING LOOP (2026-10-08m): twin map for the current family
+    // (path -> {twin, kind, dist}), rebuilt per detail render on the
+    // similarity-ordered members.
+    let twinMap = new Map();
+    // families deferred this session — skipped by Commit & next (step 4)
+    const deferredFamilies = new Set();
 
     function job(text, cls = '') {
       jobbar.querySelectorAll('.badge.dupe').forEach(b => b.remove());
@@ -585,6 +592,7 @@ registerModule({
           else if (k === 'ArrowRight') zoom.querySelector('.ss-nav.next').click();
           else if (k === 'a' || k === 'A') zoom.querySelector('#ss-zoom-pick')?.click();
           else if (k === 'f' || k === 'F') zoom.querySelector('#ss-zoom-reject')?.click();
+          else if (k === 't' || k === 'T') zoom.querySelector('#ss-zoom-twin')?.click();
           else return;
           e.preventDefault(); return;
         }
@@ -842,6 +850,14 @@ registerModule({
       top.className = 'ss-ov-top';
       const info = document.createElement('span');
       info.id = 'ss-zoom-pos';
+      // Twin chip (2026-10-08m): '≈ exact · #5' — kind + the twin's 1-based
+      // position in the visited order. Click (or T) jumps to the twin.
+      const twinChip = document.createElement('button');
+      twinChip.className = 'ee-btn ss-zoom-twin';
+      twinChip.id = 'ss-zoom-twin';
+      twinChip.style.minHeight = '32px';
+      twinChip.title = 'jump to the twin (T)';
+      twinChip.addEventListener('click', () => jumpTwin());
       const back = document.createElement('button');
       back.className = 'ee-btn';
       back.id = 'ss-zoom-back';
@@ -904,7 +920,17 @@ registerModule({
         img.src = fileUrl(m.path);
         const modeLbl = zoomMode === 'all' ? 'All'
                       : zoomMode === 'accepted' ? 'Accepted' : 'Rejected';
-        info.textContent = `${modeLbl} ${idx + 1} / ${list.length} · ${m.name}`;        const v = verdictOf(m);
+        info.textContent = `${modeLbl} ${idx + 1} / ${list.length} · ${m.name}`;
+        // twin chip: kind + the twin's 1-based position in this visited set
+        const tw = twinMap.get(m.path);
+        const twIdx = tw ? list.findIndex(x => x.path === tw.twin) : -1;
+        if (tw && twIdx >= 0) {
+          twinChip.style.display = '';
+          twinChip.textContent = `≈ ${tw.kind} · #${twIdx + 1}`;
+          twinChip.title = `twin: ${list[twIdx].name} (${tw.kind}, d=${tw.dist}) — jump (T)`;
+        } else {
+          twinChip.style.display = 'none';
+        }        const v = verdictOf(m);
         pickBtn.textContent = v === 'kept' ? `Un-pick ✓ (#${draft.picks.indexOf(m.path) + 1})`
                             : v ? `verdict: ${v}` : '✓ Pick';
         pickBtn.disabled = !!v && v !== 'kept';
@@ -958,6 +984,16 @@ registerModule({
         return b;
       });
       modeBtns.forEach(b => b.classList.toggle('active', b.dataset.zm === zoomMode));
+      const jumpTwin = () => {
+        const m = list[idx];
+        const tw = m && twinMap.get(m.path);
+        if (!tw) return;
+        const ti = list.findIndex(x => x.path === tw.twin);
+        if (ti < 0) return;
+        idx = ti;
+        trace(`zoom twin jump → ${idx + 1} (${tw.kind})`);
+        paint();
+      };
       const cycle = (dir) => {
         idx = (idx + dir + list.length) % list.length;
         trace(`zoom cycle → ${idx + 1}/${list.length}`);
@@ -990,11 +1026,12 @@ registerModule({
       });
       stage.append(img, prev, next, dots, tools);
       tools.append(pickBtn, rejBtn);
-      top.append(back, ...modeBtns, info,
+      top.append(back, ...modeBtns, info, twinChip,
         kbdLegendBtn([
           ['←/→', 'cycle members'],
           ['A', 'pick this member'],
           ['F', 'reject this member'],
+          ['T', 'jump to the twin'],
           ['Esc', 'back'],
         ]));
       ov.append(top, stage);
@@ -1684,6 +1721,11 @@ registerModule({
         current = f;
         committed = false;
         commitSummary = null;
+        // TWIN-CLEARING ORDER (2026-10-08m): applied once here, so spread,
+        // survey, zoom and kbCycle all traverse nearest-hash-neighbors
+        // first — twins get judged back-to-back.
+        current.members = orderBySimilarity(f.members);
+        twinMap = twinInfo(current.members, f.edges || []);
         // Restore a tab-switched draft, else start fresh.
         const saved = familyDrafts.get(fid);
         draft = saved ? { verdicts: { ...saved.verdicts },
