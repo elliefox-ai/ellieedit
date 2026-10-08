@@ -168,6 +168,69 @@ async def main():
                 " status: document.querySelector('[data-id=status]').textContent})")
             await pg.screenshot(path=".probes/08-post-delete-grid.png")
 
+            # ── 8 (07u). Pending view is GLOBAL: mark in folder A + a second
+            # folder image reachable without switching dropdowns; switch to
+            # Pending while dropdown points at A — grid count must equal
+            # status/manifest count even though the folder is A.
+            await pg.evaluate("() => document.querySelector('[data-act=view-active]').click()")
+            await pg.wait_for_timeout(600)
+            other_dir = GALLERY_ROOT / f"probe-del-other-{os.getpid()}"
+            other_dir.mkdir(exist_ok=True)
+            other_img = other_dir / "probe-other.png"
+            Image.new("RGB", (300, 200), (90, 60, 160)).save(other_img)
+            other_rel = f"{other_dir.name}/probe-other.png"
+            async def _mark(paths, on=True):
+                await pg.evaluate(
+                    "async (args) => fetch('/api/pending', {method: args[1] ? 'POST' : 'DELETE',"
+                    "headers: {'Content-Type': 'application/json'},"
+                    "body: JSON.stringify({paths: args[0]})}).then(r => r.json())",
+                    [[other_rel] + [f"{subdir}/{p.name}" for p in probe_files[:2]], on])
+                await pg.wait_for_timeout(400)
+            await _mark([other_rel, f"{subdir}/{probe_files[0].name}", f"{subdir}/{probe_files[1].name}"])
+            report["manifestCrossFolder"] = await pg.evaluate(
+                "async () => await fetch('/api/pending').then(r => r.json()).then(j => j.count)")
+            # Dropdown points at A (subdir); switch to Pending view.
+            await pg.evaluate("() => document.querySelector('[data-act=view-pending]').click()")
+            await pg.wait_for_timeout(1200)
+            report["pendingGlobal"] = await pg.evaluate(
+                """() => ({gridCells: document.querySelectorAll('.gal-cell').length,
+                          folderLabels: [...document.querySelectorAll('.gal-cell .name')].map(n => n.textContent),
+                          status: document.querySelector('[data-id=status]').textContent,
+                          dropdown: document.querySelector('[data-id=dir-select]').value})""")
+            report["pendingCountAgrees"] = (
+                report["pendingGlobal"]["gridCells"] == report["manifestCrossFolder"])
+            await pg.screenshot(path=".probes/09-pending-global-crossfolder.png")
+            await _mark([other_rel], on=False)
+
+            # ── 9 (07u). Select-mode active styling: filled pill + count in
+            # the button; delete-mode red filled state verified alongside.
+            await pg.evaluate("() => document.querySelector('[data-act=view-active]').click()")
+            for _ in range(20):
+                n_cells = await pg.evaluate("() => document.querySelectorAll('.gal-cell').length")
+                if n_cells:
+                    break
+                await pg.wait_for_timeout(300)
+            await pg.wait_for_timeout(400)
+            await pg.evaluate("() => document.querySelector('[data-act=select-mode]').click()")
+            await pg.wait_for_timeout(300)
+            await pg.evaluate("() => [...document.querySelectorAll('.gal-cell')].slice(0, 2).forEach(c => c.click())")
+            await pg.wait_for_timeout(500)
+            report["selCountAfterClicks"] = await pg.evaluate(
+                "() => document.querySelector('[data-id=sel-count]').textContent")
+            assert report["selCountAfterClicks"] != "0", "selection did not register"
+            async def _btnstyle(sel):
+                js = ("(sel) => { const b = document.querySelector(sel);"
+                      " const s = getComputedStyle(b);"
+                      " return {text: b.textContent.trim(), bg: s.backgroundColor, color: s.color}; }")
+                return await pg.evaluate(js, sel)
+            report["selectActive"] = await _btnstyle('[data-act=select-mode]')
+            await pg.evaluate("() => document.querySelector('[data-act=clear-sel]')?.click()")
+            await pg.evaluate("() => document.querySelector('[data-act=delete-mode]').click()")
+            await pg.wait_for_timeout(300)
+            report["deleteActive"] = await _btnstyle('[data-act=delete-mode]')
+            await pg.evaluate("() => document.querySelector('[data-act=done-marking]').click()")
+            await pg.screenshot(path=".probes/10-select-active-styling.png")
+
             # Verify on disk: every probe file should be gone.
             report["filesLeftOnDisk"] = [p.name for p in probe_files if p.exists()]
             print(json.dumps(report, indent=1))
@@ -176,6 +239,7 @@ async def main():
         # Cleanup: probe dir + clean manifest (probe-owned entries only).
         import shutil
         shutil.rmtree(probe_dir, ignore_errors=True)
+        shutil.rmtree(GALLERY_ROOT / f"probe-del-other-{os.getpid()}", ignore_errors=True)
         if manifest_backup is not None:
             MANIFEST.write_bytes(manifest_backup)
         elif MANIFEST.exists():
