@@ -945,7 +945,7 @@ registerModule({
         if (!pinned) return;
         showingPinned = !showingPinned;
         trace(`zoom flip → ${showingPinned ? 'pinned' : 'current'}`);
-        paint();   // visibility only — no src swap, zero network
+        paint(false);   // visibility only — no src swap, no prefetch, zero network
       };
       const togglePin = () => {
         if (pinned) { pinned = null; pinnedIdx = -1; showingPinned = false; }
@@ -982,7 +982,7 @@ registerModule({
       rejBtn.style.minHeight = '44px';
       rejBtn.id = 'ss-zoom-reject';
       rejBtn.dataset.kbd = 'F';
-      const paint = () => {
+      const paint = (prefetch = true) => {
         if (!list.length) {
           // Empty state: plain inline hint in the stage, never a blank frame.
           img.removeAttribute('src');
@@ -1026,19 +1026,22 @@ registerModule({
         pinBadge.textContent = `PINNED #${pinnedIdx + 1}`;
         pinBtn.textContent = pinned ? `📌 Unpin (#${pinnedIdx + 1})` : '📌 Pin';
         pinInfo.textContent = `PIN: ${pinned ? '#' + (pinnedIdx + 1) : 'none'}`;
-        // prefetch neighbors + pinned: warm the cache, no layout cost
-        for (const ni of [idx - 1, idx + 1]) {
-          const nm = list[(ni + list.length) % list.length];
-          if (nm) {
+        // prefetch neighbors + pinned: warm the cache, no layout cost.
+        // Skipped on flip repaints — flipping must cost zero network.
+        if (prefetch) {
+          for (const ni of [idx - 1, idx + 1]) {
+            const nm = list[(ni + list.length) % list.length];
+            if (nm) {
+              const im = new Image();
+              im.src = fileUrl(nm.path);
+              if (im.decode) im.decode().catch(() => {});
+            }
+          }
+          if (pinned && !showingPinned) {
             const im = new Image();
-            im.src = fileUrl(nm.path);
+            im.src = fileUrl(pinned.path);
             if (im.decode) im.decode().catch(() => {});
           }
-        }
-        if (pinned && !showingPinned) {
-          const im = new Image();
-          im.src = fileUrl(pinned.path);
-          if (im.decode) im.decode().catch(() => {});
         }
         const modeLbl = zoomMode === 'all' ? 'All'
                       : zoomMode === 'accepted' ? 'Accepted' : 'Rejected';
