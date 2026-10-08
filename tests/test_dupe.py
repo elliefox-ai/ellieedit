@@ -279,7 +279,71 @@ def test_send_to_pending_no_rejects(env, client):
     assert client.post("/api/dupe/families/fam-aaaaaaaaaaaa/send-pending").status_code == 409
 
 
-# ------------------------------------------------- real dupelib end-to-end
+# --------------------------------------------------------- slow-storage perf
+
+def test_families_cache_hit_no_family_file_reads(env, client, monkeypatch):
+    """Perf shape: a second /families page over unchanged data must serve from
+    the preview cache — zero family-file reads and zero jail resolves."""
+    root, _, _ = env
+    client.get("/api/dupe/families")                      # warm the cache
+    fam_path = dupe_mod.DUPE_DATA / "families" / "fam-aaaaaaaaaaaa.json"
+    real_read = Path.read_text
+    calls = []
+    def counting(self, *a, **k):
+        if self == fam_path:
+            calls.append(self)
+        return real_read(self, *a, **k)
+    monkeypatch.setattr(Path, "read_text", counting)
+    r = client.get("/api/dupe/families?cursor=fam-aaaaaaaaaaaa")
+    assert r.status_code == 200
+    assert calls == [], "family files re-read on cache hit — listing stats /mnt per request"
+
+
+def test_status_cache_skips_freshness_walk(env, client, monkeypatch):
+    """Perf shape: repeat /status inside the TTL must not re-walk the tree."""
+    dupe_mod._status_cache = None
+    dupe_mod._freshness_cache = None
+    client.get("/api/dupe/status")                        # first: walk happens
+    walked = []
+    real_walk = dupe_mod._freshness_walk
+    monkeypatch.setattr(dupe_mod, "_freshness_walk",
+                        lambda m: (walked.append(1), real_walk(m))[1])
+    s = client.get("/api/dupe/status")
+    assert s.status_code == 200 and s.json()["indexed"]
+    assert walked == [], "status re-walked /mnt inside the cache TTL"
+    dupe_mod._status_cache = None
+    dupe_mod._freshness_cache = None
+
+
+def test_status_cache_invalidated_by_verdict(env, client):
+    """A new verdict changes counts — the cache key includes the ledger mtime."""
+    dupe_mod._status_cache = None
+    dupe_mod._freshness_cache = None
+    assert client.get("/api/dupe/status").json()["resolved"] == 0
+    client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict",
+                json={"members": {"a.png": "kept", "b.png": "kept",
+                                  "sub/c.png": "kept"}})
+    dupe_mod._status_cache = None   # TTL would otherwise mask the change
+    dupe_mod._freshness_cache = None
+    assert client.get("/api/dupe/status").json()["resolved"] == 1
+
+
+def test_families_cheap_jail_flags_without_resolve(env, client):
+    """Traversal-shaped member paths are flagged jailed in listings without a
+    per-request resolve of the real tree."""
+    import copy
+    fam_path = dupe_mod.DUPE_DATA / "families" / "fam-aaaaaaaaaaaa.json"
+    fam = json.loads(fam_path.read_text())
+    fam["members"][0]["path"] = "../secret.png"
+    fam_path.write_text(json.dumps(fam))
+    dupe_mod._preview_cache.pop("fam-aaaaaaaaaaaa", None)
+    lst = client.get("/api/dupe/families").json()
+    card = next(f for f in lst["items"] if f["id"] == "fam-aaaaaaaaaaaa")
+    assert card["members"][0]["jailed"] is True and card["members"][0]["thumb"] is None
+    dupe_mod._preview_cache.clear()
+
+
+# --------------------------------------------------- real dupelib end-to-end
 
 def test_real_dupelib_analyze_families(tmp_path, monkeypatch):
     """Best proof: generate near-dupe PNGs, run the REAL dupelib analyze,

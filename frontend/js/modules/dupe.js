@@ -63,6 +63,9 @@ registerModule({
       .dupe-note { flex:1; min-width:160px; background:#0f0f1a; color:#d4d4e0;
                    border:1px solid #2a2a44; border-radius:4px; padding:5px 8px; font-size:12px; }
       .back { margin-right:auto; }
+      .dupe-more { display:flex; justify-content:center; padding:12px; }
+      .fam-card.skel { opacity:0.5; pointer-events:none; }
+      .skel .fam-strip img { background:#22223a; }
     </style>
     <div class="dupe-wrap">
       <div class="dupe-top">
@@ -73,6 +76,9 @@ registerModule({
       </div>
       <div class="dupe-scroll" id="dupe-scroll">
         <div class="fam-list" id="fam-list"></div>
+        <div class="dupe-more" id="dupe-more" style="display:none">
+          <button class="ee-btn" id="dupe-loadmore">Load more</button>
+        </div>
         <div class="dupe-detail" id="dupe-detail"></div>
       </div>
       <div class="dupe-bottom" id="dupe-bottom" style="display:none">
@@ -87,6 +93,8 @@ registerModule({
       pills: [...panel.querySelectorAll('.dupe-top .pill')],
       status: panel.querySelector('#dupe-status'),
       list: panel.querySelector('#fam-list'),
+      more: panel.querySelector('#dupe-more'),
+      loadmore: panel.querySelector('#dupe-loadmore'),
       detail: panel.querySelector('#dupe-detail'),
       scroll: panel.querySelector('#dupe-scroll'),
       bottom: panel.querySelector('#dupe-bottom'),
@@ -96,6 +104,8 @@ registerModule({
       defer: panel.querySelector('#dupe-defer'),
     };
     let filter = 'unresolved';
+    let cursor = '';        // next families page cursor
+    let exhausted = false;  // no more pages
     let current = null;      // detail family
     let picks = {};          // path -> verdict (draft in detail view)
 
@@ -114,6 +124,26 @@ registerModule({
       renderList();
     }));
 
+    el.loadmore.addEventListener('click', () => renderList(cursor));
+
+    function skeletons(n = 6) {
+      const grid = document.createElement('div');
+      grid.className = 'fam-grid';
+      for (let i = 0; i < n; i++) {
+        const card = document.createElement('div');
+        card.className = 'fam-card skel';
+        const strip = document.createElement('div');
+        strip.className = 'fam-strip';
+        for (let j = 0; j < 4; j++) strip.appendChild(document.createElement('img'));
+        const meta = document.createElement('div');
+        meta.className = 'fam-meta';
+        meta.innerHTML = '<span>…</span><span>loading</span>';
+        card.append(strip, meta);
+        grid.appendChild(card);
+      }
+      return grid;
+    }
+
     async function renderStatus() {
       try {
         const s = await api('/status');
@@ -127,45 +157,61 @@ registerModule({
       } catch (e) { el.status.textContent = `status failed: ${e.message}`; }
     }
 
-    async function renderList() {
+    function cardFor(f) {
+      const card = document.createElement('div');
+      card.className = `fam-card ${f.state === 'resolved' ? 'resolved' : ''}`;
+      const strip = document.createElement('div');
+      strip.className = 'fam-strip';
+      for (const m of (f.members || [])) {
+        if (m.thumb) {
+          const img = document.createElement('img');
+          img.loading = 'lazy';   // per-card async — never blocks the grid
+          img.src = m.thumb;
+          strip.appendChild(img);
+        }
+      }
+      const meta = document.createElement('div');
+      meta.className = 'fam-meta';
+      meta.innerHTML =
+        `<span>${f.id}</span><span>${f.size} members</span>` +
+        (f.tiers || []).map(t => `<span class="tier-badge ${t}">${t}</span>`).join('') +
+        (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '');
+      card.append(strip, meta);
+      card.addEventListener('click', () => renderDetail(f.id));
+      return card;
+    }
+
+    async function renderList(nextCursor = '') {
       el.pills.forEach(p => p.classList.toggle('active', p.dataset.f === filter));
       el.detail.classList.remove('open');
       el.list.classList.add('open');
       el.bottom.style.display = 'none';
       current = null;
-      job('loading families…');
+      const firstPage = !nextCursor;
+      if (firstPage) {
+        cursor = '';
+        exhausted = false;
+        el.list.innerHTML = '';
+        el.list.appendChild(skeletons());   // cards-shaped progress immediately
+      }
+      el.more.style.display = 'none';
+      job(firstPage ? 'loading families…' : 'loading more…');
       try {
-        const data = await api(`/families?state=${filter}`);
+        const data = await api(`/families?state=${filter}&cursor=${encodeURIComponent(nextCursor)}`);
         el.pills[0].textContent = `Unresolved (${data.counts.unresolved})`;
         el.pills[1].textContent = `Resolved (${data.counts.resolved})`;
         el.pills[2].textContent = `All (${data.total})`;
-        const grid = document.createElement('div');
-        grid.className = 'fam-grid';
-        for (const f of data.items) {
-          const card = document.createElement('div');
-          card.className = `fam-card ${f.state === 'resolved' ? 'resolved' : ''}`;
-          const strip = document.createElement('div');
-          strip.className = 'fam-strip';
-          for (const m of (f.members || [])) {
-            if (m.thumb) {
-              const img = document.createElement('img');
-              img.loading = 'lazy';
-              img.src = m.thumb;
-              strip.appendChild(img);
-            }
-          }
-          const meta = document.createElement('div');
-          meta.className = 'fam-meta';
-          meta.innerHTML =
-            `<span>${f.id}</span><span>${f.size} members</span>` +
-            (f.tiers || []).map(t => `<span class="tier-badge ${t}">${t}</span>`).join('') +
-            (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '');
-          card.append(strip, meta);
-          card.addEventListener('click', () => renderDetail(f.id));
-          grid.appendChild(card);
+        let grid = el.list.querySelector('.fam-grid');
+        if (firstPage || !grid) {
+          el.list.innerHTML = '';
+          grid = document.createElement('div');
+          grid.className = 'fam-grid';
+          el.list.appendChild(grid);
         }
-        el.list.innerHTML = '';
-        el.list.appendChild(grid);
+        for (const f of data.items) grid.appendChild(cardFor(f));
+        cursor = data.next_cursor || '';
+        exhausted = !data.next_cursor;
+        el.more.style.display = exhausted ? 'none' : 'flex';
         job('');
       } catch (e) { job(`dupe: ${e.message}`, 'err'); }
     }

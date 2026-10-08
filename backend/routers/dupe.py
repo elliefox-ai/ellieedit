@@ -49,6 +49,16 @@ FAMILY_ID_RE = re.compile(r"^fam-[0-9a-f]{12}$")
 PAGE_SIZE = 40
 SCAN_LOG = Path("/tmp/ellieedit-dupescan.log")
 
+# Slow-storage defenses: the canonical tree lives on /mnt (10-100x slower
+# than local disk), so every hot endpoint serves from mtime-keyed caches and
+# never walks or stats the tree per request.
+_STATUS_TTL = 60.0            # seconds a cached /status payload stays fresh
+_FRESHNESS_TTL = 600.0        # seconds between /mnt freshness walks
+_status_cache: tuple[float, str, str, dict] | None = None  # (key, ts, freshness, payload)
+_freshness_cache: tuple[str, float, str] | None = None      # (idx_key, ts, freshness)
+_preview_cache: dict[str, tuple[float, list[dict]]] = {}    # fid -> (fam mtime, members)
+_jail_cache: dict[str, bool] = {}                           # rel path -> jailed?
+
 router = APIRouter(prefix="/api/dupe", tags=["dupe"])
 
 
@@ -142,22 +152,75 @@ def _member_view(m: dict) -> dict:
     }
 
 
+def _jailed_cheap(rel: str) -> bool:
+    """String-level jail check for LISTING paths — no /mnt stat per member.
+    Full resolve-based jail stays in jailed() for anything actually opened."""
+    hit = _jail_cache.get(rel)
+    if hit is not None:
+        return hit
+    bad = (not rel or rel.startswith("/") or rel.startswith("~")
+           or ".." in rel.split("/"))
+    _jail_cache[rel] = bad
+    return bad
+
+
 # ----------------------------------------------------------------- endpoints
 
 @router.get("/status")
 def status():
+    global _status_cache, _freshness_cache
     try:
         idx = _index()
     except HTTPException as e:
         return {"indexed": False, "root": str(DUPE_ROOT), "detail": e.detail}
+    idx_path = DUPE_DATA / "index.json"
+    idx_mtime = idx_path.stat().st_mtime
+    try:
+        ledger_mtime = LEDGER.stat().st_mtime
+    except OSError:
+        ledger_mtime = 0.0
+    key = f"{idx_mtime}:{ledger_mtime}"
+    now = time.monotonic()
+    if _status_cache and _status_cache[0] == key and now - _status_cache[1] < _STATUS_TTL:
+        return _status_cache[3]
+
     fams = idx["families"]
     verdicts = _verdicts()
     resolved = sum(1 for f in fams if _family_state(f["id"], verdicts) == "resolved")
-    idx_mtime = (DUPE_DATA / "index.json").stat().st_mtime
 
-    # Freshness: newest image mtime under the root, with a walk budget so a
-    # slow network mount can't wedge the endpoint. Budget blown => honest
-    # "unknown" rather than a stale claim.
+    # Freshness: newest image mtime under the root — expensive on slow
+    # storage, so it runs at most once per _FRESHNESS_TTL (or index change)
+    # and the payload never waits on it after the first walk.
+    if _freshness_cache and _freshness_cache[0] == key:
+        _, ts, freshness = _freshness_cache
+    else:
+        ts, freshness = 0.0, None
+    if freshness is None or now - ts >= _FRESHNESS_TTL:
+        freshness = _freshness_walk(idx_mtime)
+        _freshness_cache = (key, now, freshness)
+    return {
+        "indexed": True,
+        "root": str(DUPE_ROOT),
+        "families": len(fams),
+        "members": sum(f.get("size", 0) for f in fams),
+        "resolved": resolved,
+        "unresolved": len(fams) - resolved,
+        "index_generated": idx.get("generated"),
+        "index_age_s": int(time.time() - idx_mtime),
+        "freshness": freshness,
+        "ledger": str(LEDGER),
+        "scan_hint": (
+            f"cd {DUPELIB_PATH} && PYTHONPATH=. python3 -m dupelib.cli analyze "
+            f"\"{DUPE_ROOT}\"  # full scans are fastest from the Windows side"),
+    }
+    _status_cache = (key, now, payload)
+    return payload
+
+
+def _freshness_walk(idx_mtime: float) -> str:
+    """Walk the dupe root for the newest image mtime with a time budget, so a
+    slow network mount can't wedge the endpoint. Budget blown => honest
+    "unknown" rather than a stale claim. Called at most once per TTL."""
     newest = None
     complete = True
     budget = time.monotonic() + 4.0
@@ -184,28 +247,35 @@ def status():
         except OSError:
             continue
     if newest is None:
-        freshness = "no-images"
-    elif not complete:
-        freshness = "unknown (walk budget exceeded)"
-    else:
-        freshness = ("fresh" if newest <= idx_mtime
-                     else f"stale — {int(newest - idx_mtime)}s of images newer than index")
+        return "no-images"
+    if not complete:
+        return "unknown (walk budget exceeded)"
+    return ("fresh" if newest <= idx_mtime
+            else f"stale — {int(newest - idx_mtime)}s of images newer than index")
 
-    return {
-        "indexed": True,
-        "root": str(DUPE_ROOT),
-        "families": len(fams),
-        "members": sum(f.get("size", 0) for f in fams),
-        "resolved": resolved,
-        "unresolved": len(fams) - resolved,
-        "index_generated": idx.get("generated"),
-        "index_age_s": int(time.time() - idx_mtime),
-        "freshness": freshness,
-        "ledger": str(LEDGER),
-        "scan_hint": (
-            f"cd {DUPELIB_PATH} && PYTHONPATH=. python3 -m dupelib.cli analyze "
-            f"\"{DUPE_ROOT}\"  # full scans are fastest from the Windows side"),
-    }
+
+def _family_preview(fid: str) -> list[dict]:
+    """First members of a family in client shape, mtime-cached so repeat
+    listings cost zero family-file reads and zero /mnt stats."""
+    p = _family_path(fid)
+    try:
+        mt = p.stat().st_mtime
+    except OSError:
+        mt = -1.0
+    hit = _preview_cache.get(fid)
+    if hit and hit[0] == mt:
+        return [dict(m) for m in hit[1]]
+    try:
+        fam = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        raise HTTPException(500, f"family unreadable: {e}")
+    members = [_member_view(m) for m in fam.get("members", [])[:6]]
+    for m in members:
+        if _jailed_cheap(m["path"]):
+            m["thumb"] = None  # jailed member: no thumbnail, flag it
+            m["jailed"] = True
+    _preview_cache[fid] = (mt, members)
+    return [dict(m) for m in members]
 
 
 @router.get("/families")
@@ -233,17 +303,11 @@ def families(state: str = "unresolved", cursor: str = ""):
         except StopIteration:
             raise HTTPException(400, "bad cursor")
     page = rows[start:start + PAGE_SIZE]
-    # Thumbnails for the first few members of each card (strip view).
+    # Thumbnails for the first few members of each card (strip view), served
+    # from the per-family preview cache — no family-file reads or /mnt stats
+    # when nothing changed on disk.
     for r in page:
-        fam = _load_family(r["id"])
-        members = [_member_view(m) for m in fam.get("members", [])[:6]]
-        for m in members:
-            try:
-                jailed(m["path"])
-            except HTTPException:
-                m["thumb"] = None  # jailed member: no thumbnail, flag it
-                m["jailed"] = True
-        r["members"] = members
+        r["members"] = _family_preview(r["id"])
     next_cursor = page[-1]["id"] if page and start + PAGE_SIZE < len(rows) else None
     counts = {"unresolved": 0, "resolved": 0}
     for f in idx["families"]:
