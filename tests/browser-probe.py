@@ -1,144 +1,149 @@
-import asyncio, json, os
-from playwright.async_api import async_playwright
+# Visual probe — curation redesign flow (2026-10-07s).
+# Run: .venv/bin/python tests/browser-probe.py   (server on 127.0.0.1:8800)
+# Uses a dedicated probe subdir with generated PNGs so the pending-delete
+# CONFIRM step only ever destroys probe files. Restores a clean manifest.
 
-os.makedirs('.probes', exist_ok=True)
+import asyncio, json, os, sys
+from pathlib import Path
+from playwright.async_api import async_playwright
+from PIL import Image
+
+BASE = "http://127.0.0.1:8800"
+GALLERY_ROOT = Path(os.environ.get("ELLIEEDIT_GALLERY_ROOT", "/mnt/e/comfyui/output"))
+MANIFEST = Path(__file__).resolve().parents[1] / ".pending-delete.json"
+os.makedirs(".probes", exist_ok=True)
+
+probe_dir = GALLERY_ROOT / f"probe-del-{os.getpid()}"
+probe_dir.mkdir(exist_ok=True)
+probe_files = []
+for i, color in enumerate([(180, 40, 40), (40, 140, 200), (60, 170, 90), (220, 180, 60)]):
+    p = probe_dir / f"probe-{i}.png"
+    Image.new("RGB", (320, 240), color).save(p)
+    probe_files.append(p)
+
+
+async def click_btn(pg, pattern, scope=""):
+    return await pg.evaluate(
+        """([pattern, scope]) => {
+          const root = scope ? document.querySelector(scope) : document;
+          const b = [...root.querySelectorAll('button')].find(b => pattern.test(b.textContent.trim()));
+          if (b) { b.click(); return b.textContent.trim(); }
+          return null;
+        }""", [pattern, scope])
+
 
 async def main():
-    async with async_playwright() as p:
-        b = await p.chromium.launch()
-        pg = await b.new_page(viewport={"width": 900, "height": 700})
-        await pg.goto("http://127.0.0.1:8800/", wait_until="networkidle")
-        await pg.wait_for_timeout(1200)
+    manifest_backup = MANIFEST.read_bytes() if MANIFEST.exists() else None
+    try:
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            pg = await b.new_page(viewport={"width": 900, "height": 700})
+            await pg.goto(BASE + "/", wait_until="networkidle")
+            await pg.wait_for_timeout(1200)
+            report = {"build": await pg.evaluate(
+                "() => [...document.querySelectorAll('#tabbar span')].map(s=>s.textContent).find(t=>t.startsWith('build'))")}
 
-        # 1. Thumb aspect check: thumb natural ratio vs declared source dims
-        check = await pg.evaluate("""async () => {
-          const r = await fetch('/api/gallery/list').then(r=>r.json());
-          const out=[];
-          for (const it of r.items.slice(0,8)){
-            const im = new Image();
-            const prom = new Promise(res=>{im.onload=res; im.onerror=res; im.src='/api/gallery/thumb?path='+encodeURIComponent(it.path);});
-            await prom;
-            out.push({name: it.name, srcDims: it.width+'x'+it.height, thumbDims: im.naturalWidth+'x'+im.naturalHeight});
-          }
-          return out;
-        }""")
-
-        # 2. Duel button semantics: which side changes on each button
-        await pg.evaluate("() => [...document.querySelectorAll('[data-tab],[role=tab],.tab,.ee-tab')].find(x=>/review/i.test(x.textContent)).click()")
-        await pg.wait_for_timeout(500)
-        await pg.evaluate("() => [...document.querySelectorAll('.rv-cell')].slice(0,4).forEach(c=>c.click())")
-        await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>/^Review \\d/.test(b.textContent.trim()))?.click()")
-        await pg.wait_for_timeout(900)
-        async def left_src():
-            return await pg.evaluate("() => [...document.querySelectorAll('img')].filter(i=>!i.closest('.rv-cell') && i.closest('[class*=duel],[class*=stage],[class*=rv-]')).map(i=>i.src.slice(-24))")
-        before = await left_src()
-        await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>/keep challenger/i.test(b.textContent)).click()")
-        await pg.wait_for_timeout(600)
-        afterB = await left_src()
-        await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>/keep champion/i.test(b.textContent)).click()")
-        await pg.wait_for_timeout(600)
-        afterA = await left_src()
-        await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>/keep challenger/i.test(b.textContent)).click()")
-        await pg.wait_for_timeout(600)
-        afterB2 = await left_src()
-        duel = {"initial": before, "afterKeepChallenger": afterB, "afterKeepChampion": afterA, "afterKeepChallenger2": afterB2,
-                "phaseNow": await pg.evaluate("() => (document.body.innerText.match(/Challenger [^\\n]*/)||['done'])[0]")}
-
-        # 3. iPad emulation: are the labels visible?
-        ip = await b.new_page(viewport={"width": 1024, "height": 768}, is_mobile=True, has_touch=True)
-        await ip.goto("http://127.0.0.1:8800/", wait_until="networkidle")
-        await ip.wait_for_timeout(1000)
-        await ip.evaluate("() => [...document.querySelectorAll('[data-tab],[role=tab],.tab,.ee-tab')].find(x=>/review/i.test(x.textContent)).click()")
-        await ip.wait_for_timeout(400)
-        await ip.evaluate("() => [...document.querySelectorAll('.rv-cell')].slice(0,3).forEach(c=>c.click())")
-        await ip.evaluate("() => [...document.querySelectorAll('button')].find(b=>/^Review \\d/.test(b.textContent.trim()))?.click()")
-        await ip.wait_for_timeout(900)
-        ipad = await ip.evaluate("""() => {
-          const t=document.body.innerText;
-          const champ=[...document.querySelectorAll('*')].find(e=>e.childElementCount===0 && /champion/i.test(e.textContent));
-          const vis = champ ? (()=>{const r=champ.getBoundingClientRect(); const cs=getComputedStyle(champ); return {w:r.width|0,h:r.height|0,display:cs.display,visibility:cs.visibility,fontSize:cs.fontSize,color:cs.color};})() : 'not found';
-          return {hasChampion: /champion/i.test(t), hasChallenger: /challenger/i.test(t), labelBox: vis};
-        }""")
-        await ip.screenshot(path="/tmp/shot-ipad-duel.png")
-        # 4. Full ladder to completion: results view + post-save grid state
-        const_clear = "() => [...document.querySelectorAll('button')].find(b=>b.dataset.act==='clear-sel')?.click()"
-        await pg.evaluate(const_clear)
-        await pg.evaluate("() => [...document.querySelectorAll('.rv-cell')].slice(0,4).forEach(c=>c.click())")
-        await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>/^Review \\d/.test(b.textContent.trim()))?.click()")
-        await pg.wait_for_timeout(900)
-        ladder_clicks = []
-        for _ in range(4):
-            btn = await pg.query_selector('button[data-act="keep-champion"]')
-            done = await pg.evaluate("() => !!document.querySelector('[data-id=\\'results\\']') && document.querySelector('[data-id=\\'results\\']').style.display !== 'none'")
-            if done:
-                break
-            await btn.click()
-            ladder_clicks.append('keep-champion')
-            await pg.wait_for_timeout(600)
-        results_state = await pg.evaluate("""() => {
-          const res = document.querySelector('[data-id=results]');
-          const vis = res && res.style.display !== 'none';
-          return {
-            resultsVisible: vis,
-            champLabel: document.querySelector('[data-id=res-champ-label]')?.textContent,
-            runnerLabel: document.querySelector('[data-id=res-runner-label]')?.textContent,
-            summary: document.querySelector('[data-id=res-summary]')?.textContent,
-            buttons: [...(res?.querySelectorAll('.rr-actions button')||[])].map(b=>b.textContent.trim()),
-            duelVisible: (()=>{const d=document.querySelector('.rv-duel'); return !!d && !d.classList.contains('hidden') && d.getBoundingClientRect().height > 0;})(),
-            rejectedVisible: (()=>{const r=document.querySelector('[data-id=rejected]'); return !!r && r.getBoundingClientRect().height > 0;})(),
-          };
-        }""")
-        await pg.screenshot(path='.probes/results-view.png')
-
-        # Redo round -> run again -> Keep Champion & exit -> grid highlight
-        await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>/redo round/i.test(b.textContent)).click()")
-        await pg.wait_for_timeout(500)
-        for _ in range(4):
-            done = await pg.evaluate("() => document.querySelector('[data-id=results]').style.display !== 'none'")
-            if done:
-                break
-            await (await pg.query_selector('button[data-act="keep-champion"]')).click()
+            # ── 1. Gallery multi-select over the probe subdir ──────────────
+            subdir = probe_dir.name
+            await pg.select_option('[data-id="dir-select"]', subdir)
+            await pg.wait_for_timeout(1200)
+            await pg.evaluate("() => document.querySelector('[data-act=select-mode]').click()")
+            await pg.evaluate("() => [...document.querySelectorAll('.gal-cell')].slice(0, 4).forEach(c => c.click())")
             await pg.wait_for_timeout(500)
-        champ = await pg.evaluate("() => document.querySelector('[data-id=res-champ-label]').textContent")
-        await pg.screenshot(path='.probes/results-after-redo.png')
-        await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>/keep champion/i.test(b.textContent) && b.closest('.rr-actions')).click()")
-        await pg.wait_for_timeout(800)
-        post_exit = await pg.evaluate("""() => ({
-          fullHidden: document.querySelector('[data-id=full]').style.display === 'none',
-          selCells: [...document.querySelectorAll('.rv-cell.sel')].map(c=>c.querySelector('.name').textContent),
-          toast: [...document.querySelectorAll('body > div')].map(d=>d.textContent).find(t=>/champion kept/i.test(t)) || null,
-        })""")
-        await pg.screenshot(path='.probes/grid-after-exit.png')
+            report["actionBar"] = await pg.evaluate(
+                "() => ({sel: document.querySelector('[data-id=sel-count]').textContent,"
+                " ladderBtn: document.querySelector('[data-act=ladder]').textContent.trim(),"
+                " blendPairVisible: document.querySelector('[data-act=blend-pair]').style.display !== 'none'})")
+            await pg.screenshot(path=".probes/01-gallery-multiselect.png")
 
-        # Save flow: blend the pair, save, verify toast + highlighted cell
-        await pg.evaluate(const_clear)
-        await pg.evaluate("() => [...document.querySelectorAll('.rv-cell')].slice(0,4).forEach(c=>c.click())")
-        await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>/^Review \\d/.test(b.textContent.trim()))?.click()")
-        await pg.wait_for_timeout(700)
-        for _ in range(4):
-            done = await pg.evaluate("() => document.querySelector('[data-id=results]') && document.querySelector('[data-id=results]').style.display !== 'none'")
-            if done:
-                break
-            await (await pg.query_selector('button[data-act="keep-champion"]')).click()
-            await pg.wait_for_timeout(500)
-        await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>/blend these two/i.test(b.textContent)).click()")
-        await pg.wait_for_timeout(1500)
-        save_name = 'probe-blend-' + str(os.getpid()) + '.png'
-        await pg.fill('[data-id=save-name]', save_name)
-        pg.on('dialog', lambda d: asyncio.ensure_future(d.accept()))
-        await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>b.dataset.act==='save').click()")
-        await pg.wait_for_timeout(1500)
-        post_save = await pg.evaluate("""() => ({
-          fullHidden: document.querySelector('[data-id=full]').style.display === 'none',
-          selCells: [...document.querySelectorAll('.rv-cell.sel')].map(c=>c.querySelector('.name').textContent),
-          toast: [...document.querySelectorAll('body > div')].map(d=>d.textContent).find(t=>/saved/i.test(t)) || null,
-        })""")
-        await pg.screenshot(path='.probes/grid-after-save.png')
+            # ── 2. Ladder N launch → duel → results ────────────────────────
+            await pg.evaluate("() => document.querySelector('[data-act=ladder]').click()")
+            await pg.wait_for_timeout(900)
+            report["ladderTabActive"] = await pg.evaluate(
+                "() => document.querySelector('.tab.active').dataset.name")
+            report["duelPhase"] = await pg.evaluate(
+                "() => (document.body.innerText.match(/Challenger [^\\n]*/) || [null])[0]")
+            await pg.screenshot(path=".probes/02-ladder-duel.png")
+            for _ in range(4):
+                done = await pg.evaluate(
+                    "() => { const r = document.querySelector('[data-id=results]'); return r && r.style.display !== 'none'; }")
+                if done:
+                    break
+                await (await pg.query_selector('button[data-act="keep-champion"]')).click()
+                await pg.wait_for_timeout(600)
+            report["results"] = await pg.evaluate(
+                """() => ({champ: document.querySelector('[data-id=res-champ-label]')?.textContent,
+                          sendBtn: document.querySelector('[data-act=res-send-pending]')?.textContent.trim()})""")
+            await pg.screenshot(path=".probes/03-ladder-results.png")
 
-        print(json.dumps({"thumbCheck": check, "duelClicks": duel, "ipad": ipad,
-                          "ladderClicks": ladder_clicks, "resultsState": results_state,
-                          "championAfterRedo": champ, "postExit": post_exit,
-                          "saveName": save_name, "postSave": post_save}, indent=1))
-        await b.close()
+            # ── 3. Send M rejected → Pending Delete ────────────────────────
+            await pg.evaluate("() => document.querySelector('[data-act=res-send-pending]').click()")
+            await pg.wait_for_timeout(800)
+            report["sendToast"] = await pg.evaluate(
+                "() => [...document.querySelectorAll('body > div')].map(d => d.textContent).find(t => /marked for delete/.test(t)) || null")
+            report["manifestAfterSend"] = await pg.evaluate(
+                "async () => await fetch('/api/pending').then(r => r.json()).then(j => j.count)")
+            await pg.screenshot(path=".probes/04-send-rejected.png")
+
+            # ── 4. Delete-mode marking (red chrome + MARKING badge) ────────
+            await pg.click('.tab[data-name="gallery"]')
+            await pg.wait_for_timeout(400)
+            await pg.evaluate("() => document.querySelector('[data-act=delete-mode]').click()")
+            await pg.evaluate("() => [...document.querySelectorAll('.gal-cell')].slice(0, 2).forEach(c => c.click())")
+            await pg.wait_for_timeout(700)
+            report["deleteMode"] = await pg.evaluate(
+                """() => ({gridMarking: document.querySelector('.gal-grid').classList.contains('marking'),
+                          markingBadge: !!document.querySelector('#tabbar .marking-badge'),
+                          markCount: document.querySelector('[data-id=mark-count]').textContent,
+                          barOn: document.querySelector('[data-id=marking-bar]').classList.contains('on')})""")
+            await pg.screenshot(path=".probes/05-delete-mode-marking.png")
+            await pg.evaluate("() => document.querySelector('[data-act=done-marking]').click()")
+            await pg.wait_for_timeout(400)
+            report["badgeGoneAfterDone"] = await pg.evaluate(
+                "() => !document.querySelector('#tabbar .marking-badge')")
+
+            # ── 5. Pending (clemency) view → two-step confirm ──────────────
+            await pg.evaluate("() => document.querySelector('[data-act=show-pending]').click()")
+            await pg.wait_for_timeout(1000)
+            report["pendingView"] = await pg.evaluate(
+                """() => ({summary: document.querySelector('[data-id=pd-summary]').textContent,
+                          cells: document.querySelectorAll('.pd-cell').length,
+                          returnBtns: [...document.querySelectorAll('.pd-cell button')].every(b => /Return/.test(b.textContent))})""")
+            await pg.screenshot(path=".probes/06-pending-view.png")
+            await pg.evaluate("() => document.querySelector('[data-act=pd-delete-all]').click()")
+            await pg.wait_for_timeout(300)
+            report["confirmText"] = await pg.evaluate(
+                "() => document.querySelector('[data-act=pd-delete-all]').textContent")
+            await pg.screenshot(path=".probes/07-pending-confirm-armed.png")
+            await pg.evaluate("() => document.querySelector('[data-act=pd-delete-all]').click()")
+            await pg.wait_for_timeout(1200)
+            report["deleteToast"] = await pg.evaluate(
+                "() => [...document.querySelectorAll('body > div')].map(d => d.textContent).find(t => /Deleted \\d+ images/.test(t)) || null")
+            report["manifestAfterConfirm"] = await pg.evaluate(
+                "async () => await fetch('/api/pending').then(r => r.json()).then(j => j.count)")
+
+            # ── 6. Post-delete grid (probe files gone) ─────────────────────
+            await pg.click('.tab[data-name="gallery"]')
+            await pg.wait_for_timeout(300)
+            await pg.select_option('[data-id="dir-select"]', subdir)
+            await pg.wait_for_timeout(1200)
+            report["postDeleteGrid"] = await pg.evaluate(
+                "() => ({cells: document.querySelectorAll('.gal-cell').length,"
+                " status: document.querySelector('[data-id=status]').textContent})")
+            await pg.screenshot(path=".probes/08-post-delete-grid.png")
+
+            # Verify on disk: every probe file should be gone.
+            report["filesLeftOnDisk"] = [p.name for p in probe_files if p.exists()]
+            print(json.dumps(report, indent=1))
+            await b.close()
+    finally:
+        # Cleanup: probe dir + clean manifest (probe-owned entries only).
+        import shutil
+        shutil.rmtree(probe_dir, ignore_errors=True)
+        if manifest_backup is not None:
+            MANIFEST.write_bytes(manifest_backup)
+        elif MANIFEST.exists():
+            MANIFEST.unlink()
+
 
 asyncio.run(main())

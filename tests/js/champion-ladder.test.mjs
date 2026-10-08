@@ -72,3 +72,40 @@ assert.throws(() => new ChampionLadder(imgs(['a'])));
 assert.throws(() => new ChampionLadder([]));
 
 console.log('champion-ladder tests passed');
+
+// ── Curation redesign (2026-10-07s): ladder end-state feeds Pending Delete ──
+import { readFileSync } from 'node:fs';
+
+// End-state exposes gallery-root-relative paths for the manifest POST.
+{
+  const l = new ChampionLadder(imgs(['a', 'b', 'c']));
+  l.keepChampion();
+  l.keepChampion();
+  assert.ok(l.done);
+  assert.deepEqual(l.rejected.map(r => r.item.path), ['x/b', 'x/c']);
+}
+
+// The Ladder module wires the end-state send-rejected action to the pending
+// manifest (user-facing rename: Review → Ladder; verdicts, never saves).
+const reviewSrc = readFileSync(new URL('../../frontend/js/modules/review.js', import.meta.url), 'utf8');
+assert.match(reviewSrc, /data-act="res-send-pending"/);
+assert.match(reviewSrc, /'\/api\/pending'/);
+assert.match(reviewSrc, /marked for delete/);
+assert.match(reviewSrc, /label: 'Ladder'/);
+assert.doesNotMatch(reviewSrc, /label: 'Review'/);
+// No grid browsing on the Ladder tab; idle hint instead.
+assert.match(reviewSrc, /Select images in Gallery, then Ladder N/);
+assert.ok(!reviewSrc.includes('start-review'), 'no Review-tab launch button');
+// Verdict language: keep-exit toast says Champion:, never "saved"/"kept"
+assert.match(reviewSrc, /Champion: \$\{champ\.name\}/);
+assert.ok(!/Champion kept/.test(reviewSrc));
+
+// Gallery module: multi-select action bar + delete-mode + pending badge.
+const gallerySrc = readFileSync(new URL('../../frontend/js/modules/gallery.js', import.meta.url), 'utf8');
+assert.match(gallerySrc, /ellieedit:ladder-launch/);
+assert.match(gallerySrc, /ellieedit:blend-launch/);
+assert.match(gallerySrc, /deleteMode/);
+assert.match(gallerySrc, /EllieEdit service worker|pending\/confirm|api\/pending/);
+assert.match(gallerySrc, /api\/pending\/confirm/);
+
+console.log('champion-ladder tests passed (incl. curation redesign)');
