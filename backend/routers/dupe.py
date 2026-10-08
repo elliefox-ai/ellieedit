@@ -24,7 +24,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from . import gallery as _gallery_mod
@@ -624,12 +624,12 @@ class SendBody(BaseModel):
 
 
 @router.post("/families/{fid}/send-pending")
-def send_pending(fid: str):
+def send_pending(fid: str, request: Request = None):
     """Convenience: every 'rejected' member of the family's latest verdict ->
     the Pending Delete manifest. Dedupes against already-pending; silently
     skips missing/vanished files. Nothing is deleted here — the pending
     confirm endpoint remains the only destructive action."""
-    from .pending import _load, _save
+    from .pending import _audit, _load, _save
     from .gallery import GALLERY_ROOT
     fam_verdict = _verdicts().get(fid)
     if not fam_verdict:
@@ -641,6 +641,7 @@ def send_pending(fid: str):
     m = _load()
     now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     added = skipped = missing = 0
+    added_keys: list[str] = []
     for rel in rejected:
         try:
             src = jailed(rel)
@@ -664,9 +665,11 @@ def send_pending(fid: str):
         if key not in m:
             m[key] = now
             added += 1
+            added_keys.append(key)
         else:
             skipped += 1
     _save(m)
+    _audit("family_commit_write", added_keys, request)
     return {"added": added, "already_pending": skipped, "missing": missing,
             "count": len(m)}
 
@@ -723,7 +726,7 @@ def _latest_meld(fid: str) -> dict | None:
 
 
 @router.post("/families/{fid}/meld-save")
-def meld_save(fid: str, body: MeldSaveBody):
+def meld_save(fid: str, body: MeldSaveBody, request: Request = None):
     """FaceCycle 'Save back': write the blend as a NEW auto-named file in the
     gallery root (never overwrites — provenance), record the family ACCEPTED
     (every melded component 'kept') in the ledger, and queue ALL components
@@ -773,10 +776,11 @@ def meld_save(fid: str, body: MeldSaveBody):
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     # On-the-spot collapse: every component goes to the deletion queue NOW.
-    from .pending import _load, _save
+    from .pending import _audit, _load, _save
     m = _load()
     now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     added = 0
+    added_keys: list[str] = []
     for p in comps:
         key = p
         try:
@@ -787,7 +791,9 @@ def meld_save(fid: str, body: MeldSaveBody):
         if key not in m:
             m[key] = now
             added += 1
+            added_keys.append(key)
     _save(m)
+    _audit("family_commit_write", added_keys, request)
     return {"saved_as": name, "pending_added": added, "pending_count": len(m),
             "members": comps}
 

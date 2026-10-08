@@ -7,3 +7,4 @@ __pycache__/
 .probes/
 .dupe-verdicts.jsonl
 .dupe-signals.jsonl
+.pending-audit.jsonl

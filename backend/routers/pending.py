@@ -13,9 +13,10 @@ directories).
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from .gallery import EXTS, GALLERY_ROOT, jailed, resolve_flex
@@ -25,6 +26,11 @@ log = __import__("logging").getLogger("ellieedit.pending")
 MANIFEST = Path(os.environ.get(
     "ELLIEEDIT_PENDING_MANIFEST",
     str(Path(__file__).resolve().parents[2] / ".pending-delete.json")))
+
+# Append-only audit trail: one JSON line per manifest mutation (see _audit).
+AUDIT = Path(os.environ.get(
+    "ELLIEEDIT_PENDING_AUDIT",
+    str(Path(__file__).resolve().parents[2] / ".pending-audit.jsonl")))
 
 router = APIRouter(prefix="/api/pending", tags=["pending"])
 
@@ -56,6 +62,28 @@ def _save(m: dict) -> None:
     tmp.rename(MANIFEST)
 
 
+def _audit(action: str, paths: list[str], request: Request | None = None) -> None:
+    """Best-effort append to .pending-audit.jsonl (JSONL, same convention as
+    the signals files). Diagnostic only: a failure here must never fail the
+    mutation it records."""
+    try:
+        uniq = sorted(set(paths))
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "ip": (request.client.host if request is not None
+                   and request.client else None),
+            "action": action,
+            "count": len(uniq),
+            "paths": uniq if len(uniq) <= 20
+                     else uniq[:20] + [f"... +{len(uniq) - 20} more"],
+        }
+        AUDIT.parent.mkdir(parents=True, exist_ok=True)
+        with AUDIT.open("a") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        log.warning("pending audit append failed", exc_info=True)
+
+
 def _entries(m: dict) -> list[dict]:
     items = []
     total = 0
@@ -80,10 +108,11 @@ def list_pending():
 
 
 @router.post("")
-def add_pending(body: PathsBody):
+def add_pending(body: PathsBody, request: Request = None):
     m = _load()
     added = 0
     now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    touched: list[str] = []
     for rel in body.paths:
         src = jailed(rel)  # raises 400 on any jail violation
         if not src.is_file() or src.suffix.lower() not in EXTS:
@@ -91,30 +120,60 @@ def add_pending(body: PathsBody):
         if rel not in m:
             m[rel] = now
             added += 1
+            touched.append(rel)
     _save(m)
+    _audit("add", touched, request)
     return {"added": added, "count": len(m)}
 
 
 @router.delete("")
-def pardon_pending(body: PathsBody):
+def pardon_pending(body: PathsBody, request: Request = None):
     """Clemency: remove from the manifest; no disk change."""
     m = _load()
     removed = 0
+    touched: list[str] = []
     for rel in body.paths:
         jailed(rel)  # jail applies on pardon too
         if rel in m:
             del m[rel]
             removed += 1
+            touched.append(rel)
     _save(m)
+    _audit("unmark", touched, request)
     return {"pardoned": removed, "count": len(m)}
 
 
+@router.get("/audit")
+def read_audit(limit: int = 100):
+    """Newest audit lines (diagnostics from any client; read-only)."""
+    limit = max(1, min(limit, 1000))
+    lines: list[dict] = []
+    try:
+        with AUDIT.open() as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    lines.append(line)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        log.warning("pending audit read failed", exc_info=True)
+    out = []
+    for line in lines[-limit:]:
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            out.append({"raw": line})
+    return {"lines": out, "count": len(out)}
+
+
 @router.post("/confirm")
-def confirm_pending():
+def confirm_pending(request: Request = None):
     """The ONLY destructive endpoint: delete every manifest file, then clear."""
     m = _load()
     deleted = 0
     bytes_freed = 0
+    gone: list[str] = []
     for rel in list(m):
         try:
             src = jailed(rel)
@@ -133,6 +192,7 @@ def confirm_pending():
             src.unlink()
             deleted += 1
             bytes_freed += size
+            gone.append(rel)
         except FileNotFoundError:
             # Passes the gallery jail but lives in the dupe pool instead.
             try:
@@ -142,9 +202,11 @@ def confirm_pending():
                 dsrc.unlink()
                 deleted += 1
                 bytes_freed += size
+                gone.append(rel)
             except Exception:
                 continue
         except OSError as e:
             log.warning("pending confirm: could not unlink %s: %s", rel, e)
     _save({})
+    _audit("confirm", gone, request)
     return {"deleted": deleted, "bytes": bytes_freed}
