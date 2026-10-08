@@ -8,8 +8,9 @@
 // Handoff events: window CustomEvents
 //   'ellieedit:ladder-launch' { detail: { items } }  + activate 'ladder'
 //   'ellieedit:blend-launch' { detail: { items } }   + activate 'ladder'
-
+//   'ellieedit:facecycle-handoff' { urls, names }    + activate 'facecycle'
 import { registerModule } from '../shell.js';
+import { planFaceCycleHandoff } from '../handoff.js';
 
 function panelHTML() {
   return `
@@ -93,6 +94,9 @@ function panelHTML() {
     }
     .gal-bar.on { display: flex; }
     .gal-bar .msg { font-size: 12px; color: #b0b0d0; flex: 1; }
+    /* 40px touch convention (matches dupe.js touch buttons) for every
+       multi-select bar action, → FaceCycle included. */
+    .gal-bar .ee-btn { min-height: 40px; }
     .gal-bar.marking { background: #2a1216; border-top-color: #a02020; }
     /* Pending filter sticky bottom bar — destructive action lives LOW and LEFT
        (iPad thumb-zone rule): never top-right under the operator's thumb. */
@@ -137,6 +141,7 @@ function panelHTML() {
     <span class="msg" data-id="sel-msg"></span>
     <button class="ee-btn" data-act="clear-sel">Clear</button>
     <button class="ee-btn" data-act="blend-pair" style="display:none">Blend pair</button>
+    <button class="ee-btn" data-act="to-facecycle-multi" style="display:none">→ FaceCycle</button>
     <button class="ee-btn primary" data-act="ladder">Ladder <span data-id="sel-count">0</span></button>
   </div>
   <div class="gal-bar marking" data-id="marking-bar">
@@ -180,6 +185,7 @@ export class Gallery {
       selMsg: panel.querySelector('[data-id="sel-msg"]'),
       selCount: panel.querySelector('[data-id="sel-count"]'),
       blendPairBtn: panel.querySelector('[data-act="blend-pair"]'),
+      fcBtn: panel.querySelector('[data-act="to-facecycle-multi"]'),
       markingBar: panel.querySelector('[data-id="marking-bar"]'),
       markMsg: panel.querySelector('[data-id="mark-msg"]'),
       markCount: panel.querySelector('[data-id="mark-count"]'),
@@ -231,6 +237,7 @@ export class Gallery {
     act('clear-sel').addEventListener('click', () => this.clearSelection());
     act('ladder').addEventListener('click', () => this.launchLadder());
     this.el.blendPairBtn.addEventListener('click', () => this.launchBlendPair());
+    this.el.fcBtn.addEventListener('click', () => this.launchFaceCycle());
     act('done-marking').addEventListener('click', () => this.setDeleteMode(false));
     act('exit-marking').addEventListener('click', () => this.setDeleteMode(false));
     for (const v of ['all', 'active', 'pending']) {
@@ -360,6 +367,7 @@ export class Gallery {
     this.el.selCount.textContent = n;
     this.el.selMsg.textContent = n ? `${n} selected` : 'Tap images to select';
     this.el.blendPairBtn.style.display = n === 2 ? '' : 'none';
+    this.el.fcBtn.style.display = n >= 1 ? '' : 'none';
     this.updateSelectBtn();
   }
 
@@ -379,6 +387,18 @@ export class Gallery {
     window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'ladder' } }));
     this.setSelectMode(false);
     this.clearSelection();
+  }
+
+  // Handoff: selection stays selected so the rings are still visible when
+  // the user comes back to Gallery (👑-ring precedent: outcome visible on
+  // return). FaceCycle loads a fresh stack from the jailed file URLs.
+  launchFaceCycle() {
+    const items = [...this.selected.values()];
+    const plan = planFaceCycleHandoff(items);
+    if (plan.error) { this.toast(plan.error, true); return; }
+    window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'facecycle' } }));
+    window.dispatchEvent(new CustomEvent('ellieedit:facecycle-handoff',
+      { detail: { urls: plan.urls, names: plan.names } }));
   }
 
   // ---- pending delete manifest -------------------------------------------

@@ -271,6 +271,31 @@ export class FaceCycle {
       }
     });
 
+    // Multi-image handoff: Gallery's ☰-select bar dispatches
+    //   'ellieedit:facecycle-handoff' { detail: { urls, names } }
+    // (urls are jailed /api/gallery/file?path=… links, 1..8 of them).
+    // We reset to a fresh stack and load every image through the normal
+    // handleFiles path, so the thumb strip visibly shows what arrived.
+    window.addEventListener('ellieedit:facecycle-handoff', this.onHandoffEvent = async e => {
+      const { urls, names } = e.detail || {};
+      if (!Array.isArray(urls) || !urls.length) return;
+      if (!this.panel.classList.contains('active')) return;
+      try {
+        this.resetAll();
+        const files = await Promise.all(urls.map(async (url, i) => {
+          const r = await fetch(url);
+          if (!r.ok) throw new Error(`${names[i] || url}: HTTP ${r.status}`);
+          const blob = await r.blob();
+          return new File([blob], names[i] || `image-${i}.png`, { type: blob.type });
+        }));
+        await this.handleFiles(files);
+        // Visible receipt: the status bar names exactly what was handed off.
+        this.el.statusBar.innerHTML = `<span class="badge" style="color:#8ad08a">→ ${files.length} image${files.length !== 1 ? 's' : ''} handed off from Gallery:</span> ${files.map(f => f.name).join(', ')}`;
+      } catch (err) {
+        alert('FaceCycle handoff failed: ' + err.message);
+      }
+    });
+
     document.addEventListener('keydown', this.onKeyDown = e => {
       if (!this.panel.classList.contains('active')) return;
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
