@@ -62,6 +62,7 @@ function panelHTML() {
       display: none; pointer-events: none; }
     .rv-compare { flex: 1; display: none; flex-direction: column; min-height: 0; }
     .rv-duel { flex: 1; display: flex; flex-direction: row; gap: 2px; min-height: 0; }
+    .rv-duel.hidden { display: none; }
     .rv-duel .half { flex: 1; position: relative; display: flex; align-items: center;
       justify-content: center; overflow: hidden; }
     .rv-duel .half img { max-width: 100%; max-height: 100%; object-fit: contain; }
@@ -181,6 +182,7 @@ export class Review {
       imgA: panel.querySelector('[data-id="img-a"]'),
       imgB: panel.querySelector('[data-id="img-b"]'),
       stage: panel.querySelector('[data-id="stage"]'),
+      duel: panel.querySelector('.rv-duel'),
       canvas: panel.querySelector('[data-id="canvas"]'),
       split: panel.querySelector('[data-id="split"]'),
       maskBox: panel.querySelector('[data-id="mask-box"]'),
@@ -332,6 +334,7 @@ export class Review {
     const l = this.ladder;
     if (!l) return;
     this.el.results.style.display = 'none';
+    this.el.duel.classList.remove('hidden');
     if (l.done) { this.finishReview(); return; }
     this.el.phaseLabel.textContent =
       `Challenger ${l.k} of ${l.total - 1} — ${l.challenger.name}`;
@@ -391,6 +394,7 @@ export class Review {
     this.el.resSummary.textContent =
       `${l.total} images compared · ${l.rejected.length} rejected · done in ${l.rejected.length} decisions`;
     this.el.results.style.display = 'flex';
+    this.el.duel.classList.add('hidden');
     this.el.compare.style.display = 'flex';
     this.el.stage.style.display = 'none';
   }

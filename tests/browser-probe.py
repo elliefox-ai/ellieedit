@@ -61,6 +61,8 @@ async def main():
         }""")
         await ip.screenshot(path="/tmp/shot-ipad-duel.png")
         # 4. Full ladder to completion: results view + post-save grid state
+        const_clear = "() => [...document.querySelectorAll('button')].find(b=>b.dataset.act==='clear-sel')?.click()"
+        await pg.evaluate(const_clear)
         await pg.evaluate("() => [...document.querySelectorAll('.rv-cell')].slice(0,4).forEach(c=>c.click())")
         await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>/^Review \\d/.test(b.textContent.trim()))?.click()")
         await pg.wait_for_timeout(900)
@@ -82,7 +84,7 @@ async def main():
             runnerLabel: document.querySelector('[data-id=res-runner-label]')?.textContent,
             summary: document.querySelector('[data-id=res-summary]')?.textContent,
             buttons: [...(res?.querySelectorAll('.rr-actions button')||[])].map(b=>b.textContent.trim()),
-            duelVisible: !!document.querySelector('.rv-duel') && getComputedStyle(document.querySelector('.rv-duel')).display !== 'none',
+            duelVisible: (()=>{const d=document.querySelector('.rv-duel'); return !!d && !d.classList.contains('hidden') && d.getBoundingClientRect().height > 0;})(),
             rejectedVisible: (()=>{const r=document.querySelector('[data-id=rejected]'); return !!r && r.getBoundingClientRect().height > 0;})(),
           };
         }""")
@@ -109,6 +111,7 @@ async def main():
         await pg.screenshot(path='.probes/grid-after-exit.png')
 
         # Save flow: blend the pair, save, verify toast + highlighted cell
+        await pg.evaluate(const_clear)
         await pg.evaluate("() => [...document.querySelectorAll('.rv-cell')].slice(0,4).forEach(c=>c.click())")
         await pg.evaluate("() => [...document.querySelectorAll('button')].find(b=>/^Review \\d/.test(b.textContent.trim()))?.click()")
         await pg.wait_for_timeout(700)
