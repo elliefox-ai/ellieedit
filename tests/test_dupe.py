@@ -707,3 +707,24 @@ def test_meld_save_never_overwrites(env, client, tmp_path):
     assert r1.json()["saved_as"] != r2.json()["saved_as"]
     assert r2.json()["pending_added"] == 0  # already queued
 
+
+
+def test_status_endpoint_caches_within_ttl(env, client, monkeypatch):
+    """Second /status call inside _STATUS_TTL must hit _status_cache — no
+    second freshness computation (regression: cache tuple/store was broken)."""
+    calls = {"n": 0}
+    real = dupe_mod._freshness_walk
+
+    def counting_walk(idx_mtime):
+        calls["n"] += 1
+        return real(idx_mtime)
+
+    monkeypatch.setattr(dupe_mod, "_freshness_walk", counting_walk)
+    monkeypatch.setattr(dupe_mod, "_status_cache", None)
+    monkeypatch.setattr(dupe_mod, "_freshness_cache", None)
+    s1 = client.get("/api/dupe/status")
+    assert s1.status_code == 200
+    s2 = client.get("/api/dupe/status")
+    assert s2.status_code == 200
+    assert s2.json() == s1.json()
+    assert calls["n"] == 1, f"freshness computed {calls['n']}x — status cache miss"
