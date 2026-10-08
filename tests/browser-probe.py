@@ -302,6 +302,72 @@ async def main():
                 import shutil
                 shutil.rmtree(fc_dir, ignore_errors=True)
 
+            # ── 12 (08i). Deferred delete-marking + async thumbs ────────────
+            # Fresh probe dir, 3 images. Assert: (a) cells render as
+            # skeletons then reveal; (b) marking taps are local-only — zero
+            # /api/pending fetches, zero grid re-render (DOM nodes stable);
+            # (c) Done marking commits in ONE batch; (d) console clean.
+            console_errors = []
+            pg.on('console', lambda m: console_errors.append(m.text) if m.type == 'error' else None)
+            mk_dir = GALLERY_ROOT / f"probe-mk-{os.getpid()}"
+            mk_dir.mkdir(exist_ok=True)
+            for i, color in enumerate([(40, 200, 40), (200, 40, 200), (40, 40, 200)]):
+                Image.new("RGB", (256, 256), color).save(mk_dir / f"mk-{i}.png")
+            try:
+                await pg.reload(wait_until="networkidle")
+                await pg.wait_for_timeout(800)
+                await pg.select_option('[data-id="dir-select"]', mk_dir.name)
+                # Skeletons first: cells exist but thumbs not yet revealed.
+                report["asyncSkeletons"] = await pg.evaluate(
+                    "() => ({cells: document.querySelectorAll('.gal-cell').length,"
+                    " loading: document.querySelectorAll('.gal-cell.thumb-loading').length})")
+                await pg.wait_for_function(
+                    "() => { const n = document.querySelectorAll('.gal-cell').length;"
+                    " const l = document.querySelectorAll('.gal-cell.thumb-loading').length;"
+                    " return n > 0 && l === 0; }", timeout=30000)
+                report["asyncRevealed"] = await pg.evaluate(
+                    "() => ({cells: document.querySelectorAll('.gal-cell').length,"
+                    " loaded: document.querySelectorAll('.gal-cell.thumb-loaded').length})")
+                assert report["asyncRevealed"]["loaded"] == 3, "thumbs did not all reveal"
+
+                # Delete-marking: tap 3 thumbs; between taps NOTHING may hit
+                # the network or rebuild the grid.
+                await pg.evaluate(
+                    "() => { window.__pendingFetches = 0; const of = window.fetch;"
+                    " window.fetch = (...a) => { const u = String(a[0]); if (u.includes('/api/pending')) { window.__pendingFetches++; const m = (a[1] && a[1].method) || 'GET'; if (m !== 'GET') window.__pendingMut = (window.__pendingMut || 0) + 1; } return of(...a); };"
+                    " window.__cells = [...document.querySelectorAll('.gal-cell')]; }")
+                await pg.evaluate("() => document.querySelector('[data-act=delete-mode]').click()")
+                for i in range(3):
+                    await pg.evaluate(f"() => window.__cells[{i}].click()")
+                    await pg.wait_for_timeout(150)
+                report["deferredMarking"] = await pg.evaluate(
+                    "() => ({pendingFetches: window.__pendingFetches,"
+                    " nodesStable: document.querySelectorAll('.gal-cell').length === window.__cells.length"
+                    "   && [...document.querySelectorAll('.gal-cell')].every((c, i) => c === window.__cells[i]),"
+                    " rings: document.querySelectorAll('.gal-cell.marked').length})")
+                assert report["deferredMarking"]["pendingFetches"] == 0, "marking taps hit the network"
+                assert report["deferredMarking"]["nodesStable"], \
+                    "marking taps rebuilt the grid cells"
+                assert report["deferredMarking"]["rings"] == 3, "marked rings did not toggle locally"
+                await pg.set_viewport_size({"width": 1024, "height": 768})
+                await pg.wait_for_timeout(300)
+                await pg.screenshot(path=".probes/12a-ipad-marking-rings.png")
+                # Done marking: ONE batched commit → manifest count 3.
+                await pg.evaluate("() => document.querySelector('[data-act=done-marking]').click()")
+                await pg.wait_for_timeout(1200)
+                report["afterDone"] = await pg.evaluate(
+                    "async () => ({manifest: await fetch('/api/pending').then(r => r.json()).then(j => j.count),"
+                    " mutFetches: window.__pendingMut || 0})")
+                assert report["afterDone"]["manifest"] == 3, "Done marking did not commit the batch"
+                assert report["afterDone"]["mutFetches"] == 1, \
+                    f"expected exactly 1 batched POST on Done, got {report['afterDone']['mutFetches']}"
+                await pg.screenshot(path=".probes/12b-ipad-post-done-grid.png")
+                report["consoleErrors"] = console_errors
+                assert not console_errors, f"console errors: {console_errors}"
+            finally:
+                import shutil
+                shutil.rmtree(mk_dir, ignore_errors=True)
+
             # Verify on disk: every probe file should be gone.
             report["filesLeftOnDisk"] = [p.name for p in probe_files if p.exists()]
             print(json.dumps(report, indent=1))
