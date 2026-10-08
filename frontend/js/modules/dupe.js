@@ -858,6 +858,23 @@ registerModule({
       twinChip.style.minHeight = '32px';
       twinChip.title = 'jump to the twin (T)';
       twinChip.addEventListener('click', () => jumpTwin());
+      // Auto-advance (2026-10-08m step 2): after A/F assigns a verdict,
+      // jump to the next unhandled member of the visited set. Default ON,
+      // toggled via localStorage.eeAutoAdvance ('0' = off — the probe
+      // sets this before its legacy zoom_pick step).
+      const autoAdvanceOn = () => {
+        try { return localStorage.eeAutoAdvance !== '0'; } catch (_) { return true; }
+      };
+      const autoBtn = document.createElement('button');
+      autoBtn.className = 'ee-btn';
+      autoBtn.id = 'ss-zoom-auto';
+      autoBtn.style.minHeight = '32px';
+      autoBtn.title = 'after A/F, jump to the next unhandled member';
+      autoBtn.addEventListener('click', () => {
+        const on = autoAdvanceOn();
+        try { localStorage.eeAutoAdvance = on ? '0' : '1'; } catch (_) {}
+        paint();
+      });
       const back = document.createElement('button');
       back.className = 'ee-btn';
       back.id = 'ss-zoom-back';
@@ -874,6 +891,10 @@ registerModule({
       top.addEventListener('click', e => { if (!e.target.closest('button')) dismiss(); });
       const stage = document.createElement('div');
       stage.className = 'ss-focus';
+      // bottom line: unhandled counter ('3 of 7 unhandled' → 'all handled')
+      const count = document.createElement('div');
+      count.id = 'ss-zoom-count';
+      count.style.cssText = 'text-align:center;padding:6px 0 10px;font-size:12px;color:#8a8aaa;flex-shrink:0;';
       const dots = document.createElement('div');
       dots.className = 'dots';
       const img = document.createElement('img');
@@ -912,6 +933,10 @@ registerModule({
           if (!hint.isConnected) stage.insertBefore(hint, prev);
           pickBtn.disabled = rejBtn.disabled = true;
           dots.innerHTML = '';
+          autoBtn.textContent = `Auto-advance: ${autoAdvanceOn() ? 'On' : 'Off'}`;
+          count.textContent = '0 of 0 unhandled';
+          count.style.color = '#7de08a';
+          twinChip.style.display = 'none';
           return;
         }
         stage.querySelector('.zoom-empty-hint')?.remove();
@@ -930,22 +955,32 @@ registerModule({
           twinChip.title = `twin: ${list[twIdx].name} (${tw.kind}, d=${tw.dist}) — jump (T)`;
         } else {
           twinChip.style.display = 'none';
-        }        const v = verdictOf(m);
+        }
+        // auto-advance toggle label + bottom unhandled counter
+        autoBtn.textContent = `Auto-advance: ${autoAdvanceOn() ? 'On' : 'Off'}`;
+        const un = list.filter(mm => !verdictOf(mm)).length;
+        count.textContent = un ? `${un} of ${list.length} unhandled`
+                               : 'all handled';
+        count.style.color = un ? '#8a8aaa' : '#7de08a';        const v = verdictOf(m);
         pickBtn.textContent = v === 'kept' ? `Un-pick ✓ (#${draft.picks.indexOf(m.path) + 1})`
                             : v ? `verdict: ${v}` : '✓ Pick';
         pickBtn.disabled = !!v && v !== 'kept';
         rejBtn.textContent = v === 'rejected' ? 'Un-reject' : '✕ Reject';
         rejBtn.disabled = !!v && v !== 'rejected';
         pickBtn.onclick = () => {
+          const fresh = !v;
           if (v === 'kept') { unPickNoRender(m); } else if (!v) { draft.verdicts[m.path] = 'kept'; draft.picks.push(m.path); }
           trace(`zoom pick idx=${idx + 1} verdict=${verdictOf(m)}`);
-          paint();
+          if (fresh && autoAdvanceOn()) advance();
+          else paint();
         };
         rejBtn.onclick = () => {
+          const fresh = !v;
           if (v === 'rejected') { delete draft.verdicts[m.path]; }
           else if (!v) { draft.verdicts[m.path] = 'rejected'; }
           trace(`zoom reject idx=${idx + 1} verdict=${verdictOf(m)}`);
-          paint();
+          if (fresh && autoAdvanceOn()) advance();
+          else paint();
         };
         dots.innerHTML = '';
         list.forEach((mm, i) => {
@@ -994,6 +1029,13 @@ registerModule({
         trace(`zoom twin jump → ${idx + 1} (${tw.kind})`);
         paint();
       };
+      // advance: next unhandled member of the visited set (wraps; stays
+      // put when everything visible is handled) — then repaint via paint().
+      const advance = () => {
+        const ni = nextUnhandled(list, draft ? draft.verdicts : {}, idx);
+        if (ni >= 0) idx = ni;
+        paint();
+      };
       const cycle = (dir) => {
         idx = (idx + dir + list.length) % list.length;
         trace(`zoom cycle → ${idx + 1}/${list.length}`);
@@ -1026,7 +1068,7 @@ registerModule({
       });
       stage.append(img, prev, next, dots, tools);
       tools.append(pickBtn, rejBtn);
-      top.append(back, ...modeBtns, info, twinChip,
+      top.append(back, ...modeBtns, info, twinChip, autoBtn,
         kbdLegendBtn([
           ['←/→', 'cycle members'],
           ['A', 'pick this member'],
@@ -1034,7 +1076,7 @@ registerModule({
           ['T', 'jump to the twin'],
           ['Esc', 'back'],
         ]));
-      ov.append(top, stage);
+      ov.append(top, stage, count);
       el.detail.appendChild(ov);
       paint();
     }

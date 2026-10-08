@@ -63,6 +63,11 @@ async def main():
             pg = await ctx.new_page()
             await pg.goto(BASE + "/", wait_until="networkidle")
             await pg.evaluate("() => { try { localStorage.eeDupeDebug = '1'; } catch (_) {} }")
+            # twin loop (10-08m): the legacy zoom_pick step asserts the button
+            # label stays in place after a pick — auto-advance would move the
+            # position. Probe turns it OFF here; the new twin-loop section
+            # (12) turns it back ON. App default remains ON.
+            await pg.evaluate("() => { try { localStorage.eeAutoAdvance = '0'; } catch (_) {} }")
             await pg.wait_for_timeout(1500)
             console_errors = []
             pg.on("console", lambda m: console_errors.append(m.text)
