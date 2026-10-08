@@ -287,7 +287,73 @@ async def main():
                 spread_state["chips"] >= 2, \
                 f"spread draft lost after zoom round-trip: {spread_state}"
 
-            # ── 7. Commit → verdict + pending manifest ─────────────────
+            # ── 6c. KEYBOARD SHORTCUTS at spread level (2026-10-08b) ─
+            # keydown only; desktop viewport (1024x768) — same as iPad PWA
+            # viewport size but no touch dispatch, so touch paths untouched.
+            pos0 = await pg.inner_text("#ss-kbd-pos")
+            await pg.keyboard.press("ArrowRight")
+            await pg.wait_for_timeout(400)
+            pos1 = await pg.inner_text("#ss-kbd-pos")
+            await pg.keyboard.press("ArrowLeft")
+            await pg.wait_for_timeout(400)
+            pos2 = await pg.inner_text("#ss-kbd-pos")
+            report["kbd_cycle"] = {"start": pos0, "right": pos1, "left": pos2}
+            assert pos1 != pos0 and pos2 == pos0, \
+                f"arrows did not cycle the champion label: {pos0}→{pos1}→{pos2}"
+            chips0 = await pg.evaluate(
+                "() => document.querySelectorAll('.ss-pick-chip').length")
+            dead0 = await pg.evaluate(
+                "() => document.querySelectorAll('.ss-dead').length")
+            await pg.keyboard.press("a")
+            await pg.wait_for_timeout(400)
+            chips1 = await pg.evaluate(
+                "() => document.querySelectorAll('.ss-pick-chip').length")
+            await pg.keyboard.press("f")
+            await pg.wait_for_timeout(400)
+            dead1 = await pg.evaluate(
+                "() => document.querySelectorAll('.ss-dead').length")
+            report["kbd_pick_reject"] = {"chips": [chips0, chips1],
+                                         "dead": [dead0, dead1]}
+            assert chips1 == chips0 + 1, \
+                f"A did not pick the champion: {chips0}→{chips1}"
+            assert dead1 == dead0 + 1, \
+                f"F did not reject the champion: {dead0}→{dead1}"
+            # legend affordance is coarse-pointer-aware: this context emulates
+            # touch (has_touch=True → pointer:coarse), so the button must be
+            # HIDDEN here — exactly the iPad behavior we want.
+            legend_vis = await pg.evaluate(
+                "() => getComputedStyle(document.querySelector('.kbd-btn')).display")
+            assert legend_vis == "none", \
+                f"kbd legend button visible on coarse-pointer (iPad) context: {legend_vis}"
+            # desktop (fine pointer) context: button visible, legend opens
+            b2 = await p.chromium.launch()
+            ctx2 = await b2.new_context(viewport=VIEWPORT)  # no has_touch → fine
+            pg2 = await ctx2.new_page()
+            await pg2.goto(BASE + "/", wait_until="networkidle")
+            await pg2.wait_for_timeout(1500)
+            await pg2.evaluate("""() => {
+              const btn = [...document.querySelectorAll('#tabbar .tab')]
+                .find(t => t.dataset.name === 'dupe');
+              btn.click();
+            }""")
+            await pg2.wait_for_timeout(4000)
+            await pg2.evaluate("() => document.querySelector('.fam-card').click()")
+            await pg2.wait_for_timeout(2000)
+            legend_vis2 = await pg2.evaluate(
+                "() => getComputedStyle(document.querySelector('.kbd-btn')).display")
+            assert legend_vis2 != "none", \
+                f"kbd legend button hidden at desktop viewport: {legend_vis2}"
+            await pg2.evaluate(
+                "() => document.querySelector('.ss-header .kbd-btn').click()")
+            await pg2.wait_for_timeout(300)
+            legend_open = await pg2.evaluate(
+                "() => !!document.querySelector('.ss-header .kbd-legend') && "
+                "document.querySelector('.ss-header .kbd-legend').style.display !== 'none'")
+            assert legend_open, "legend did not open"
+            await pg2.screenshot(path=".probes/ss-08-kbd-legend.png")
+            await b2.close()
+
+            # ── 7. Commit → verdict + pending manifest ───────────────
             counts = await pg.evaluate("""() =>
               (document.querySelector('.ss-header')||{textContent:''}).textContent""")
             report["pre_commit_header"] = counts
@@ -302,6 +368,19 @@ async def main():
             assert committed["banner"] and "committed" in committed["banner"], \
                 f"no committed state rendered: {committed}"
             await pg.screenshot(path=".probes/ss-06-committed.png")
+
+            # ── 7b. Esc at committed view → back to families ─────────
+            await pg.keyboard.press("Escape")
+            await pg.wait_for_timeout(1200)
+            esc_fam = await pg.evaluate("""() => ({
+              detail_closed: !document.querySelector('#dupe-detail')
+                .classList.contains('open'),
+              grid_back: getComputedStyle(document.querySelector('#fam-list'))
+                .display !== 'none',
+            })""")
+            report["kbd_esc_to_families"] = esc_fam
+            assert esc_fam["detail_closed"] and esc_fam["grid_back"], \
+                f"Esc did not step back to families: {esc_fam}"
 
             m = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {}
             report["manifest_added"] = [k for k in m if k not in
@@ -360,6 +439,39 @@ async def main():
                         f"fan scroll state wrong: {big_report} (expected scrollable={expected})"
                     assert big_report["champ_h"] > 150, "champion shrank with N"
                     await pg.screenshot(path=".probes/ss-07-large-family-fan.png")
+                    # ── keyboard at SURVEY + ZOOM levels ──────────────────
+                    await pg.evaluate(
+                        "() => document.querySelector('#ss-survey-btn').click()")
+                    await pg.wait_for_timeout(2000)
+                    await pg.keyboard.press("ArrowRight")
+                    await pg.wait_for_timeout(300)
+                    foc = await pg.evaluate(
+                        "() => [...document.querySelectorAll('#ss-survey .ss-cell')]"
+                        ".findIndex(c => c.classList.contains('kbd-focus'))")
+                    assert foc == 1, f"survey arrow focus did not move to cell 2: {foc}"
+                    await pg.keyboard.press("Enter")
+                    await pg.wait_for_timeout(2000)
+                    zpos = await pg.inner_text("#ss-zoom-pos")
+                    assert zpos.startswith("2 / "), \
+                        f"Enter did not zoom into focused cell: {zpos}"
+                    await pg.keyboard.press("ArrowRight")
+                    await pg.wait_for_timeout(500)
+                    zpos2 = await pg.inner_text("#ss-zoom-pos")
+                    assert zpos2.startswith("3 / "), \
+                        f"arrow did not cycle zoom: {zpos2}"
+                    await pg.keyboard.press("f")
+                    await pg.wait_for_timeout(400)
+                    zbtn = await pg.inner_text("#ss-zoom-reject")
+                    assert "Un-reject" in zbtn, f"F did not reject in zoom: {zbtn}"
+                    await pg.keyboard.press("Escape")
+                    await pg.wait_for_timeout(1200)
+                    back1 = await pg.evaluate("() => !!document.querySelector('#ss-survey')")
+                    await pg.keyboard.press("Escape")
+                    await pg.wait_for_timeout(1200)
+                    back2 = await pg.evaluate("() => !!document.querySelector('.ss-header')")
+                    report["kbd_survey_zoom"] = {"esc1_survey": back1, "esc2_spread": back2}
+                    assert back1 and back2, \
+                        f"Esc ladder broken: survey={back1} spread={back2}"
             else:
                 report["large_family"] = "no large unresolved family in first page"
 
