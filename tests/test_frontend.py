@@ -46,11 +46,14 @@ def test_sw_cache_version_matches_build_marker():
     import re
     cache = re.search(r"const CACHE = '([^']+)'", sw).group(1)
     build = re.search(r"const BUILD = '([^']+)'", shell).group(1)
-    # Both must carry the same deploy stamp (e.g. 20261007b)
+    # Both must carry the same deploy stamp. shell.js BUILD is dashed
+    # (2026-10-08k), sw.js CACHE is compact (20261008k) — same version,
+    # two spellings. Exact comparison: a wrong pairing must fail.
     stamp = re.search(r"(\d{8}[a-z])", cache)
     assert stamp, f"SW cache name lacks a deploy stamp: {cache}"
-    assert stamp.group(1) in build or build.endswith(stamp.group(1)[-1]) or stamp.group(1)[:-1] in build, \
-        f"build marker {build} does not correspond to SW cache {cache}"
+    assert stamp.group(1) == build.replace("-", ""), \
+        f"build marker {build!r} does not match SW cache stamp {stamp.group(1)!r} " \
+        f"(same deploy, dashed vs compact form expected)"
 
 
 def test_no_invalid_star_class_in_module():
