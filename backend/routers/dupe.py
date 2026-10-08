@@ -366,6 +366,10 @@ def family_detail(fid: str):
 class VerdictBody(BaseModel):
     members: dict[str, str]          # path -> kept|rejected|melded|deferred
     note: str = ""
+    # ADDITIVE (2026-10-08c, Sift): optional path -> 1-based pick rank. The
+    # members verdict stays a plain string; readers must tolerate ranks being
+    # absent on any entry (older ledger lines never carry it).
+    ranks: dict[str, int] = {}
 
 
 @router.post("/families/{fid}/verdict")
@@ -382,12 +386,22 @@ def post_verdict(fid: str, body: VerdictBody):
         clean[rel] = verdict
     if not clean:
         raise HTTPException(400, "empty verdict set")
+    clean_ranks: dict[str, int] = {}
+    for path, rank in (body.ranks or {}).items():
+        rel = path.replace("\\", "/")
+        if rel not in clean:
+            raise HTTPException(400, f"rank path not in verdict members: {path}")
+        if not isinstance(rank, int) or rank < 1:
+            raise HTTPException(400, "ranks must be 1-based positive ints")
+        clean_ranks[rel] = rank
     entry = {
         "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "family": fid,
         "members": clean,
         "note": body.note,
     }
+    if clean_ranks:
+        entry["ranks"] = clean_ranks   # additive; absent on non-sift verdicts
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     with LEDGER.open("a") as fh:            # append-only by design
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")

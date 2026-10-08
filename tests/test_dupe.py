@@ -231,6 +231,36 @@ def test_verdict_append_only_and_state_flow(env, client):
     assert d["verdicts"]["a.png"] == "deferred" and d["note"] == "a is the sharpest"
 
 
+def test_verdict_ranks_additive(env, client):
+    """Sift (2026-10-08c): optional 1-based pick ranks persist into the
+    ledger additively; verdict strings and readers tolerate their absence."""
+    root, _, tmp = env
+    # with ranks (sift ordered picks)
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict", json={
+        "members": {"a.png": "kept", "b.png": "kept", "sub/c.png": "rejected"},
+        "ranks": {"b.png": 2, "a.png": 1},
+        "note": "sift pass"})
+    assert r.status_code == 200
+    e = json.loads((tmp / "verdicts.jsonl").read_text().strip())
+    assert e["ranks"] == {"b.png": 2, "a.png": 1}
+    # without ranks (spread-era clients) — no ranks key at all
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict", json={
+        "members": {"a.png": "kept"}})
+    assert r.status_code == 200
+    e2 = json.loads((tmp / "verdicts.jsonl").read_text().strip().split("\n")[1])
+    assert "ranks" not in e2
+    # validation: rank path not among members, non-positive rank
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict", json={
+        "members": {"a.png": "kept"}, "ranks": {"stranger.png": 1}})
+    assert r.status_code == 400
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict", json={
+        "members": {"a.png": "kept"}, "ranks": {"a.png": 0}})
+    assert r.status_code == 400
+    # send-pending still keyed on verdict strings, ranks irrelevant
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/send-pending")
+    assert r.status_code == 409  # latest verdict has no rejects
+
+
 def test_verdict_validation(client):
     # unknown member path
     r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict",
