@@ -169,6 +169,32 @@ def _family_state(fid: str, verdicts: dict | None = None) -> str:
     return "resolved"
 
 
+def _family_views(fid: str, verdicts: dict | None = None) -> dict:
+    """View-mode classification (2026-10-08j) from the family's LATEST ledger
+    entry only (append-only ledger, last wins — same semantics as state):
+      accepted = latest entry keeps or melds ≥1 member
+      rejected = latest entry rejects ≥1 member
+    A split verdict (kept AND rejected in one entry) lands in BOTH views —
+    it is part of the accepted working pool AND carries rejects. Unresolved
+    / all-deferred families land in neither and show only in All. No new
+    states are invented; this is a lens over the existing verdict values."""
+    v = (verdicts or _verdicts()).get(fid) or {}
+    vals = (v.get("members") or {}).values()
+    return {
+        "accepted": "kept" in vals or "melded" in vals,
+        "rejected": "rejected" in vals,
+    }
+
+
+def _verdict_counts(fid: str, verdicts: dict) -> dict:
+    """Latest-entry verdict tally for a family, e.g. {kept:1, rejected:2}.
+    Client (dupe-view.js) reclassifies from this for card rendering."""
+    counts: dict[str, int] = {}
+    for v in ((verdicts.get(fid) or {}).get("members") or {}).values():
+        counts[v] = counts.get(v, 0) + 1
+    return counts
+
+
 def _member_view(m: dict) -> dict:
     """Family member -> client shape (jailed path, thumb URL, verdict slot)."""
     rel = m["path"].replace("\\", "/")
@@ -326,15 +352,26 @@ def _family_preview(fid: str) -> list[dict]:
 
 
 @router.get("/families")
-def families(state: str = "unresolved", cursor: str = ""):
+def families(state: str = "unresolved", cursor: str = "", view: str = "all"):
     if state not in ("unresolved", "resolved", "all"):
         raise HTTPException(400, "state must be unresolved|resolved|all")
+    if view not in ("all", "accepted", "rejected"):
+        raise HTTPException(400, "view must be all|accepted|rejected")
     idx = _index()
     verdicts = _verdicts()
+    view_counts = {"accepted": 0, "rejected": 0}
     rows = []
     for f in idx["families"]:
+        vs = _family_views(f["id"], verdicts)
+        view_counts["accepted"] += vs["accepted"]
+        view_counts["rejected"] += vs["rejected"]
+        if view != "all":
+            # view mode overrides the state pill: accepted/rejected are
+            # lenses over the committed ledger, not over resolution state.
+            if not vs[view]:
+                continue
         st = _family_state(f["id"], verdicts)
-        if state != "all" and st != state:
+        if view == "all" and state != "all" and st != state:
             continue
         rows.append({
             "id": f["id"],
@@ -342,6 +379,7 @@ def families(state: str = "unresolved", cursor: str = ""):
             "tiers": f.get("tiers", []),
             "first_member": f.get("first_member", ""),
             "state": st,
+            "verdict_counts": _verdict_counts(f["id"], verdicts),
             # Signal-conflict flag (2026-10-08d): the latest verdict SPLITS
             # members (kept AND rejected) while the index tier list claims a
             # strict near-identity tier exists in the family. O(1) per card
@@ -366,12 +404,41 @@ def families(state: str = "unresolved", cursor: str = ""):
     # when nothing changed on disk.
     for r in page:
         r["members"] = _family_preview(r["id"])
+    # Deletion-manifest membership per page row (2026-10-08j): the client
+    # dims + DELETION-badges rejected-view families whose files are queued.
+    # Cheap: one manifest load per request, jail/resolve only for rejected
+    # members, cached per request (manifest keys may be gallery-relative).
+    from .pending import load_manifest
+    from .gallery import GALLERY_ROOT as _groot
+    manifest = load_manifest() if page else {}
+    _grel_cache: dict[str, str] = {}
+    for r in page:
+        n = 0
+        for p, v in (verdicts.get(r["id"], {}) or {}).get("members", {}).items():
+            if v != "rejected":
+                continue
+            rel = p.replace("\\", "/")
+            if rel in manifest:
+                n += 1
+                continue
+            grel = _grel_cache.get(rel)
+            if grel is None:
+                grel = ""
+                try:
+                    grel = jailed(rel).resolve().relative_to(
+                        _groot.resolve()).as_posix()
+                except (HTTPException, OSError, ValueError):
+                    pass
+                _grel_cache[rel] = grel
+            if grel and grel in manifest:
+                n += 1
+        r["pending"] = n
     next_cursor = page[-1]["id"] if page and start + PAGE_SIZE < len(rows) else None
-    counts = {"unresolved": 0, "resolved": 0}
+    counts = {"unresolved": 0, "resolved": 0, **view_counts}
     for f in idx["families"]:
         counts[_family_state(f["id"], verdicts)] += 1
     return {"items": page, "next_cursor": next_cursor,
-            "counts": counts, "total": len(idx["families"])}
+            "counts": counts, "total": len(idx["families"]), "view": view}
 
 
 @router.get("/families/{fid}")
