@@ -257,6 +257,16 @@ registerModule({
       .ss-sift-bar .ee-btn.sweep:hover:not(:disabled) { background:#5a2a2a; }
       .ss-sift-bar .note { font-size:10px; color:#5a5a7a; flex:1; min-width:140px; }
 
+      /* twin loop (2026-10-08m): zoom badges — big CURRENT / PINNED #n
+         overlays; the stage border goes amber while the pinned twin shows */
+      .ss-zoom-badge { position:absolute; top:8px; left:8px; z-index:5;
+        background:rgba(15,15,26,0.85); color:#d4d4e0; font-size:12px;
+        font-weight:700; letter-spacing:1px; padding:3px 10px;
+        border-radius:8px; pointer-events:none; }
+      .ss-zoom-badge.pin { background:rgba(58,42,10,0.9); color:#e8a13a;
+        border:1px solid #e8a13a; }
+      .ss-focus img { pointer-events:auto; }
+
       /* ── keyboard shortcuts (desktop-only affordance, 2026-10-08b) ──
          Handlers are keydown-only, so touch behavior is untouched; these
          styles merely hide the affordances on coarse/no-hover devices. */
@@ -593,6 +603,8 @@ registerModule({
           else if (k === 'a' || k === 'A') zoom.querySelector('#ss-zoom-pick')?.click();
           else if (k === 'f' || k === 'F') zoom.querySelector('#ss-zoom-reject')?.click();
           else if (k === 't' || k === 'T') zoom.querySelector('#ss-zoom-twin')?.click();
+          else if (k === 'p' || k === 'P') zoom.querySelector('#ss-zoom-pin')?.click();
+          else if (k === ' ') zoom.querySelector('#ss-zoom-flip')?.click();
           else return;
           e.preventDefault(); return;
         }
@@ -875,6 +887,11 @@ registerModule({
         try { localStorage.eeAutoAdvance = on ? '0' : '1'; } catch (_) {}
         paint();
       });
+      // PIN indicator (top bar): 'PIN: none' | 'PIN: #2' — text only;
+      // pinning itself lives on the stage Pin button (P key).
+      const pinInfo = document.createElement('span');
+      pinInfo.id = 'ss-zoom-pin-info';
+      pinInfo.textContent = 'PIN: none';
       const back = document.createElement('button');
       back.className = 'ee-btn';
       back.id = 'ss-zoom-back';
@@ -897,6 +914,44 @@ registerModule({
       count.style.cssText = 'text-align:center;padding:6px 0 10px;font-size:12px;color:#8a8aaa;flex-shrink:0;';
       const dots = document.createElement('div');
       dots.className = 'dots';
+      // ── PIN + FLICKER-FREE FLIP (2026-10-08m step 3) ── two stacked
+      // <img> elements: pinned + current. Flip swaps VISIBILITY only —
+      // no src writes, so flipping costs zero network and never flickers.
+      let pinned = null;      // member | null
+      let pinnedIdx = -1;     // index of the pinned member in the visited set
+      let showingPinned = false;
+      const pinImg = document.createElement('img');
+      pinImg.alt = 'pinned';
+      pinImg.style.cssText = 'position:absolute;inset:0;max-width:100%;max-height:100%;object-fit:contain;pointer-events:none;display:none;';
+      const curBadge = document.createElement('div');
+      curBadge.className = 'ss-zoom-badge';
+      curBadge.textContent = 'CURRENT';
+      const pinBadge = document.createElement('div');
+      pinBadge.className = 'ss-zoom-badge pin';
+      pinBadge.style.display = 'none';
+      const flip = () => {
+        if (!pinned) return;
+        showingPinned = !showingPinned;
+        trace(`zoom flip → ${showingPinned ? 'pinned' : 'current'}`);
+        paint();   // visibility only — no src swap, zero network
+      };
+      const togglePin = () => {
+        if (pinned) { pinned = null; pinnedIdx = -1; showingPinned = false; }
+        else { pinned = list[idx]; pinnedIdx = idx; }
+        trace(`zoom pin → ${pinned ? `#${pinnedIdx + 1}` : 'none'}`);
+        paint();
+      };
+      const pinBtn = document.createElement('button');
+      pinBtn.className = 'ee-btn';
+      pinBtn.style.minHeight = '44px';
+      pinBtn.id = 'ss-zoom-pin';
+      pinBtn.dataset.kbd = 'P';
+      pinBtn.addEventListener('click', togglePin);
+      // hidden flip action — Space (keyboard) and stage taps both land here
+      const flipBtn = document.createElement('button');
+      flipBtn.id = 'ss-zoom-flip';
+      flipBtn.style.display = 'none';
+      flipBtn.addEventListener('click', flip);
       const img = document.createElement('img');
       img.alt = 'zoom';
       const prev = document.createElement('button');
@@ -937,12 +992,42 @@ registerModule({
           count.textContent = '0 of 0 unhandled';
           count.style.color = '#7de08a';
           twinChip.style.display = 'none';
+          pinInfo.textContent = `PIN: ${pinned ? '#' + (pinnedIdx + 1) : 'none'}`;
+          pinBtn.textContent = pinned ? `📌 Unpin (#${pinnedIdx + 1})` : '📌 Pin';
+          pinImg.style.display = 'none';
+          img.style.visibility = 'visible';
+          curBadge.style.display = 'none';
+          pinBadge.style.display = 'none';
           return;
         }
         stage.querySelector('.zoom-empty-hint')?.remove();
         pickBtn.disabled = rejBtn.disabled = false;
         const m = list[idx];
-        img.src = fileUrl(m.path);
+        // stacked flip: both <img> keep their src; only visibility changes
+        if (pinned) pinImg.src = fileUrl(pinned.path);
+        pinImg.style.display = showingPinned && pinned ? 'block' : 'none';
+        img.style.visibility = showingPinned && pinned ? 'hidden' : 'visible';
+        if (!showingPinned || !pinned) img.src = fileUrl(m.path);
+        stage.style.border = showingPinned && pinned ? '2px solid #e8a13a' : '';
+        curBadge.style.display = showingPinned && pinned ? 'none' : '';
+        pinBadge.style.display = showingPinned && pinned ? '' : 'none';
+        pinBadge.textContent = `PINNED #${pinnedIdx + 1}`;
+        pinBtn.textContent = pinned ? `📌 Unpin (#${pinnedIdx + 1})` : '📌 Pin';
+        pinInfo.textContent = `PIN: ${pinned ? '#' + (pinnedIdx + 1) : 'none'}`;
+        // prefetch neighbors + pinned: warm the cache, no layout cost
+        for (const ni of [idx - 1, idx + 1]) {
+          const nm = list[(ni + list.length) % list.length];
+          if (nm) {
+            const im = new Image();
+            im.src = fileUrl(nm.path);
+            if (im.decode) im.decode().catch(() => {});
+          }
+        }
+        if (pinned && !showingPinned) {
+          const im = new Image();
+          im.src = fileUrl(pinned.path);
+          if (im.decode) im.decode().catch(() => {});
+        }
         const modeLbl = zoomMode === 'all' ? 'All'
                       : zoomMode === 'accepted' ? 'Accepted' : 'Rejected';
         info.textContent = `${modeLbl} ${idx + 1} / ${list.length} · ${m.name}`;
@@ -988,6 +1073,8 @@ registerModule({
           const vv = verdictOf(mm);
           d.className = 'ss-dot' + (vv ? ` ${DRAFT_CLASSES[vv]}` : '');
           if (i === idx) d.style.outline = '2px solid #d4d4e0';
+          else if (mm === pinned) d.style.outline = '2px solid #e8a13a';  // ring on pinned
+          else d.style.outline = '';
           d.title = mm.name;
           dots.appendChild(d);
         });
@@ -1043,8 +1130,10 @@ registerModule({
       };
       prev.addEventListener('click', () => cycle(-1));
       next.addEventListener('click', () => cycle(1));
-      // swipe: left/right = cycle, down = dismiss, tap = pick. Pointer based,
+      // swipe: left/right = cycle, down = dismiss, tap = flip. Pointer based,
       // touch-action:none on the stage — no page-scroll fight.
+      // (2026-10-08m step 3: tap-to-pick REMOVED — tap now flips pinned/
+      // current; verdicts only via the ≥44px Pin/Pick/Reject buttons.)
       let down = null;
       stage.addEventListener('pointerdown', e => {
         down = { x: e.clientX, y: e.clientY, t: Date.now(), moved: false };
@@ -1063,16 +1152,19 @@ registerModule({
         } else if (dy > 80) {
           dismiss();
         } else if (tap && !e.target.closest('button')) {
-          pickBtn.click();
+          flip();
         }
       });
-      stage.append(img, prev, next, dots, tools);
-      tools.append(pickBtn, rejBtn);
-      top.append(back, ...modeBtns, info, twinChip, autoBtn,
+      stage.append(img, pinImg, curBadge, pinBadge, prev, next, dots, tools,
+        flipBtn);
+      tools.append(pinBtn, pickBtn, rejBtn);
+      top.append(back, ...modeBtns, info, twinChip, pinInfo, autoBtn,
         kbdLegendBtn([
           ['←/→', 'cycle members'],
           ['A', 'pick this member'],
           ['F', 'reject this member'],
+          ['P', 'pin / unpin'],
+          ['Space', 'flip pinned ↔ current'],
           ['T', 'jump to the twin'],
           ['Esc', 'back'],
         ]));
