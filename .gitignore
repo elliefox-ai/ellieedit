@@ -5,3 +5,4 @@ __pycache__/
 .thumbcache/
 .pending-delete.json
 .probes/
+.dupe-verdicts.jsonl
