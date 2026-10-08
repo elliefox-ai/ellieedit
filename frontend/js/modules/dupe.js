@@ -193,6 +193,28 @@ registerModule({
       .ss-committed .big { font-size:16px; color:#7de08a; }
       .ss-committed .sum { font-size:12px; color:#8a8aaa; }
       .dupe-detail .err { color:#e87a7a; }
+
+      /* ── keyboard shortcuts (desktop-only affordance, 2026-10-08b) ──
+         Handlers are keydown-only, so touch behavior is untouched; these
+         styles merely hide the affordances on coarse/no-hover devices. */
+      .kbd-btn { min-width:34px; min-height:34px; padding:0 8px; font-size:12px;
+                 flex-shrink:0; }
+      .kbd-legend { position:absolute; z-index:60; right:12px; top:46px;
+                    background:#1d1d33; border:1px solid #4a4a6c; border-radius:10px;
+                    padding:10px 14px; font-size:12px; color:#d4d4e0;
+                    display:flex; flex-direction:column; gap:4px;
+                    box-shadow:0 8px 30px rgba(0,0,0,0.6); }
+      .kbd-legend b { color:#e8c37a; margin-right:8px; font-weight:600; }
+      .ss-kbd-pos { font-size:10px; color:#7a7a9a; }
+      .ss-cell.kbd-focus { border-color:#d4d4e0; outline:2px solid #d4d4e0; }
+      [data-kbd]::after { content:''; }
+      @media (hover:hover) and (pointer:fine) {
+        [data-kbd]::after { content:' (' attr(data-kbd) ')';
+                            color:#8a8aaa; font-size:11px; }
+      }
+      @media (hover:none), (pointer:coarse) {
+        .kbd-btn, .kbd-legend { display:none !important; }
+      }
     </style>
     <div class="dupe-wrap">
       <div class="dupe-top">
@@ -250,6 +272,7 @@ registerModule({
     let championIdx = 0;       // index into current.members
     let committed = false;
     let commitSummary = null;
+    let surveyFocus = 0;       // keyboard-highlighted cell index in survey grid
 
     function job(text, cls = '') {
       jobbar.querySelectorAll('.badge.dupe').forEach(b => b.remove());
@@ -397,6 +420,111 @@ registerModule({
       return current.members.filter(m => m !== champ && !verdictOf(m));
     }
 
+    // ── Keyboard shortcuts (2026-10-08b, desktop-only) ─────────────────
+    // keydown only → touch/iPad behavior is untouched. Level dispatch:
+    // zoom → survey → spread. Esc always steps back one level
+    // (zoom → survey → spread → families), matching the on-screen backs.
+    function kbdLegendBtn(items) {
+      const wrap = document.createElement('span');
+      wrap.style.cssText = 'position:relative;display:inline-flex;';
+      const btn = document.createElement('button');
+      btn.className = 'ee-btn kbd-btn';
+      btn.textContent = '⌨?';
+      btn.title = 'keyboard shortcuts (desktop only)';
+      const box = document.createElement('div');
+      box.className = 'kbd-legend';
+      box.style.display = 'none';
+      box.innerHTML = items.map(([k, v]) => `<div><b>${k}</b>${v}</div>`).join('');
+      btn.addEventListener('click', () => {
+        box.style.display = box.style.display === 'none' ? 'flex' : 'none';
+      });
+      wrap.append(btn, box);
+      return wrap;
+    }
+
+    function kbCycle(dir) {
+      const cands = current.members.map((m, i) => ({ m, i }))
+        .filter(x => !verdictOf(x.m));
+      if (!cands.length) return;
+      let pos = cands.findIndex(x => x.i === championIdx);
+      if (pos < 0) pos = 0;
+      pos = (pos + dir + cands.length) % cands.length;
+      championIdx = cands[pos].i;
+      renderSpread();
+    }
+
+    function paintSurveyFocus() {
+      const cells = el.detail.querySelectorAll('#ss-survey .ss-cell');
+      cells.forEach((c, i) => c.classList.toggle('kbd-focus', i === surveyFocus));
+      cells[surveyFocus]?.scrollIntoView({ block: 'nearest' });
+    }
+
+    function surveyStep(key) {
+      const cells = [...el.detail.querySelectorAll('#ss-survey .ss-cell')];
+      if (!cells.length) return;
+      // column count = cells sharing row 0's offsetTop
+      const top0 = cells[0].offsetTop;
+      const cols = Math.max(1, cells.filter(c => c.offsetTop === top0).length);
+      const moves = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -cols, ArrowDown: cols };
+      surveyFocus = Math.max(0, Math.min(cells.length - 1, surveyFocus + (moves[key] || 0)));
+      paintSurveyFocus();
+    }
+
+    function stepBackLevel() {
+      const zoom = el.detail.querySelector('#ss-zoom');
+      if (zoom) { zoom.querySelector('#ss-zoom-back')?.click(); return; }
+      const survey = el.detail.querySelector('#ss-survey');
+      if (survey) {
+        [...survey.querySelectorAll('.ss-ov-top .ee-btn')]
+          .find(b => b.textContent.includes('Back to stack'))?.click();
+        return;
+      }
+      if (el.detail.classList.contains('open')) el.back.click();
+    }
+
+    function onDupeKey(e) {
+      if (!panel.classList.contains('active')) return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' ||
+                t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (!current || !el.detail.classList.contains('open')) return;
+      try {
+        const k = e.key;
+        if (k === 'Escape') { stepBackLevel(); e.preventDefault(); return; }
+        const zoom = el.detail.querySelector('#ss-zoom');
+        if (zoom) {                       // ZOOM level
+          if (k === 'ArrowLeft') zoom.querySelector('.ss-nav.prev').click();
+          else if (k === 'ArrowRight') zoom.querySelector('.ss-nav.next').click();
+          else if (k === 'a' || k === 'A') zoom.querySelector('#ss-zoom-pick')?.click();
+          else if (k === 'f' || k === 'F') zoom.querySelector('#ss-zoom-reject')?.click();
+          else return;
+          e.preventDefault(); return;
+        }
+        const survey = el.detail.querySelector('#ss-survey');
+        if (survey) {                     // SURVEY level: arrows + Enter only
+          if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(k)) {
+            surveyStep(k); e.preventDefault(); return;
+          }
+          if (k === 'Enter' || k === ' ') {
+            openZoom(surveyFocus, 'survey'); e.preventDefault(); return;
+          }
+          return;
+        }
+        if (committed) return;            // SPREAD level
+        if (k === 'ArrowLeft') kbCycle(-1);
+        else if (k === 'ArrowRight') kbCycle(1);
+        else if (k === 'a' || k === 'A') { const ch = championMember(); if (!verdictOf(ch)) doPick(ch); }
+        else if (k === 'f' || k === 'F') { const ch = championMember(); if (!verdictOf(ch)) doReject(ch); }
+        else return;
+        e.preventDefault();
+      } catch (err) {
+        // same visibility contract as render errors: chip it, never swallow
+        job(`kbd: ${err.message}`, 'err');
+        console.error('dupe keyboard handler failed', err);
+      }
+    }
+    document.addEventListener('keydown', onDupeKey);
+
     function openMenu(anchorX, anchorY) {
       closeMenu();
       const menu = document.createElement('div');
@@ -497,6 +625,7 @@ registerModule({
       back.id = 'ss-zoom-back';
       back.style.minHeight = '44px';
       back.textContent = origin === 'survey' ? '‹ back to survey' : '‹ back to spread';
+      back.dataset.kbd = 'Esc';
       const dismiss = () => {
         trace(`zoom close → ${origin} (draft intact)`);
         ov.remove();
@@ -521,15 +650,16 @@ registerModule({
       pickBtn.className = 'ee-btn';
       pickBtn.style.minHeight = '44px';
       pickBtn.id = 'ss-zoom-pick';
+      pickBtn.dataset.kbd = 'A';
       const rejBtn = document.createElement('button');
       rejBtn.className = 'ee-btn ss-reject';
       rejBtn.style.minHeight = '44px';
       rejBtn.id = 'ss-zoom-reject';
+      rejBtn.dataset.kbd = 'F';
       const paint = () => {
         const m = list[idx];
         img.src = fileUrl(m.path);
-        info.textContent = `${idx + 1} / ${list.length} · ${m.name}`;
-        const v = verdictOf(m);
+        info.textContent = `${idx + 1} / ${list.length} · ${m.name}`;        const v = verdictOf(m);
         pickBtn.textContent = v === 'kept' ? `Un-pick ✓ (#${draft.picks.indexOf(m.path) + 1})`
                             : v ? `verdict: ${v}` : '✓ Pick';
         pickBtn.disabled = !!v && v !== 'kept';
@@ -594,7 +724,13 @@ registerModule({
       });
       stage.append(img, prev, next, dots, tools);
       tools.append(pickBtn, rejBtn);
-      top.append(back, info);
+      top.append(back, info,
+        kbdLegendBtn([
+          ['←/→', 'cycle members'],
+          ['A', 'pick this member'],
+          ['F', 'reject this member'],
+          ['Esc', 'back'],
+        ]));
       ov.append(top, stage);
       el.detail.appendChild(ov);
       paint();
@@ -602,6 +738,7 @@ registerModule({
 
     function openSurvey() {
       closeSurvey();
+      surveyFocus = 0;
       const ov = document.createElement('div');
       ov.className = 'ss-overlay';
       ov.id = 'ss-survey';
@@ -612,6 +749,7 @@ registerModule({
       const close = document.createElement('button');
       close.className = 'ee-btn';
       close.textContent = '✕ Back to stack';
+      close.dataset.kbd = 'Esc';
       close.addEventListener('click', () => { closeSurvey(); renderSpread(); });
       const grid = document.createElement('div');
       grid.className = 'ss-survey-grid';
@@ -631,9 +769,15 @@ registerModule({
         cell.append(img, nm);
         grid.appendChild(cell);
       });
-      top.append(info, close);
+      top.append(info, close,
+        kbdLegendBtn([
+          ['←/→/↑/↓', 'move the focus cell'],
+          ['Enter / Space', 'inspect the focused cell'],
+          ['Esc', 'back to spread'],
+        ]));
       ov.append(top, grid);
       el.detail.appendChild(ov);
+      paintSurveyFocus();
     }
     function closeSurvey() { el.detail.querySelector('#ss-survey')?.remove(); }
 
@@ -810,7 +954,14 @@ registerModule({
         `<span class="verdict-tag rejected">${rj} rejected</span>` +
         `<span>${uh} unhandled</span>` +
         `<span class="ss-dots">${dots}</span>` +
+        `<span class="ss-kbd-pos" id="ss-kbd-pos">⌨ ${current.members.indexOf(champ) + 1}/${current.members.length}</span>` +
         `<span class="ss-badge draft">DRAFT — nothing saved until Commit</span>`;
+      head.appendChild(kbdLegendBtn([
+        ['←/→', 'cycle champion through challengers'],
+        ['A', 'pick the champion'],
+        ['F', 'reject the champion'],
+        ['Esc', 'back to families'],
+      ]));
       el.detail.appendChild(head);
 
       // fan band
@@ -871,12 +1022,14 @@ registerModule({
       rejBtn.id = 'ss-reject';
       rejBtn.className = 'ee-btn ss-reject';
       rejBtn.textContent = '✕ Reject';
+      rejBtn.dataset.kbd = 'F';
       rejBtn.title = 'reject — or swipe the big card down';
       rejBtn.addEventListener('click', () => doReject(champ));
       const survBtn = document.createElement('button');
       survBtn.id = 'ss-survey-btn';
       survBtn.className = 'ee-btn';
       survBtn.textContent = '▦ Survey';
+      survBtn.dataset.kbd = 'Esc';
       survBtn.title = 'spread all members into a grid (or pinch out)';
       survBtn.addEventListener('click', openSurvey);
       const hint = document.createElement('div');
