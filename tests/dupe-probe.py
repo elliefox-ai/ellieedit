@@ -160,46 +160,132 @@ async def main():
             report["reject"] = rej
             assert rej["dead"] >= 1, "reject did not move a card to the discard row"
 
-            # ── 6. Survey grid + focus deck (full-size must be REAL) ──
+            # ── 6. Survey grid + unified ZOOM (2026-10-08a) ──────────
             await pg.evaluate("() => document.querySelector('#ss-survey-btn').click()")
             await pg.wait_for_timeout(2500)
             cells = await pg.evaluate("""() =>
               [...document.querySelectorAll('.ss-cell')]
                 .filter(c => c.getBoundingClientRect().height > 0).length""")
             assert cells > 0, "survey grid empty"
-            await pg.screenshot(path=".probes/ss-04-survey.png")
+            survey = await pg.evaluate("""() => ({
+              hint: (document.querySelector('#ss-survey .ss-ov-top span')||{}).textContent || '',
+              overlay_icons: document.querySelectorAll('.ss-cell .tools, .ss-cell button').length,
+              cells: document.querySelectorAll('.ss-cell').length,
+            })""")
+            report["survey"] = survey
+            assert "tap an image to inspect" in survey["hint"], \
+                f"survey header hint missing: {survey}"
+            assert survey["overlay_icons"] == 0, \
+                f"big overlay icon still in survey cells: {survey}"
+            await pg.screenshot(path=".probes/ss-04-survey-clean.png")
+            # tap a cell → unified zoom
             await pg.evaluate(
                 "() => document.querySelector('.ss-cell').dispatchEvent("
                 "new MouseEvent('click', {bubbles: true}))")
             await pg.wait_for_timeout(2500)
-            focus = await pg.evaluate("""async () => {
-              const img = document.querySelector('.ss-focus img');
+            zoom0 = await pg.evaluate("""async () => {
+              const img = document.querySelector('#ss-zoom .ss-focus img');
               if (!img) return {img: false};
               await new Promise(res => {
                 if (img.complete && img.naturalWidth > 0) res();
                 else { img.onload = res; img.onerror = res; setTimeout(res, 8000); }
               });
-              return {img: true, src: img.src, w: img.naturalWidth, h: img.naturalHeight};
+              const r = id => { const b = document.querySelector(id);
+                const rc = b && b.getBoundingClientRect();
+                return rc && rc.height >= 40 && rc.width >= 40; };
+              return {img: true, src: img.src, w: img.naturalWidth, h: img.naturalHeight,
+                      pos: (document.querySelector('#ss-zoom-pos')||{}).textContent || null,
+                      back: r('#ss-zoom-back'), pick: r('#ss-zoom-pick'),
+                      rej: r('#ss-zoom-reject'),
+                      nav: r('.ss-nav.prev') && r('.ss-nav.next')};
             }""")
-            report["focus"] = focus
-            assert focus.get("img") and focus["w"] > 0, \
-                f"focus deck image failed to load: {focus}"
-            assert "/api/dupe/file?" in focus["src"], \
-                f"focus deck served {focus['src']} — must be the FULL-SIZE /api/dupe/file path"
-            await pg.screenshot(path=".probes/ss-05-focus-deck.png")
-            # '✕ Close' returns to the stack (renderSpread wipes the survey
-            # overlay with the rest of the detail DOM) — close whichever of
-            # focus/survey is still up, never assume both.
-            closed = await pg.evaluate("""() => {
-              let n = 0;
-              for (const id of ['#ss-focusview', '#ss-survey']) {
-                const b = document.querySelector(id + ' .ss-ov-top .ee-btn:last-child');
-                if (b) { b.click(); n++; }
-              }
-              return n;
+            report["zoom"] = zoom0
+            assert zoom0.get("img") and zoom0["w"] > 0, \
+                f"zoom image failed to load: {zoom0}"
+            assert "/api/dupe/file?" in zoom0["src"], \
+                f"zoom served {zoom0['src']} — must be full-size /api/dupe/file"
+            assert zoom0["pos"] and zoom0["pos"].startswith("1 / "), \
+                f"position label wrong: {zoom0}"
+            assert zoom0["back"] and zoom0["pick"] and zoom0["rej"] and zoom0["nav"], \
+                f"zoom controls missing or under 44px: {zoom0}"
+            await pg.screenshot(path=".probes/ss-05-zoom.png")
+            # cycle next: image + position must change
+            await pg.evaluate("() => document.querySelector('.ss-nav.next').click()")
+            await pg.wait_for_timeout(800)
+            zoom1 = await pg.evaluate("""() => ({
+              src: document.querySelector('#ss-zoom .ss-focus img').src,
+              pos: document.querySelector('#ss-zoom-pos').textContent,
+            })""")
+            await pg.evaluate("() => document.querySelector('.ss-nav.prev').click()")
+            await pg.wait_for_timeout(800)
+            zoom2 = await pg.evaluate("""() => ({
+              src: document.querySelector('#ss-zoom .ss-focus img').src,
+              pos: document.querySelector('#ss-zoom-pos').textContent,
+            })""")
+            report["zoom_cycle"] = {"next": zoom1, "prev": zoom2}
+            assert zoom1["src"] != zoom0["src"] and zoom1["pos"].startswith("2 / "), \
+                f"zoom next-cycle broken: {zoom1}"
+            assert zoom2["src"] == zoom0["src"] and zoom2["pos"].startswith("1 / ") if cells > 1 else True, \
+                f"zoom prev-cycle broken: {zoom2}"
+            # swipe-left gesture also cycles (pointer events, no scroll fight)
+            await pg.evaluate("""() => {
+              const st = document.querySelector('#ss-zoom .ss-focus');
+              const r = st.getBoundingClientRect();
+              const y = r.top + r.height / 2, x0 = r.left + r.width * 0.8,
+                    x1 = r.left + r.width * 0.2;
+              st.dispatchEvent(new PointerEvent('pointerdown',
+                {bubbles: true, pointerId: 7, clientX: x0, clientY: y}));
+              st.dispatchEvent(new PointerEvent('pointerup',
+                {bubbles: true, pointerId: 7, clientX: x1, clientY: y}));
             }""")
+            await pg.wait_for_timeout(600)
+            swipe_pos = await pg.evaluate(
+                "() => document.querySelector('#ss-zoom-pos').textContent")
+            report["zoom_swipe"] = swipe_pos
+            assert swipe_pos.startswith("2 / "), f"swipe cycle broken: {swipe_pos}"
+            # pick IN zoom — advance to an unhandled member, then pick in place
+            for _ in range(list_len_placeholder := cells):
+                btn_txt = await pg.evaluate(
+                    "() => document.querySelector('#ss-zoom-pick').textContent")
+                if btn_txt.strip() == "\u2713 Pick":
+                    break
+                await pg.evaluate("() => document.querySelector('.ss-nav.next').click()")
+                await pg.wait_for_timeout(400)
+            await pg.evaluate("() => document.querySelector('#ss-zoom-pick').click()")
             await pg.wait_for_timeout(400)
-            report["closed_overlays"] = closed
+            picked = await pg.evaluate(
+                "() => document.querySelector('#ss-zoom-pick').textContent")
+            report["zoom_pick"] = picked
+            assert "Un-pick" in picked, f"pick-in-zoom broken: {picked}"
+            # back → returns to SURVEY, draft intact
+            await pg.evaluate("() => document.querySelector('#ss-zoom-back').click()")
+            await pg.wait_for_timeout(1500)
+            back_survey = await pg.evaluate("""() => ({
+              survey_open: !!document.querySelector('#ss-survey'),
+              zoom_gone: !document.querySelector('#ss-zoom'),
+              first_cell_class: document.querySelector('.ss-cell').className,
+              pick_cells: document.querySelectorAll('#ss-survey .ss-cell.pick').length,
+              reject_cells: document.querySelectorAll('#ss-survey .ss-cell.reject').length,
+            })""")
+            report["back_to_survey"] = back_survey
+            assert back_survey["survey_open"] and back_survey["zoom_gone"] and \
+                back_survey["pick_cells"] >= 1, \
+                f"zoom back did not restore survey with draft: {back_survey}"
+            await pg.screenshot(path=".probes/ss-05b-back-at-survey-draft.png")
+            # survey's single exit → spread with the draft pick intact
+            await pg.evaluate(
+                "() => [...document.querySelectorAll('#ss-survey .ss-ov-top .ee-btn')]"
+                ".find(b => b.textContent.includes('Back to stack')).click()")
+            await pg.wait_for_timeout(1200)
+            spread_state = await pg.evaluate("""() => ({
+              survey_gone: !document.querySelector('#ss-survey'),
+              header: !!document.querySelector('.ss-header'),
+              chips: document.querySelectorAll('.ss-pick-chip').length,
+            })""")
+            report["spread_after_zoom"] = spread_state
+            assert spread_state["survey_gone"] and spread_state["header"] and \
+                spread_state["chips"] >= 2, \
+                f"spread draft lost after zoom round-trip: {spread_state}"
 
             # ── 7. Commit → verdict + pending manifest ─────────────────
             counts = await pg.evaluate("""() =>
