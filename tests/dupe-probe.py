@@ -844,6 +844,116 @@ async def main():
             assert not console_errors, f"console errors: {console_errors}"
 
             print(json.dumps(report, indent=1))
+
+            # ── 11. VIEW MODES: All / Accepted / Rejected (2026-10-08j) ──
+            # Seeds three families via the verdict API (restored byte-for-byte
+            # in the finally): split (kept+rejected), accepted-only (kept),
+            # and rejected-only. C goes onto the pending manifest via
+            # send-pending so the DELETION dim renders. Asserts: filtered
+            # counts per view, Ladder (stack-spread detail) entry from the
+            # Accepted view, dimmed DELETION card visible in Rejected.
+            seed_ids = [f["id"] for f in await pg.evaluate("""async () => {
+              const d = await fetch('/api/dupe/families?state=unresolved')
+                .then(r => r.json());
+              return d.items.slice(0, 3).map(it => ({id: it.id}));
+            }""")]
+            assert len(seed_ids) == 3, "need 3 unresolved families to seed views"
+            seeds = []
+            for sid in seed_ids:
+                det = await pg.evaluate(
+                    f"""async () => fetch('/api/dupe/families/{sid}')
+                         .then(r => r.json())""")
+                mems = [m["path"] for m in det["members"]]
+                assert len(mems) >= 2, f"{sid}: need >=2 members"
+                seeds.append({"id": sid, "mems": mems})
+            a, bb, c = seeds
+            await pg.evaluate(f"""async () => {{
+              const post = (fid, body) => fetch(`/api/dupe/families/${{fid}}/verdict`,
+                {{method:'POST', headers:{{'Content-Type':'application/json'}},
+                  body: JSON.stringify(body)}}).then(r => r.json());
+              await post('{a["id"]}', {{members: {{'{a["mems"][0]}': 'kept',
+                '{a["mems"][1]}': 'rejected'}}, note: 'probe view-mode seed'}});
+              await post('{bb["id"]}', {{members: {{'{bb["mems"][0]}': 'kept'}},
+                note: 'probe view-mode seed'}});
+              await post('{c["id"]}', {{members: Object.fromEntries(
+                {json.dumps(c["mems"])}.map(p => [p, 'rejected'])),
+                note: 'probe view-mode seed'}});
+              await fetch('/api/dupe/families/{c["id"]}/send-pending',
+                {{method:'POST'}});
+            }}""")
+
+            async def view_cards(v):
+                await pg.evaluate(
+                    f"""() => document.querySelector(
+                      '#dupe-viewseg .pill[data-v="{v}"]').click()""")
+                await pg.wait_for_timeout(4000)  # /mnt thumbs are slow
+                return await pg.evaluate("""() => ({
+                  cards: [...document.querySelectorAll('.fam-card:not(.skel)')]
+                    .filter(c => c.getBoundingClientRect().height > 0),
+                  hint: (document.querySelector('.dupe-empty')||{}).textContent || null,
+                })""")
+
+            # Rejected view: split A + rejected-only C visible, B absent;
+            # C dimmed with the DELETION badge (still rendered — reversible).
+            rej = await view_cards("rejected")
+            ids_r = [c_.textContent for c_ in rej["cards"]]
+            assert a["id"] in ids_r and c["id"] in ids_r \
+                and bb["id"] not in ids_r, f"rejected view wrong: {ids_r}"
+            dim = await pg.evaluate("""() => {{
+              const card = [...document.querySelectorAll('.fam-card:not(.skel)')]
+                .find(x => x.textContent.includes('{c["id"]}'));
+              return {{
+                dim: card.classList.contains('in-manifest'),
+                badge: !!card.querySelector('.verdict-tag.deletion'),
+                opacity: getComputedStyle(card).opacity,
+              }};
+            }}""")
+            assert dim["dim"] and dim["badge"] and float(dim["opacity"]) < 0.9, \
+                f"DELETION dim missing on {c['id']}: {dim}"
+            report["rejected_view"] = {"ids": ids_r, "dim": dim}
+            await pg.screenshot(path=".probes/ss-20-rejected-dimmed.png")
+
+            # Accepted view: A + B, C absent; DELETION-empty here.
+            acc = await view_cards("accepted")
+            ids_a = [c_.textContent for c_ in acc["cards"]]
+            assert a["id"] in ids_a and bb["id"] in ids_a \
+                and c["id"] not in ids_a, f"accepted view wrong: {ids_a}"
+            report["accepted_view"] = ids_a
+            await pg.screenshot(path=".probes/ss-19-accepted-view.png")
+
+            # Ladder entry works from Accepted view: open the accepted
+            # family's stack-spread (champion + picks ladder), assert it,
+            # then step back to families.
+            await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card:not(.skel)')]
+              .find(x => x.textContent.includes('{a["id"]}')).click()""")
+            await pg.wait_for_timeout(3000)
+            spread_ok = await pg.evaluate("""() => ({
+              open: document.querySelector('#dupe-detail').classList.contains('open'),
+              champion: !!document.querySelector('.ss-champ img'),
+              draft: !!document.querySelector('.ss-badge.draft'),
+            })""")
+            assert spread_ok["open"] and spread_ok["champion"] and spread_ok["draft"], \
+                f"ladder entry from Accepted view broken: {spread_ok}"
+            report["ladder_from_accepted"] = spread_ok
+            await pg.evaluate("() => document.querySelector('#dupe-back').click()")
+            await pg.wait_for_timeout(1500)
+
+            # All view: every family back; badge counts render on the pills.
+            allv = await view_cards("all")
+            ids_all = [c_.textContent for c_ in allv["cards"]]
+            assert all(s["id"] in ids_all for s in seeds), \
+                f"all view missing seeded families: {ids_all}"
+            seg_txt = await pg.evaluate(
+                "() => document.querySelector('#dupe-viewseg').textContent")
+            assert "Accepted (" in seg_txt and "Rejected (" in seg_txt, \
+                f"badge counts missing on view pills: {seg_txt}"
+            report["all_view"] = {"has_seeds": True, "seg": seg_txt}
+            await pg.screenshot(path=".probes/ss-18-view-toggle.png")
+            # restore the default lens for later sections/readers
+            await pg.evaluate(
+                "() => document.querySelector('#dupe-viewseg .pill[data-v=\"all\"]').click()")
+            assert not console_errors, f"console errors: {console_errors}"
+
             await b.close()
     finally:
         # HARDENED TEARDOWN (2026-10-08h): the old single-pass restore leaked

@@ -119,7 +119,8 @@ def test_status_no_index(tmp_path, monkeypatch, client):
 
 def test_family_list_pagination_and_filters(env, client):
     lst = client.get("/api/dupe/families").json()
-    assert lst["counts"] == {"unresolved": 3, "resolved": 0}
+    assert lst["counts"]["unresolved"] == 3 and lst["counts"]["resolved"] == 0
+    assert lst["counts"]["accepted"] == 0 and lst["counts"]["rejected"] == 0
     assert lst["total"] == 3 and len(lst["items"]) == 3
     first = lst["items"][0]
     assert first["state"] == "unresolved"
@@ -706,3 +707,78 @@ def test_meld_save_never_overwrites(env, client, tmp_path):
         "image_b64": _meld_b64(tmp_path), "members": ["a.png", "b.png"]})
     assert r1.json()["saved_as"] != r2.json()["saved_as"]
     assert r2.json()["pending_added"] == 0  # already queued
+
+
+# ------------------------------------------------- view modes (2026-10-08j)
+
+def _verdict_line(env, fid, members, note=""):
+    tmp = env[2]
+    with open(tmp / "verdicts.jsonl", "a") as fh:
+        fh.write(json.dumps({"ts": "2026-10-08T13:00:00-07:00",
+                             "family": fid, "members": members,
+                             "note": note}) + "\n")
+
+
+def test_family_views_semantics(env, client):
+    """accepted = latest entry keeps/melds >=1; rejected = rejects >=1;
+    split verdicts land in both; deferred-only lands in neither."""
+    from backend.routers.dupe import _family_views, _verdicts
+    _verdict_line(env, "fam-aaaaaaaaaaaa",
+                  {"a.png": "kept", "b.png": "rejected", "sub/c.png": "rejected"})
+    _verdict_line(env, "fam-bbbbbbbbbbbb", {"d.png": "melded"})
+    _verdict_line(env, "fam-cccccccccccc",
+                  {"a.png": "deferred", "b.png": "deferred"})
+    v = _verdicts()
+    assert _family_views("fam-aaaaaaaaaaaa", v) == \
+        {"accepted": True, "rejected": True}
+    assert _family_views("fam-bbbbbbbbbbbb", v) == \
+        {"accepted": True, "rejected": False}
+    assert _family_views("fam-cccccccccccc", v) == \
+        {"accepted": False, "rejected": False}
+
+
+def test_families_view_param_filters_and_counts(env, client):
+    _verdict_line(env, "fam-aaaaaaaaaaaa",
+                  {"a.png": "kept", "b.png": "rejected", "sub/c.png": "rejected"})
+    _verdict_line(env, "fam-bbbbbbbbbbbb", {"d.png": "melded"})
+    accepted = client.get("/api/dupe/families?view=accepted").json()
+    rejected = client.get("/api/dupe/families?view=rejected").json()
+    alldata = client.get("/api/dupe/families?view=all").json()
+    assert {r["id"] for r in accepted["items"]} == \
+        {"fam-aaaaaaaaaaaa", "fam-bbbbbbbbbbbb"}
+    assert {r["id"] for r in rejected["items"]} == {"fam-aaaaaaaaaaaa"}
+    for lst in (accepted, rejected, alldata):
+        assert lst["counts"]["accepted"] == 2
+        assert lst["counts"]["rejected"] == 1
+    assert alldata["total"] == 3
+    row = next(r for r in accepted["items"]
+               if r["id"] == "fam-aaaaaaaaaaaa")
+    assert row["verdict_counts"] == {"kept": 1, "rejected": 2}
+
+
+def test_families_view_overrides_state_pill(env, client):
+    """A view lens ignores `state`: accepted families are resolved by
+    definition, but state=unresolved must not empty the view."""
+    _verdict_line(env, "fam-bbbbbbbbbbbb", {"d.png": "melded"})
+    lst = client.get("/api/dupe/families?state=unresolved&view=accepted").json()
+    assert {r["id"] for r in lst["items"]} == {"fam-bbbbbbbbbbbb"}
+
+
+def test_families_bad_view(client):
+    assert client.get("/api/dupe/families?view=nope").status_code == 400
+
+
+def test_families_pending_manifest_count(env, client):
+    """Rejected members sitting on the pending manifest -> row.pending > 0
+    (dupe-relative AND gallery-relative manifest keys both count)."""
+    _verdict_line(env, "fam-aaaaaaaaaaaa",
+                  {"a.png": "kept", "b.png": "rejected", "sub/c.png": "rejected"})
+    client.post("/api/dupe/families/fam-aaaaaaaaaaaa/send-pending")
+    pend = env[2] / "pending.json"
+    with open(pend) as fh:
+        manifest = json.load(fh)
+    manifest["sub/c.png"] = "2026-10-08T13:00:00"  # dupe-relative key
+    with open(pend, "w") as fh:
+        json.dump(manifest, fh)
+    row = client.get("/api/dupe/families?view=rejected").json()["items"][0]
+    assert row["pending"] == 2
