@@ -30,6 +30,29 @@ async def main():
             }""")
             await pg.wait_for_timeout(4000)  # thumbnails over /mnt are slow
             report = {"status": await pg.inner_text("#dupe-status")}
+
+            # ── 1a. Latency + render proof ───────────────────────────
+            # Cards must render with N>0 and families+thumb latency must be
+            # sub-second against the live (cached) backend even from the
+            # page context, as a slow iPad would experience it.
+            latency = await pg.evaluate("""async () => {
+              const t0 = performance.now();
+              const [s, f] = await Promise.all([
+                fetch('/api/dupe/status').then(r => r.json()),
+                fetch('/api/dupe/families?state=unresolved&cursor=').then(r => r.json()),
+              ]);
+              const tApi = performance.now() - t0;
+              const t1 = performance.now();
+              const th = await fetch(f.items[0].members[0].thumb);
+              await th.blob();
+              const tThumb = performance.now() - t1;
+              const cards = document.querySelectorAll('.fam-card:not(.skel)').length;
+              return {families_ms: Math.round(tApi), thumb_ms: Math.round(tThumb),
+                      cards, total: f.total};
+            }""")
+            report["latency"] = latency
+            assert latency["cards"] > 0, "no family cards rendered"
+            assert latency["families_ms"] < 3000, f"families too slow: {latency}"
             await pg.screenshot(path=".probes/dupe-01-browser.png")
 
             # ── 2. Family detail with verdicts ─────────────────────────
