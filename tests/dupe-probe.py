@@ -783,6 +783,8 @@ async def main():
                 and flag["h"] > 0, f"card ⚡ badge missing/invisible: {flag}"
             await pg.screenshot(path=".probes/ss-15-card-conflict-flag.png")
             # detail: signals bar with history chips + explicit conflict line
+            await pg.wait_for_selector(
+                f'.fam-card:not(.skel):has-text("{seed["id"]}")', timeout=30000)
             await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
               .find(c => c.textContent.includes('{seed['id']}')).click()""")
             await pg.wait_for_selector("#ss-signals", timeout=20000)
@@ -820,6 +822,8 @@ async def main():
             fam_file.write_text(json.dumps(seed["json"]))
             await pg.evaluate("() => document.querySelector('#dupe-back').click()")
             await wait_grid_ready(pg)
+            await pg.wait_for_selector(
+                f'.fam-card:not(.skel):has-text("{seed["id"]}")', timeout=30000)
             await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
               .find(c => c.textContent.includes('{seed['id']}')).click()""")
             await pg.wait_for_selector("#ss-suggest", timeout=20000)
@@ -857,6 +861,8 @@ async def main():
             # DISMISS it there.
             await pg.evaluate("() => document.querySelector('#dupe-back').click()")
             await wait_grid_ready(pg)
+            await pg.wait_for_selector(
+                f'.fam-card:not(.skel):has-text("{seed["id"]}")', timeout=30000)
             await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
               .find(c => c.textContent.includes('{seed['id']}')).click()""")
             await pg.wait_for_selector("#ss-suggest", timeout=20000)
@@ -912,7 +918,10 @@ async def main():
             await pg.wait_for_timeout(1500)
             await pg.evaluate("""() => [...document.querySelectorAll('.dupe-top .pill')]
               .find(p => p.dataset.f === 'all').click()""")
-            await pg.wait_for_timeout(3000)
+            # cold preview cache (server restart) can take >3s to render
+            # cards over /mnt — wait for the seeded card itself, not a timer
+            await pg.wait_for_selector(
+                f'.fam-card:not(.skel):has-text("{sid}")', timeout=30000)
             await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
               .find(c => c.textContent.includes('{sid}')).click()""")
             await pg.wait_for_timeout(3000)
@@ -1086,14 +1095,19 @@ async def main():
                     and _ham(first["dhash"], o["dhash"]) <= 4
                     for o in mems)
                 if has_twin:
+                    # family-JSON members carry only path; the UI name is
+                    # _member_view's basename — mirror it exactly
+                    base = lambda m: m["path"].replace("\\", "/").split("/")[-1]
                     twin_seed = {"id": it["id"], "json": fj,
-                                 "expected": [m["name"] for m in chain] +
-                                             [m["name"] for m in mems
+                                 "expected": [base(m) for m in chain] +
+                                             [base(m) for m in mems
                                               if not m.get("dhash")]}
                     break
             assert twin_seed, "no unresolved family with twin-able hashed members"
             tl_id = twin_seed["id"]
             tl_expected = twin_seed["expected"]
+            await pg.wait_for_selector(
+                f'.fam-card:not(.skel):has-text("{tl_id}")', timeout=30000)
             await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
               .find(c => c.textContent.includes('{tl_id}')).click()""")
             await pg.wait_for_selector(".ss-header", timeout=20000)
@@ -1147,7 +1161,8 @@ async def main():
                 .style.visibility,
             })""")
             report["twin_flip"] = flipped
-            assert flipped["badge"] != "none" and "231, 161, 58" in flipped["border"] \
+            assert flipped["badge"] != "none" \
+                and "rgb(232, 161, 58)" in flipped["border"] \
                 and flipped["cur_hidden"] == "hidden", \
                 f"flip to pinned broken: {flipped}"
             await pg.screenshot(path=".probes/ss-23-twin-pinned.png")
