@@ -32,6 +32,9 @@ function panelHTML() {
     .gal-viewseg .ee-btn:first-child { border-radius: 4px 0 0 4px; }
     .gal-viewseg .ee-btn:last-child { border-radius: 0 4px 4px 0; margin-right: 0; }
     .gal-viewseg .ee-btn .cnt { color: #e87a7a; font-weight: 700; }
+    /* Select mode: filled/inverted active pill, same treatment as view pills */
+    .gal-btn.selecting { background: #3a3ab0; border-color: #7a7aff; color: #fff;
+      box-shadow: 0 0 8px rgba(90,90,255,0.5); }
     .gal-btn.danger { border-color: #7a3a3a; color: #e87a7a; }
     .gal-btn.danger.toggled { background: #6a2020; color: #ffd0d0; box-shadow: 0 0 8px rgba(220,60,60,0.6); }
     #tabbar .tab .marking-badge {
@@ -308,9 +311,16 @@ export class Gallery {
 
   setSelectMode(on) {
     this.selectMode = on && !this.deleteMode;
-    this.el.selectBtn.classList.toggle('toggled', this.selectMode);
+    this.updateSelectBtn();
     if (!this.selectMode) this.clearSelection();
     else this.updateActionBars();
+  }
+
+  updateSelectBtn() {
+    this.el.selectBtn.classList.toggle('selecting', this.selectMode);
+    const n = this.selected.size;
+    this.el.selectBtn.innerHTML = this.selectMode && n
+      ? `☰ Selecting (${n})` : '☰ Select';
   }
 
   setDeleteMode(on) {
@@ -350,6 +360,7 @@ export class Gallery {
     this.el.selCount.textContent = n;
     this.el.selMsg.textContent = n ? `${n} selected` : 'Tap images to select';
     this.el.blendPairBtn.style.display = n === 2 ? '' : 'none';
+    this.updateSelectBtn();
   }
 
   launchLadder() {
@@ -469,7 +480,11 @@ export class Gallery {
     if (this.loading || (this.cursor === null && this.items.length)) return;
     this.loading = true;
     try {
-      const p = new URLSearchParams({ dir: this.dir, pending: this.viewFilter });
+      // Pending is a GLOBAL inbox: always list the whole manifest regardless of
+      // the folder dropdown, so status count and grid count agree by
+      // construction (both come from this same fetch → this.items).
+      const dir = this.viewFilter === 'pending' ? '' : this.dir;
+      const p = new URLSearchParams({ dir, pending: this.viewFilter });
       if (this.cursor) p.set('cursor', this.cursor);
       const r = await fetch('/api/gallery/list?' + p);
       if (!r.ok) throw new Error(r.status);
@@ -502,7 +517,9 @@ export class Gallery {
     const check = document.createElement('div');
     check.className = 'check';
     const name = document.createElement('div');
-    name.className = 'name'; name.textContent = item.name;
+    name.className = 'name';
+    // Pending spans folders: show the folder-qualified path as the label.
+    name.textContent = item.path.includes('/') ? item.path : item.name;
     // Clemency: per-cell Return in the Pending filter view.
     const ret = document.createElement('button');
     ret.className = 'ee-btn pd-return'; ret.textContent = 'Return';
