@@ -22,6 +22,7 @@
 // NOTHING persists before Commit; commit = verdict POST + send-pending.
 import { registerModule } from '../shell.js';
 import { sigIsOverride, sigChipText } from './dupe-signals.js';
+import { familyVerdictState, inDeletionManifest } from './dupe-view.js';
 
 const api = (p, opts) => fetch(`/api/dupe${p}`, opts).then(r => {
   if (!r.ok) return r.json().then(e => Promise.reject(new Error(e.detail || r.status)));
@@ -49,6 +50,15 @@ registerModule({
       .dupe-top { display:flex; gap:8px; align-items:center; padding:8px 12px;
                   border-bottom:1px solid #2a2a44; flex-wrap:wrap; flex-shrink:0; }
       .dupe-top .status { font-size:11px; color:#8a8aaa; }
+      /* view-mode segmented control (2026-10-08j) — 40px touch targets */
+      .viewseg { display:inline-flex; gap:4px; align-items:center; }
+      .viewseg .lbl { font-size:10px; color:#5a5a7a; }
+      .viewseg .pill { min-height:40px; display:inline-flex; align-items:center; }
+      .dupe-top .pill.muted { opacity:0.4; pointer-events:none; }
+      .verdict-tag.deletion { background:#3a1d1d; color:#e87a7a; font-weight:700; }
+      .fam-card.in-manifest { opacity:0.45; }
+      .dupe-empty { text-align:center; color:#8a8aaa; font-size:13px;
+                    padding:32px 16px; }
       .pill { background:#1d1d33; border:1px solid #2a2a44; color:#8a8aaa;
               padding:4px 12px; border-radius:14px; cursor:pointer; font-size:12px; }
       .pill.active { background:#5b4a8a; border-color:#7a6aaa; color:#fff; }
@@ -278,6 +288,12 @@ registerModule({
         <span class="pill" data-f="unresolved">Unresolved</span>
         <span class="pill" data-f="resolved">Resolved</span>
         <span class="pill" data-f="all">All</span>
+        <span class="viewseg" id="dupe-viewseg">
+          <span class="lbl">view</span>
+          <span class="pill" data-v="all">All</span>
+          <span class="pill" data-v="accepted">Accepted</span>
+          <span class="pill" data-v="rejected">Rejected</span>
+        </span>
         <span class="status" id="dupe-status"></span>
       </div>
       <div class="dupe-scroll" id="dupe-scroll">
@@ -308,6 +324,26 @@ registerModule({
       commit: panel.querySelector('#dupe-commit'),
     };
     let filter = 'unresolved';
+    // View mode (2026-10-08j): All | Accepted | Rejected, a lens over the
+    // committed ledger. Remembered per session in-memory here; best-effort
+    // localStorage so a PWA relaunch reopens the working pool.
+    let viewMode = 'all';
+    try {
+      if (['all', 'accepted', 'rejected'].includes(localStorage.eeDupeView))
+        viewMode = localStorage.eeDupeView;
+    } catch (_) {}
+    const saveViewMode = (v) => {
+      viewMode = v;
+      try { localStorage.eeDupeView = v; } catch (_) {}
+    };
+    const elView = {
+      seg: panel.querySelector('#dupe-viewseg'),
+      pills: [...panel.querySelectorAll('#dupe-viewseg .pill')],
+    };
+    elView.pills.forEach(p => p.addEventListener('click', () => {
+      saveViewMode(p.dataset.v);
+      renderList();
+    }));
     let cursor = '';
     let exhausted = false;
     let current = null;        // detail family (API shape)
@@ -387,8 +423,10 @@ registerModule({
     }
 
     function cardFor(f) {
+      const vs = familyVerdictState(f.verdict_counts);
       const card = document.createElement('div');
-      card.className = `fam-card ${f.state === 'resolved' ? 'resolved' : ''}`;
+      card.className = `fam-card ${f.state === 'resolved' ? 'resolved' : ''}`
+        + (viewMode === 'rejected' && inDeletionManifest(f) ? ' in-manifest' : '');
       const strip = document.createElement('div');
       strip.className = 'fam-strip';
       for (const m of (f.members || [])) {
@@ -405,7 +443,11 @@ registerModule({
         `<span>${f.id}</span><span>${f.size} members</span>` +
         (f.tiers || []).map(t => `<span class="tier-badge ${t}">${t}</span>`).join('') +
         (f.conflict ? '<span class="sig-flag" title="signal conflict — prior verdict splits members the hashes call near-identical">⚡</span>' : '') +
-        (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '');
+        (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '') +
+        (viewMode !== 'all' && vs.accepted ? '<span class="verdict-tag kept">accepted</span>' : '') +
+        (viewMode !== 'all' && vs.rejected ? '<span class="verdict-tag rejected">rejected</span>' : '') +
+        (viewMode === 'rejected' && inDeletionManifest(f)
+          ? '<span class="verdict-tag deletion" title="files queued on the Pending Delete manifest — reversible until Delete all">DELETION</span>' : '');
       card.append(strip, meta);
       card.addEventListener('click', () => renderDetail(f.id));
       return card;
@@ -415,6 +457,10 @@ registerModule({
       const seq = ++viewSeq;
       trace(`renderList(seq=${seq})`);
       el.pills.forEach(p => p.classList.toggle('active', p.dataset.f === filter));
+      // view pills: active state; state pills mute outside All view (the
+      // server ignores `state` when a view lens is active)
+      elView.pills.forEach(p => p.classList.toggle('active', p.dataset.v === viewMode));
+      el.pills.forEach(p => p.classList.toggle('muted', viewMode !== 'all'));
       el.detail.classList.remove('open');
       el.list.classList.remove('open');
       el.bottom.style.display = 'none';
@@ -431,11 +477,14 @@ registerModule({
       el.more.style.display = 'none';
       job(firstPage ? 'loading families…' : 'loading more…');
       try {
-        const data = await api(`/families?state=${filter}&cursor=${encodeURIComponent(nextCursor)}`);
+        const data = await api(`/families?state=${filter}&view=${viewMode}&cursor=${encodeURIComponent(nextCursor)}`);
         if (seq !== viewSeq) { trace(`renderList(${seq}) stale — a newer render won`); return; }
         el.pills[0].textContent = `Unresolved (${data.counts.unresolved})`;
         el.pills[1].textContent = `Resolved (${data.counts.resolved})`;
         el.pills[2].textContent = `All (${data.total})`;
+        elView.pills[0].textContent = `All (${data.total})`;
+        elView.pills[1].textContent = `Accepted (${data.counts.accepted})`;
+        elView.pills[2].textContent = `Rejected (${data.counts.rejected})`;
         let grid = el.list.querySelector('.fam-grid');
         if (firstPage || !grid) {
           el.list.innerHTML = '';
@@ -454,6 +503,17 @@ registerModule({
             grid.appendChild(ec);
             console.error('dupe card render failed', f.id, cardErr);
           }
+        }
+        // Empty state (2026-10-08j): a view lens with zero families shows a
+        // plain hint, never a blank screen.
+        if (firstPage && !grid.children.length && viewMode !== 'all') {
+          const hint = document.createElement('div');
+          hint.className = 'dupe-empty';
+          hint.dataset.empty = viewMode;
+          hint.textContent = viewMode === 'accepted'
+            ? 'No accepted families yet — commit a family with keeps or a meld and it lands here.'
+            : 'No rejected families yet — commit rejects (or send them to Pending Delete) and they show here.';
+          el.list.appendChild(hint);
         }
         cursor = data.next_cursor || '';
         exhausted = !data.next_cursor;
