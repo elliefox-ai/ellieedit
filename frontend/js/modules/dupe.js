@@ -76,6 +76,11 @@ registerModule({
       .dupe-detail { display:none; flex-direction:column; height:100%;
                      min-height:0; overflow:hidden; position:relative; }
       .dupe-detail.open { display:flex; }
+      /* '.open' on the family list means HIDDEN — renderDetail adds it so the
+         grid stops occupying space above the detail. This rule went missing
+         once and iPad Safari showed the list instead of the detail
+         (2026-10-07z bugfix). Keep it adjacent to the detail rules. */
+      .fam-list.open { display:none; }
       .ss-header { display:flex; gap:10px; align-items:center; flex-wrap:wrap;
                    padding:8px 12px; border-bottom:1px solid #2a2a44; flex-shrink:0;
                    font-size:12px; color:#8a8aaa; }
@@ -228,6 +233,19 @@ registerModule({
     let cursor = '';
     let exhausted = false;
     let current = null;        // detail family (API shape)
+    // Render-generation guard: the last render started wins. A stale async
+    // renderList resolving AFTER renderDetail must never close the detail
+    // (that was the flicker suspect; also guards tab-activated re-fires).
+    let viewSeq = 0;
+    // Debug trace: set localStorage.eeDupeDebug='1' to log state transitions
+    // (browser→detail→browser) into the status row for iPad field diagnosis.
+    const dupeDebug = (() => { try { return localStorage.eeDupeDebug === '1'; } catch (_) { return false; } })();
+    function trace(msg) {
+      if (!dupeDebug) return;
+      const st = panel.querySelector('#dupe-status');
+      if (st) st.textContent = `[trace] ${msg}`;
+      console.log(`[dupe trace] ${msg}`);
+    }
     // ── draft state (nothing persists before commit) ──
     let draft = null;          // { verdicts:{path:v}, picks:[path], melded:[a,b]|null }
     let championIdx = 0;       // index into current.members
@@ -307,9 +325,11 @@ registerModule({
     }
 
     async function renderList(nextCursor = '') {
+      const seq = ++viewSeq;
+      trace(`renderList(seq=${seq})`);
       el.pills.forEach(p => p.classList.toggle('active', p.dataset.f === filter));
       el.detail.classList.remove('open');
-      el.list.classList.add('open');
+      el.list.classList.remove('open');
       el.bottom.style.display = 'none';
       current = null;
       const firstPage = !nextCursor;
@@ -319,13 +339,13 @@ registerModule({
         el.list.innerHTML = '';
         el.list.appendChild(skeletons());
       }
-      // '.fam-list.open' means HIDDEN (see <style> above) — list mode shows the
-      // grid, so 'open' must be removed, never added. (2026-10-07x bugfix.)
+      // list mode shows the grid; '.open' hides it via the .fam-list.open rule
       el.list.classList.remove('open');
       el.more.style.display = 'none';
       job(firstPage ? 'loading families…' : 'loading more…');
       try {
         const data = await api(`/families?state=${filter}&cursor=${encodeURIComponent(nextCursor)}`);
+        if (seq !== viewSeq) { trace(`renderList(${seq}) stale — a newer render won`); return; }
         el.pills[0].textContent = `Unresolved (${data.counts.unresolved})`;
         el.pills[1].textContent = `Resolved (${data.counts.resolved})`;
         el.pills[2].textContent = `All (${data.total})`;
@@ -932,9 +952,12 @@ registerModule({
     }
 
     async function renderDetail(fid) {
+      const seq = ++viewSeq;
+      trace(`renderDetail(${fid}, seq=${seq})`);
       job('loading family…');
       try {
         const f = await api(`/families/${fid}`);
+        if (seq !== viewSeq) { trace(`renderDetail(${fid}) stale — a newer render won`); return; }
         current = f;
         committed = false;
         commitSummary = null;
@@ -960,10 +983,23 @@ registerModule({
         el.detail.classList.add('open');   // show detail
         el.bottom.style.display = 'flex';
         el.scroll.scrollTop = 0;
-        if (committed) renderCommitted(commitSummary);
-        else renderSpread();
+        try {
+          if (committed) renderCommitted(commitSummary);
+          else renderSpread();
+        } catch (renderErr) {
+          // red error panel INSIDE the detail — never a silent blank view
+          console.error('dupe renderSpread failed', renderErr);
+          trace(`renderSpread threw: ${renderErr.message}`);
+          el.detail.innerHTML =
+            `<div style="padding:16px;color:#e87a7a;font-size:13px;">` +
+            `detail render failed: ${renderErr.message}</div>`;
+        }
+        trace(`detail open (list display=${getComputedStyle(el.list).display})`);
         job('');
-      } catch (e) { job(`dupe: ${e.message}`, 'err'); }
+      } catch (e) {
+        trace(`renderDetail(${fid}) failed: ${e.message}`);
+        job(`dupe: ${e.message}`, 'err');
+      }
     }
 
     el.back.addEventListener('click', () => renderList());
