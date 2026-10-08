@@ -470,7 +470,20 @@ export class Gallery {
 
   async pdConfirmExecute() {
     try {
-      const j = await fetch('/api/pending/confirm', { method: 'POST' }).then(r => r.json());
+      // Optimistic-concurrency: send the count the view showed the operator.
+      // A 409 means the queue changed under us — re-sync and ask for a retry.
+      const r = await fetch('/api/pending/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expected_count: this.pendingSet.size }),
+      });
+      if (r.status === 409) {
+        await this.syncManifest();
+        this.toast('Queue changed — review and retry', true);
+        this.pdDisarm();
+        return;
+      }
+      const j = await r.json();
       this.toast(`Deleted ${j.deleted} images (${fmtBytes(j.bytes)})`);
       this.pdDisarm();
       if (this.viewFilter !== 'pending') this.setViewFilter('active');
