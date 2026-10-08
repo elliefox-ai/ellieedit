@@ -5,7 +5,7 @@
 
 // Bump on every deploy — shown in the job bar so a stale-cache client is
 // instantly visible.
-const BUILD = '2026-10-07s';
+const BUILD = '2026-10-07t';
 
 const registry = [];
 const mounted = new Map(); // name -> { panelEl }
@@ -28,6 +28,9 @@ function activate(name) {
   for (const btn of tabbar.children) {
     btn.classList.toggle('active', btn.dataset.name === name);
   }
+  // Modules re-sync on activation (e.g. Gallery re-reads the pending manifest
+  // so marked/badge state can never go stale after a Ladder round).
+  window.dispatchEvent(new CustomEvent('ellieedit:tab-activated', { detail: { name } }));
 }
 
 function buildTabs() {

@@ -26,6 +26,12 @@ function panelHTML() {
     }
     .gal-status { font-size: 11px; color: #6c6c8e; flex: 1; }
     .gal-btn.toggled { background: #5b4a8a; border-color: #7a6aaa; color: #fff; }
+    /* View filter: [All | Active | Pending] — server-side filtered listing */
+    .gal-viewseg { display: flex; gap: 0; }
+    .gal-viewseg .ee-btn { border-radius: 0; margin-right: -1px; font-size: 11px; padding: 4px 10px; }
+    .gal-viewseg .ee-btn:first-child { border-radius: 4px 0 0 4px; }
+    .gal-viewseg .ee-btn:last-child { border-radius: 0 4px 4px 0; margin-right: 0; }
+    .gal-viewseg .ee-btn .cnt { color: #e87a7a; font-weight: 700; }
     .gal-btn.danger { border-color: #7a3a3a; color: #e87a7a; }
     .gal-btn.danger.toggled { background: #6a2020; color: #ffd0d0; box-shadow: 0 0 8px rgba(220,60,60,0.6); }
     #tabbar .tab .marking-badge {
@@ -52,12 +58,32 @@ function panelHTML() {
     .gal-cell.marked { border-color: #d04040; }
     .gal-cell.marked img { filter: brightness(0.7) sepia(0.3) hue-rotate(-30deg); }
     .gal-cell.marked .check { display: block; background: #a02020; }
+    /* Pending-delete badge (All view + pending filter): red edge + tint */
+    .gal-cell.ispending { border-color: #d04040; }
+    .gal-cell.ispending img { filter: sepia(0.35) hue-rotate(-30deg) brightness(0.8); }
+    .gal-cell.ispending::before {
+      content: 'PENDING'; position: absolute; top: 4px; left: 4px; z-index: 2;
+      background: #a02020; color: #fff; font-size: 8px; font-weight: 700;
+      padding: 1px 5px; border-radius: 6px; letter-spacing: 0.5px;
+    }
+    .gal-cell .pd-return { position: absolute; bottom: 20px; left: 50%;
+      transform: translateX(-50%); display: none; font-size: 10px; padding: 2px 8px; }
+    .gal-view-pending .gal-cell .pd-return { display: block; }
+    /* Champion highlight (post-ladder): gold ring + one-time flash */
+    .gal-cell.champion { border-color: #e8b84d; box-shadow: 0 0 10px rgba(232,184,77,0.55); }
+    .gal-cell.champion::after {
+      content: '👑'; position: absolute; top: 4px; right: 4px; font-size: 14px;
+      text-shadow: 0 0 4px rgba(0,0,0,0.8);
+    }
+    @keyframes champ-flash { 0%,100% { box-shadow: 0 0 4px rgba(232,184,77,0.3); }
+      50% { box-shadow: 0 0 26px rgba(232,184,77,0.95); } }
+    .gal-cell.champion.flash { animation: champ-flash 1.2s ease-in-out 2; }
     .gal-cell .name {
       position: absolute; bottom: 0; left: 0; right: 0; padding: 2px 6px;
       background: rgba(0,0,0,0.6); color: #b0b0d0; font-size: 9px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    /* Sticky bars: curation action bar + delete-mode marking bar */
+    /* Sticky bars: curation action bar + delete-mode marking bar + pending bar */
     .gal-bar {
       display: none; align-items: center; gap: 10px; flex-wrap: wrap;
       padding: 8px 16px; background: #1d1d33; border-top: 1px solid #4a4a6c;
@@ -65,6 +91,11 @@ function panelHTML() {
     .gal-bar.on { display: flex; }
     .gal-bar .msg { font-size: 12px; color: #b0b0d0; flex: 1; }
     .gal-bar.marking { background: #2a1216; border-top-color: #a02020; }
+    /* Pending filter sticky bottom bar — destructive action lives LOW and LEFT
+       (iPad thumb-zone rule): never top-right under the operator's thumb. */
+    .gal-bar.pendingbar { background: #2a1216; border-top-color: #a02020; }
+    .gal-bar.pendingbar .ee-btn.primary { background: #6a2020; border-color: #d04040; }
+    .gal-bar.pendingbar.confirming .ee-btn.primary { background: #a02020; }
     /* Viewer */
     .gal-viewer {
       display: none; position: absolute; inset: 0; background: rgba(8,8,16,0.96);
@@ -85,39 +116,18 @@ function panelHTML() {
     .gal-viewer .navzone:hover { color: rgba(255,255,255,0.6); }
     .gal-viewer .navzone.left { left: 0; }
     .gal-viewer .navzone.right { right: 0; }
-    /* Pending (clemency) view */
-    .gal-pending {
-      display: none; position: absolute; inset: 0; background: #120a0e;
-      z-index: 55; flex-direction: column;
-    }
-    .gal-pending .bar {
-      display: flex; align-items: center; gap: 10px; padding: 10px 16px;
-      background: #1d1016; border-bottom: 1px solid #5a2020;
-    }
-    .gal-pending .bar .fname { color: #e0b0b0; font-size: 13px; font-weight: 600; flex: 1; }
-    .gal-pending .pd-grid {
-      flex: 1; overflow-y: auto; display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-      grid-auto-rows: 140px; gap: 8px; padding: 12px 16px; align-content: start;
-    }
-    .gal-pending .pd-cell { position: relative; border-radius: 6px; overflow: hidden;
-      background: #1a1a2e; border: 2px solid #7a2020; }
-    .gal-pending .pd-cell img { width: 100%; height: 100%; object-fit: contain; display: block; }
-    .gal-pending .pd-cell .name { position: absolute; top: 0; left: 0; right: 0; padding: 2px 6px;
-      background: rgba(0,0,0,0.6); color: #d0b0b0; font-size: 9px;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .gal-pending .pd-cell button {
-      position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%);
-    }
-    .gal-pending .bar.confirming .ee-btn.primary { background: #a02020; border-color: #d04040; }
   </style>
   <div class="gal-header">
     <h1>Gallery <span class="subtitle">— generated images</span></h1>
     <select data-id="dir-select"></select>
     <span class="gal-status" data-id="status"></span>
+    <div class="gal-viewseg">
+      <button class="ee-btn gal-btn" data-act="view-all">All</button>
+      <button class="ee-btn gal-btn toggled" data-act="view-active">Active</button>
+      <button class="ee-btn gal-btn" data-act="view-pending">🗑 Pending (<span data-id="pending-count">0</span>)</button>
+    </div>
     <button class="ee-btn gal-btn" data-act="select-mode">☰ Select</button>
     <button class="ee-btn gal-btn danger" data-act="delete-mode" title="Mark images for pending delete">🚨</button>
-    <button class="ee-btn gal-btn" data-act="show-pending" style="display:none">🗑 Pending (<span data-id="pending-count">0</span>)</button>
   </div>
   <div class="gal-grid" data-id="grid"></div>
   <div class="gal-bar" data-id="action-bar">
@@ -131,6 +141,10 @@ function panelHTML() {
     <button class="ee-btn" data-act="exit-marking">Exit marking</button>
     <button class="ee-btn primary" data-act="done-marking">✓ Done marking (<span data-id="mark-count">0</span>)</button>
   </div>
+  <div class="gal-bar pendingbar" data-id="pending-bar">
+    <button class="ee-btn primary" data-act="pd-delete-all">Delete all</button>
+    <span class="msg" data-id="pd-msg"></span>
+  </div>
   <div class="gal-viewer" data-id="viewer">
     <div class="bar">
       <span class="fname" data-id="viewer-name"></span>
@@ -140,14 +154,6 @@ function panelHTML() {
     <div class="stage"><img data-id="viewer-img" alt=""></div>
     <div class="navzone left" data-act="prev">‹</div>
     <div class="navzone right" data-act="next">›</div>
-  </div>
-  <div class="gal-pending" data-id="pending">
-    <div class="bar" data-id="pending-bar">
-      <span class="fname">Pending Delete — <span data-id="pd-summary"></span></span>
-      <button class="ee-btn" data-act="pd-close">✕ Back to Gallery</button>
-      <button class="ee-btn primary" data-act="pd-delete-all">Delete all</button>
-    </div>
-    <div class="pd-grid" data-id="pd-grid"></div>
   </div>`;
 }
 
@@ -161,7 +167,11 @@ export class Gallery {
       status: panel.querySelector('[data-id="status"]'),
       selectBtn: panel.querySelector('[data-act="select-mode"]'),
       deleteBtn: panel.querySelector('[data-act="delete-mode"]'),
-      pendingBtn: panel.querySelector('[data-act="show-pending"]'),
+      viewBtns: {
+        all: panel.querySelector('[data-act="view-all"]'),
+        active: panel.querySelector('[data-act="view-active"]'),
+        pending: panel.querySelector('[data-act="view-pending"]'),
+      },
       pendingCount: panel.querySelector('[data-id="pending-count"]'),
       actionBar: panel.querySelector('[data-id="action-bar"]'),
       selMsg: panel.querySelector('[data-id="sel-msg"]'),
@@ -173,21 +183,22 @@ export class Gallery {
       viewer: panel.querySelector('[data-id="viewer"]'),
       viewerName: panel.querySelector('[data-id="viewer-name"]'),
       viewerImg: panel.querySelector('[data-id="viewer-img"]'),
-      pending: panel.querySelector('[data-id="pending"]'),
       pendingBar: panel.querySelector('[data-id="pending-bar"]'),
-      pdSummary: panel.querySelector('[data-id="pd-summary"]'),
-      pdGrid: panel.querySelector('[data-id="pd-grid"]'),
+      pdMsg: panel.querySelector('[data-id="pd-msg"]'),
       pdDeleteAll: panel.querySelector('[data-act="pd-delete-all"]'),
     };
     this.items = [];
     this.cursor = null;
     this.dir = '';
     this.viewIdx = -1;
+    this.viewFilter = 'active';    // all | active | pending (server-side filter)
+    this.pendingSet = new Set();   // manifest paths, mirrors /api/pending
+    this.pdBytes = 0;
+    this.championPath = null;      // last ladder champion, for Gallery highlight
     this.loading = false;
     this.selectMode = false;
     this.deleteMode = false;
     this.selected = new Map();  // path -> item (ladder/blend selection)
-    this.pdItems = [];          // pending manifest snapshot for the clemency view
     this.pdBytes = 0;
     this.io = new IntersectionObserver(entries => {
       for (const e of entries) {
@@ -202,8 +213,9 @@ export class Gallery {
     });
     this.bindChrome();
     this.bindViewer();
+    this.bindCrossModule();
     this.refreshDirs();
-    this.refreshPendingCount();
+    this.syncManifest();
   }
 
   fileUrl(path) { return `/api/gallery/file?path=${encodeURIComponent(path)}`; }
@@ -218,9 +230,80 @@ export class Gallery {
     this.el.blendPairBtn.addEventListener('click', () => this.launchBlendPair());
     act('done-marking').addEventListener('click', () => this.setDeleteMode(false));
     act('exit-marking').addEventListener('click', () => this.setDeleteMode(false));
-    this.el.pendingBtn.addEventListener('click', () => this.openPending());
-    act('pd-close').addEventListener('click', () => { this.el.pending.style.display = 'none'; this.refreshPendingCount(); });
+    for (const v of ['all', 'active', 'pending']) {
+      this.el.viewBtns[v].addEventListener('click', () => this.setViewFilter(v));
+    }
     this.el.pdDeleteAll.addEventListener('click', () => this.pdConfirmStep());
+  }
+
+  setViewFilter(v) {
+    if (this.viewFilter === v) return;
+    this.viewFilter = v;
+    for (const k of ['all', 'active', 'pending']) {
+      this.el.viewBtns[k].classList.toggle('toggled', k === v);
+    }
+    this.el.grid.classList.toggle('gal-view-pending', v === 'pending');
+    this.pdDisarm();
+    this.reload();
+  }
+
+  // ---- cross-module sync -------------------------------------------------
+  // Every path that changes the manifest funnels through syncManifest(); the
+  // visible Gallery view always re-reads the live manifest, so marked/badge
+  // state can never go stale (Ladder → Gallery returns included).
+  bindCrossModule() {
+    window.addEventListener('ellieedit:tab-activated', e => {
+      if (e.detail?.name !== 'gallery') return;
+      this.syncManifest().then(() => this.flashChampion());
+    });
+    window.addEventListener('ellieedit:pending-changed', () => this.syncManifest());
+    window.addEventListener('ellieedit:ladder-complete', e => {
+      this.championPath = e.detail?.champion?.path || null;
+      this.applyChampion();
+    });
+  }
+
+  async syncManifest() {
+    try {
+      const j = await fetch('/api/pending').then(r => r.json());
+      const fresh = new Set(j.items.map(i => i.path));
+      const changed = fresh.size !== this.pendingSet.size ||
+        [...fresh].some(p => !this.pendingSet.has(p));
+      this.pendingSet = fresh;
+      this.pdBytes = j.bytes;
+      this.el.pendingCount.textContent = j.count;
+      if (changed) {
+        if (this.viewFilter === 'all') this.applyBadges();
+        else this.reload();  // active/pending views are server-filtered: refetch
+      } else {
+        this.applyBadges();
+      }
+      this.updatePendingBar();
+    } catch { /* backend unavailable: leave as-is */ }
+  }
+
+  applyBadges() {
+    for (const cell of this.el.grid.children) {
+      cell.classList.toggle('ispending', this.pendingSet.has(cell.dataset.path));
+    }
+    this.updatePendingBar();
+  }
+
+  updatePendingBar() {
+    const on = this.viewFilter === 'pending';
+    this.el.pendingBar.classList.toggle('on', on);
+    if (!on) return;
+    const n = this.pendingSet.size;
+    this.el.pdMsg.textContent = n
+      ? `Pending Delete — ${n} image${n === 1 ? '' : 's'} · ${fmtBytes(this.pdBytes)}. Nothing is deleted until you confirm.`
+      : 'Pending Delete — nothing marked.';
+    this.el.pdDeleteAll.style.display = n ? '' : 'none';
+  }
+
+  pdDisarm() {
+    this.el.pendingBar.classList.remove('confirming');
+    this.el.pdDeleteAll.disabled = false;
+    this.el.pdDeleteAll.textContent = 'Delete all';
   }
 
   setSelectMode(on) {
@@ -288,59 +371,14 @@ export class Gallery {
   }
 
   // ---- pending delete manifest -------------------------------------------
-  async refreshPendingCount() {
-    try {
-      const j = await fetch('/api/pending').then(r => r.json());
-      this.el.pendingCount.textContent = j.count;
-      this.el.pendingBtn.style.display = j.count > 0 ? '' : 'none';
-    } catch { /* backend unavailable: leave as-is */ }
-  }
-
-  async openPending() {
-    this.el.pending.style.display = 'flex';
-    this.el.pendingBar.classList.remove('confirming');
-    this.el.pdDeleteAll.disabled = false;
-    this.el.pdDeleteAll.textContent = 'Delete all';
-    this.el.pdGrid.innerHTML = '';
-    try {
-      const j = await fetch('/api/pending').then(r => r.json());
-      this.pdItems = j.items;
-      this.pdBytes = j.bytes;
-      this.el.pdSummary.textContent = j.count
-        ? `${j.count} image${j.count === 1 ? '' : 's'} · ${fmtBytes(j.bytes)}`
-        : 'nothing marked';
-      this.el.pdDeleteAll.style.display = j.count ? '' : 'none';
-      for (const it of j.items) {
-        const cell = document.createElement('div');
-        cell.className = 'pd-cell';
-        const img = document.createElement('img');
-        img.src = `/api/gallery/thumb?path=${encodeURIComponent(it.path)}`;
-        img.alt = it.name;
-        const name = document.createElement('div');
-        name.className = 'name'; name.textContent = it.name;
-        const ret = document.createElement('button');
-        ret.className = 'ee-btn'; ret.textContent = 'Return';
-        ret.addEventListener('click', async () => {
-          await fetch('/api/pending', {
-            method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ paths: [it.path] }),
-          });
-          this.openPending(); // re-render with the pardoned item gone
-        });
-        cell.append(img, name, ret);
-        this.el.pdGrid.appendChild(cell);
-      }
-    } catch (err) {
-      this.el.pdSummary.textContent = 'Load failed: ' + err.message;
-    }
-  }
+  // Manifest state lives in this.pendingSet (kept fresh by syncManifest).
 
   pdConfirmStep() {
     // Two-step confirm: first tap arms the button with the real cost.
     if (!this.el.pendingBar.classList.contains('confirming')) {
       this.el.pendingBar.classList.add('confirming');
       this.el.pdDeleteAll.textContent =
-        `Really delete ${this.pdItems.length} images (${fmtBytes(this.pdBytes)})? This cannot be undone.`;
+        `Really delete ${this.pendingSet.size} images (${fmtBytes(this.pdBytes)})? This cannot be undone.`;
       return;
     }
     this.pdConfirmExecute();
@@ -350,9 +388,10 @@ export class Gallery {
     try {
       const j = await fetch('/api/pending/confirm', { method: 'POST' }).then(r => r.json());
       this.toast(`Deleted ${j.deleted} images (${fmtBytes(j.bytes)})`);
-      this.el.pending.style.display = 'none';
-      this.refreshPendingCount();
-      this.reload(this.dir);
+      this.pdDisarm();
+      if (this.viewFilter !== 'pending') this.setViewFilter('active');
+      await this.syncManifest();
+      this.reload();
     } catch (err) {
       this.toast('Delete failed: ' + err.message, true);
     }
@@ -365,7 +404,7 @@ export class Gallery {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ paths: [item.path] }),
       });
-      this.refreshPendingCount();
+      await this.syncManifest();
     } catch (err) {
       this.toast('Manifest update failed: ' + err.message, true);
     }
@@ -379,6 +418,23 @@ export class Gallery {
     t.textContent = msg;
     document.body.appendChild(t);
     setTimeout(() => t.remove(), 4000);
+  }
+
+  // ---- champion highlight (post-ladder visibility) ------------------------
+  applyChampion() {
+    for (const cell of this.el.grid.children) {
+      cell.classList.toggle('champion',
+        !!this.championPath && cell.dataset.path === this.championPath);
+    }
+  }
+
+  flashChampion() {
+    if (!this.championPath) return;
+    const cell = [...this.el.grid.children].find(c => c.dataset.path === this.championPath);
+    if (!cell) return;
+    cell.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    cell.classList.remove('flash');
+    requestAnimationFrame(() => cell.classList.add('flash'));
   }
 
   // ---- browse --------------------------------------------------------------
@@ -413,7 +469,7 @@ export class Gallery {
     if (this.loading || (this.cursor === null && this.items.length)) return;
     this.loading = true;
     try {
-      const p = new URLSearchParams({ dir: this.dir });
+      const p = new URLSearchParams({ dir: this.dir, pending: this.viewFilter });
       if (this.cursor) p.set('cursor', this.cursor);
       const r = await fetch('/api/gallery/list?' + p);
       if (!r.ok) throw new Error(r.status);
@@ -422,7 +478,12 @@ export class Gallery {
       this.items.push(...data.items);
       this.cursor = data.next_cursor;
       for (let i = 0; i < data.items.length; i++) this.addCell(data.items[i], start + i);
-      this.el.status.textContent = `${this.items.length} images${data.next_cursor ? ' +' : ''}`;
+      this.el.status.textContent =
+        `${this.items.length} images${data.next_cursor ? ' +' : ''}` +
+        (this.viewFilter === 'all' && this.pendingSet.size
+          ? ` · ${this.pendingSet.size} pending` : '');
+      this.applyBadges();
+      this.applyChampion();
     } catch (err) {
       this.el.status.textContent = 'Load failed: ' + err.message;
     }
@@ -432,6 +493,9 @@ export class Gallery {
   addCell(item, idx) {
     const cell = document.createElement('div');
     cell.className = 'gal-cell';
+    cell.dataset.path = item.path;
+    if (item.pending || this.pendingSet.has(item.path)) cell.classList.add('ispending');
+    if (item.path === this.championPath) cell.classList.add('champion');
     const img = document.createElement('img');
     img.dataset.src = `/api/gallery/thumb?path=${encodeURIComponent(item.path)}`;
     img.alt = item.name; img.loading = 'lazy';
@@ -439,7 +503,19 @@ export class Gallery {
     check.className = 'check';
     const name = document.createElement('div');
     name.className = 'name'; name.textContent = item.name;
-    cell.append(img, check, name);
+    // Clemency: per-cell Return in the Pending filter view.
+    const ret = document.createElement('button');
+    ret.className = 'ee-btn pd-return'; ret.textContent = 'Return';
+    ret.addEventListener('click', async e => {
+      e.stopPropagation();
+      await fetch('/api/pending', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths: [item.path] }),
+      });
+      this.toast(`Returned ${item.name} to Active`);
+      await this.syncManifest();
+    });
+    cell.append(img, check, name, ret);
     cell.addEventListener('click', () => {
       if (this.deleteMode) {
         const on = !cell.classList.contains('marked');

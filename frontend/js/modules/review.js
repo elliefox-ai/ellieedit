@@ -267,6 +267,7 @@ export class Review {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ paths }),
       });
+      window.dispatchEvent(new CustomEvent('ellieedit:pending-changed'));
       const btn = this.panel.querySelector('[data-act="res-send-pending"]');
       if (btn) btn.disabled = true;
       this.toast(`${paths.length} marked for delete`);
@@ -337,6 +338,11 @@ export class Review {
 
   finishReview() {
     const l = this.ladder;
+    // Announce the outcome so Gallery can badge rejections and spotlight the
+    // champion on return (§ Ladder visibility).
+    window.dispatchEvent(new CustomEvent('ellieedit:ladder-complete', {
+      detail: { champion: l.champion, rejected: l.rejected.map(r => r.item) },
+    }));
     this.renderRejected();
     this.el.phaseLabel.textContent =
       `Round complete — champion: ${l.champion.name}` +
