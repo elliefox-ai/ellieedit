@@ -194,6 +194,30 @@ registerModule({
       .ss-committed .sum { font-size:12px; color:#8a8aaa; }
       .dupe-detail .err { color:#e87a7a; }
 
+      /* ── SIFT view (2026-10-08c) — keep-K-of-N inside the family detail.
+         Same draft model as the spread; entry/exit from the spread header. */
+      .ss-sift-grid { flex:1; overflow:auto; padding:10px; display:grid;
+                      grid-template-columns:repeat(auto-fill,minmax(120px,1fr));
+                      gap:8px; align-content:start; }
+      .ss-sift-grid .ss-cell { min-height:110px; }
+      .ss-cell.keep { border-color:#2f8a4f; box-shadow:0 0 0 2px #2f8a4f; }
+      .ss-cell .ord-badge { position:absolute; top:4px; left:4px; background:#2f8a4f;
+                            color:#fff; font-size:11px; font-weight:700;
+                            border-radius:6px; padding:1px 6px; pointer-events:none; }
+      .ss-cell .sift-rej { position:absolute; top:2px; right:2px; min-width:44px;
+                           min-height:44px; border-radius:8px; border:1px solid #6a2f2f;
+                           background:rgba(58,29,29,0.88); color:#e87a7a; font-size:16px;
+                           cursor:pointer; touch-action:manipulation; }
+      .ss-cell.reject .sift-rej { background:#8a2f2f; color:#fff; }
+      .ss-sift-bar { display:flex; gap:8px; align-items:center; padding:8px 12px;
+                     border-top:1px solid #2a2a44; background:#12121f; flex-shrink:0;
+                     flex-wrap:wrap; }
+      .ss-sift-bar .keep-count { font-size:13px; color:#7de08a; font-weight:600; }
+      .ss-sift-bar .ee-btn.sweep { background:#3a1d1d; border-color:#6a2f2f; color:#e87a7a;
+                                   min-height:44px; }
+      .ss-sift-bar .ee-btn.sweep:hover:not(:disabled) { background:#5a2a2a; }
+      .ss-sift-bar .note { font-size:10px; color:#5a5a7a; flex:1; min-width:140px; }
+
       /* ── keyboard shortcuts (desktop-only affordance, 2026-10-08b) ──
          Handlers are keydown-only, so touch behavior is untouched; these
          styles merely hide the affordances on coarse/no-hover devices. */
@@ -471,6 +495,8 @@ registerModule({
     }
 
     function stepBackLevel() {
+      const sift = el.detail.querySelector('#ss-sift');
+      if (sift) { closeSift(); renderSpread(); return; }
       const zoom = el.detail.querySelector('#ss-zoom');
       if (zoom) { zoom.querySelector('#ss-zoom-back')?.click(); return; }
       const survey = el.detail.querySelector('#ss-survey');
@@ -491,6 +517,19 @@ registerModule({
       try {
         const k = e.key;
         if (k === 'Escape') { stepBackLevel(); e.preventDefault(); return; }
+        const sift = el.detail.querySelector('#ss-sift');
+        if (sift) {                       // SIFT level: grid nav + keep/reject
+          if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(k)) {
+            siftStep(k); e.preventDefault(); return;
+          }
+          if (k === 'Enter' || k === 'p' || k === 'P') {
+            siftToggleFocused(); e.preventDefault(); return;
+          }
+          if (k === 'f' || k === 'F') {
+            siftRejectFocused(); e.preventDefault(); return;
+          }
+          return;
+        }
         const zoom = el.detail.querySelector('#ss-zoom');
         if (zoom) {                       // ZOOM level
           if (k === 'ArrowLeft') zoom.querySelector('.ss-nav.prev').click();
@@ -781,6 +820,158 @@ registerModule({
     }
     function closeSurvey() { el.detail.querySelector('#ss-survey')?.remove(); }
 
+    // ── SIFT view (2026-10-08c) — keep-K-of-N over the family. Same draft
+    // state as the spread (verdicts + picks); nothing persists before Commit.
+    // Shows members that are NOT rejected (unhandled + kept) as a grid;
+    // tap toggles keep with an ordinal badge; ✕ rejects individually;
+    // 'Reject the rest' sweeps all unhandled non-kept members to rejected.
+    // Exit ('back to stack') restores the spread with the draft intact.
+    let siftFocus = 0;   // keyboard-highlighted cell index in the sift grid
+    function siftMembers() {
+      return current.members.filter(m => verdictOf(m) !== 'rejected');
+    }
+    function openSift() {
+      closeSift();
+      trace('sift enter');
+      siftFocus = 0;
+      const ov = document.createElement('div');
+      ov.className = 'ss-overlay';
+      ov.id = 'ss-sift';
+      const top = document.createElement('div');
+      top.className = 'ss-ov-top';
+      const info = document.createElement('span');
+      info.textContent = 'Sift — tap to keep (ordered picks) · ✕ rejects · same draft';
+      const close = document.createElement('button');
+      close.className = 'ee-btn';
+      close.textContent = '✕ Back to stack';
+      close.dataset.kbd = 'Esc';
+      close.addEventListener('click', () => { closeSift(); renderSpread(); });
+      const grid = document.createElement('div');
+      grid.className = 'ss-sift-grid';
+      grid.id = 'ss-sift-grid';
+      const bar = document.createElement('div');
+      bar.className = 'ss-sift-bar';
+      const count = document.createElement('span');
+      count.className = 'keep-count';
+      const sweep = document.createElement('button');
+      sweep.className = 'ee-btn sweep';
+      sweep.id = 'ss-sift-sweep';
+      const note = document.createElement('span');
+      note.className = 'note';
+      note.textContent = 'state-in-layout: keeps + counter stay visible here; nothing saves until Commit';
+      sweep.addEventListener('click', () => {
+        try {
+          const n = unhandled().length;
+          for (const m of unhandled()) draft.verdicts[m.path] = 'rejected';
+          trace(`sift sweep — rejected ${n} remainder`);
+          renderSiftBody();
+        } catch (err) {
+          job(`sift sweep: ${err.message}`, 'err');
+          console.error('sift sweep failed', err);
+        }
+      });
+      bar.append(count, sweep, note);
+      top.append(info, close, kbdLegendBtn([
+        ['←/→/↑/↓', 'move the focus cell'],
+        ['Enter / P', 'toggle keep on the focused cell'],
+        ['F', 'reject the focused cell'],
+        ['Esc', 'back to stack'],
+      ]));
+      ov.append(top, grid, bar);
+      el.detail.appendChild(ov);
+      renderSiftBody();
+    }
+    function closeSift() { el.detail.querySelector('#ss-sift')?.remove(); }
+
+    function renderSiftBody() {
+      const grid = el.detail.querySelector('#ss-sift-grid');
+      const ov = el.detail.querySelector('#ss-sift');
+      if (!grid || !ov) return;
+      const mem = siftMembers();
+      const keeps = draft.picks.length;
+      const count = ov.querySelector('.keep-count');
+      const sweep = ov.querySelector('#ss-sift-sweep');
+      count.textContent = `${keeps} kept of ${current.members.length}`;
+      sweep.textContent = 'Reject the rest';
+      sweep.disabled = !unhandled().length;
+      grid.innerHTML = '';
+      mem.forEach((m, i) => {
+        const v = verdictOf(m);
+        const cell = document.createElement('div');
+        cell.className = 'ss-cell' + (v === 'kept' ? ' keep' : v ? ` ${DRAFT_CLASSES[v]}` : '');
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        setImg(img, m);
+        const nm = document.createElement('div');
+        nm.className = 'nm';
+        nm.textContent = m.name;
+        cell.append(img, nm);
+        if (v === 'kept') {
+          const ord = document.createElement('span');
+          ord.className = 'ord-badge';
+          const rank = draft.picks.indexOf(m.path) + 1;
+          ord.textContent = rank === 1 ? '1st' : rank === 2 ? '2nd'
+            : rank === 3 ? '3rd' : `${rank}th`;
+          cell.appendChild(ord);
+        } else if (!v) {
+          const rej = document.createElement('button');
+          rej.className = 'sift-rej';
+          rej.textContent = '✕';
+          rej.title = `reject ${m.name}`;
+          rej.addEventListener('click', e => {
+            e.stopPropagation();
+            try { doReject(m); trace(`sift reject ${m.name}`); renderSiftBody(); }
+            catch (err) { job(`sift reject: ${err.message}`, 'err'); console.error('sift reject failed', err); }
+          });
+          cell.appendChild(rej);
+        }
+        cell.addEventListener('click', () => {
+          try {
+            if (v === 'kept') unPick(m);
+            else if (!v) doPick(m);
+            trace(`sift toggle ${m.name} → ${verdictOf(m) || 'unhandled'}`);
+            renderSiftBody();
+          } catch (err) {
+            job(`sift toggle: ${err.message}`, 'err');
+            console.error('sift toggle failed', err);
+          }
+        });
+        grid.appendChild(cell);
+      });
+      siftFocus = Math.max(0, Math.min(siftFocus, mem.length - 1));
+      paintSiftFocus();
+    }
+
+    function paintSiftFocus() {
+      const cells = el.detail.querySelectorAll('#ss-sift-grid .ss-cell');
+      cells.forEach((c, i) => c.classList.toggle('kbd-focus', i === siftFocus));
+      cells[siftFocus]?.scrollIntoView({ block: 'nearest' });
+    }
+    function siftStep(key) {
+      const cells = [...el.detail.querySelectorAll('#ss-sift-grid .ss-cell')];
+      if (!cells.length) return;
+      const top0 = cells[0].offsetTop;
+      const cols = Math.max(1, cells.filter(c => c.offsetTop === top0).length);
+      const moves = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -cols, ArrowDown: cols };
+      siftFocus = Math.max(0, Math.min(cells.length - 1, siftFocus + (moves[key] || 0)));
+      paintSiftFocus();
+    }
+    function siftToggleFocused() {
+      const m = siftMembers()[siftFocus];
+      if (!m) return;
+      const v = verdictOf(m);
+      if (v === 'kept') unPick(m); else if (!v) doPick(m);
+      trace(`sift kbd toggle ${m.name} → ${verdictOf(m) || 'unhandled'}`);
+      renderSiftBody();
+    }
+    function siftRejectFocused() {
+      const m = siftMembers()[siftFocus];
+      if (!m || verdictOf(m)) return;
+      doReject(m);
+      trace(`sift kbd reject ${m.name}`);
+      renderSiftBody();
+    }
+
     function toolBtn(txt, title, fn) {
       const b = document.createElement('button');
       b.className = 'ss-tool';
@@ -1032,10 +1223,16 @@ registerModule({
       survBtn.dataset.kbd = 'Esc';
       survBtn.title = 'spread all members into a grid (or pinch out)';
       survBtn.addEventListener('click', openSurvey);
+      const siftBtn = document.createElement('button');
+      siftBtn.id = 'ss-sift-btn';
+      siftBtn.className = 'ee-btn';
+      siftBtn.textContent = '⇅ Sift';
+      siftBtn.title = 'keep-K-of-N pass over the whole family (same draft)';
+      siftBtn.addEventListener('click', openSift);
       const hint = document.createElement('div');
       hint.className = 'ss-gesture-hint';
       hint.textContent = 'tap = pick · swipe down = reject · hold = menu · pinch out = survey';
-      side.append(rejBtn, survBtn, hint);
+      side.append(rejBtn, survBtn, siftBtn, hint);
       stage.append(big, side);
       el.detail.appendChild(stage);
 
@@ -1189,7 +1386,13 @@ registerModule({
         await api(`/families/${current.id}/verdict`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ members: handled, note: el.note.value.trim() }),
+          body: JSON.stringify({
+            members: handled,
+            note: el.note.value.trim(),
+            // ADDITIVE rank payload (Sift, 2026-10-08c): 1-based order of the
+            // picks. Server tolerates its absence; old clients never send it.
+            ranks: Object.fromEntries(draft.picks.map((p, i) => [p, i + 1])),
+          }),
         });
         let pendingNote = 'no rejects — ledger only';
         if (rejects) {
