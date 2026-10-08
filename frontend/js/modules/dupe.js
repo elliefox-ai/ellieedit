@@ -195,6 +195,18 @@ registerModule({
       .ss-cell.pick { border-color:#2f8a4f; }
       .ss-cell.reject { border-color:#8a2f2f; }
       .ss-cell.meld { border-color:#2f5a8a; }
+      .ss-cell.meldsel { border-color:#4f8abf; box-shadow:0 0 0 2px #4f8abf, 0 0 10px rgba(79,138,191,0.6); }
+      .ss-cell.meldsel::after { content:'⑂'; position:absolute; top:4px; left:4px;
+        background:#2f5a8a; color:#fff; font-size:10px; font-weight:700;
+        padding:1px 6px; border-radius:6px; }
+      .ss-meld-bar { display:flex; gap:10px; align-items:center; padding:8px 12px;
+        border-top:1px solid #2a2a44; background:#1d2438; }
+      .ss-meld-bar .ee-btn { min-height:40px; }
+      .ss-meld-result { display:flex; flex-direction:column; align-items:center; gap:6px; }
+      .ss-meld-result img { max-width:320px; max-height:320px; object-fit:contain;
+        border:2px solid #2f5a8a; border-radius:8px; background:#0f0f1a; }
+      .ss-meld-result .tag { background:#1d2a3a; color:#7ab8e8; font-size:11px;
+        font-weight:700; padding:2px 10px; border-radius:8px; letter-spacing:0.5px; }
       .ss-cell img { width:100%; height:110px; object-fit:cover; background:#0f0f1a; display:block; }
       .ss-cell .nm { font-size:9px; color:#8a8aaa; padding:2px 4px; white-space:nowrap;
                      overflow:hidden; text-overflow:ellipsis; }
@@ -322,6 +334,8 @@ registerModule({
     let signals = null;        // /families/{id}/signals payload for current
     let sigSuggestion = null;  // shown suggestion (for once-only override log)
     let sigDismissed = false;  // suggestion dismissed this detail visit
+    let meldMode = false;      // survey multi-select for the FaceCycle meld
+    let meldSel = new Set();   // member paths chosen as merge candidates
     let sigShownLogged = false;
 
     function job(text, cls = '') {
@@ -929,6 +943,8 @@ registerModule({
     function openSurvey() {
       closeSurvey();
       surveyFocus = 0;
+      meldSel.clear();      // meld selection is per survey visit
+      meldMode = false;
       const ov = document.createElement('div');
       ov.className = 'ss-overlay';
       ov.id = 'ss-survey';
@@ -941,6 +957,18 @@ registerModule({
       close.textContent = '✕ Back to stack';
       close.dataset.kbd = 'Esc';
       close.addEventListener('click', () => { closeSurvey(); renderSpread(); });
+      // ── MELD SELECT (2026-10-08g): multi-select members as merge
+      // candidates — orthogonal to keep/reject verdicts. 1..8 cap reused
+      // from the gallery handoff planner. On 'Meld these' the batch hands
+      // off to FaceCycle with the family context; Save back there collapses
+      // the group. This IS the dupe→FaceCycle handoff — no separate
+      // non-meld path (operator decision, 2026-10-08).
+      const meldBtn = document.createElement('button');
+      meldBtn.className = 'ee-btn';
+      meldBtn.id = 'ss-meld-mode';
+      meldBtn.textContent = '⑂ Meld select';
+      meldBtn.title = 'multi-select members to blend into one in FaceCycle';
+      top.appendChild(meldBtn);
       const grid = document.createElement('div');
       grid.className = 'ss-survey-grid';
       current.members.forEach((m, i) => {
@@ -955,9 +983,35 @@ registerModule({
         nm.textContent = m.name;
         // no overlay icon — the whole cell is the tap target; near-twin
         // differences live in exactly the pixels an icon used to cover.
-        cell.addEventListener('click', () => openZoom(i, 'survey'));
+        cell.addEventListener('click', () => {
+          if (meldMode) { toggleMeldSel(m, cell); return; }
+          openZoom(i, 'survey');
+        });
         cell.append(img, nm);
         grid.appendChild(cell);
+      });
+      // meld action bar (bottom, 40px touch targets)
+      const bar = document.createElement('div');
+      bar.className = 'ss-meld-bar';
+      bar.id = 'ss-meld-bar';
+      bar.style.display = 'none';
+      const meldGo = document.createElement('button');
+      meldGo.className = 'ee-btn primary';
+      meldGo.id = 'ss-meld-go';
+      meldGo.textContent = 'Meld these (0)';
+      meldGo.disabled = true;
+      meldGo.addEventListener('click', doMeldHandoff);
+      const meldExit = document.createElement('button');
+      meldExit.className = 'ee-btn';
+      meldExit.textContent = 'Exit meld select';
+      meldExit.addEventListener('click', () => {
+        meldMode = false; meldSel.clear(); paintMeldBar();
+        grid.querySelectorAll('.ss-cell.meldsel').forEach(c => c.classList.remove('meldsel'));
+      });
+      bar.append(meldGo, meldExit);
+      meldBtn.addEventListener('click', () => {
+        meldMode = !meldMode;
+        paintMeldBar();
       });
       top.append(info, close,
         kbdLegendBtn([
@@ -965,9 +1019,42 @@ registerModule({
           ['Enter / Space', 'inspect the focused cell'],
           ['Esc', 'back to spread'],
         ]));
-      ov.append(top, grid);
+      ov.append(top, grid, bar);
       el.detail.appendChild(ov);
       paintSurveyFocus();
+    }
+    function toggleMeldSel(m, cell) {
+      if (meldSel.has(m.path)) { meldSel.delete(m.path); cell.classList.remove('meldsel'); }
+      else { meldSel.add(m.path); cell.classList.add('meldsel'); }
+      paintMeldBar();
+    }
+    function paintMeldBar() {
+      const bar = el.detail.querySelector('#ss-meld-bar');
+      if (!bar) return;
+      bar.style.display = meldMode ? 'flex' : 'none';
+      const go = bar.querySelector('#ss-meld-go');
+      const n = meldSel.size;
+      go.textContent = `Meld these (${n})`;
+      go.disabled = !meldMode || n < 1 || n > 8;
+    }
+    // Hand the meld batch to FaceCycle through the SAME jailed-url planner
+    // and event the gallery multi-select handoff uses, plus the family
+    // context Save back needs. Dupe thumbs/files serve via /api/dupe —
+    // FaceCycle fetches either URL shape identically.
+    function doMeldHandoff() {
+      const members = current.members.filter(m => meldSel.has(m.path));
+      if (members.length < 1 || members.length > 8) return;
+      const familyId = current.id;
+      const memberPaths = members.map(m => m.path);
+      window.dispatchEvent(new CustomEvent('ellieedit:activate',
+        { detail: { name: 'facecycle' } }));
+      window.dispatchEvent(new CustomEvent('ellieedit:facecycle-handoff', {
+        detail: {
+          urls: members.map(m => `/api/dupe/file?path=${encodeURIComponent(m.path)}`),
+          names: members.map(m => m.name),
+          meld: { family: familyId, members: memberPaths },
+        },
+      }));
     }
     function closeSurvey() { el.detail.querySelector('#ss-survey')?.remove(); }
 
@@ -1505,6 +1592,23 @@ registerModule({
       backBtn.textContent = '← Back to families';
       backBtn.addEventListener('click', () => renderList());
       box.append(big, sum, row, backBtn);
+      // Meld result in place of the melded group (Save back flow): the
+      // blend itself + which components collapsed into it.
+      if (current.meld) {
+        const mr = document.createElement('div');
+        mr.className = 'ss-meld-result';
+        const img = document.createElement('img');
+        img.src = `/api/gallery/thumb?path=${encodeURIComponent(current.meld.result)}`;
+        img.alt = current.meld.result;
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = `⑂ MELD RESULT — ${current.meld.members.length} members collapsed · ` +
+          `${current.meld.result} (components queued for deletion)`;
+        mr.append(img, tag);
+        el.detail.appendChild(box);   // box must be a child before insertBefore
+        el.detail.insertBefore(mr, box);
+        return;
+      }
       el.detail.appendChild(box);
     }
 
@@ -1618,6 +1722,22 @@ registerModule({
     }
 
     panel.addEventListener('ellieedit:dupe-sync', () => renderList());
+    // FaceCycle Save back: the blend landed, ledger + manifest updated
+    // server-side — re-open the family so the result renders in place.
+    window.addEventListener('ellieedit:dupe-meld-saved', e => {
+      const fid = e.detail?.family;
+      if (!fid) return;
+      // Save back returns to the Dupe module with the family's detail shown,
+      // meld result in place of the group, ACCEPTED in the ledger. The
+      // detail may have been torn down while FaceCycle was active
+      // (current=null) — renderDetail re-opens it either way; a saved meld
+      // is final, so force the committed view with the meld result.
+      renderDetail(fid).then(() => {
+        committed = true;
+        commitSummary = commitSummary || 'meld saved — components queued for deletion';
+        renderCommitted(commitSummary);
+      }).catch(err => job(`meld re-open failed: ${err.message}`, 'err'));
+    });
     window.addEventListener('ellieedit:tab-activated', e => {
       if (e.detail?.name === 'dupe') renderList();
     });

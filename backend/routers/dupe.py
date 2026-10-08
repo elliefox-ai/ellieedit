@@ -27,6 +27,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from . import gallery as _gallery_mod
 from .gallery import get_thumbnail
 from fastapi.responses import FileResponse
 
@@ -399,6 +400,7 @@ def family_detail(fid: str):
         ],
         "verdict": fam_verdict.get("members", {}),
         "note": note,
+        "meld": _latest_meld(fid),
         "verdicts": {m["path"]: fam_verdict.get("members", {}).get(m["path"])
                      for m in members},
     }
@@ -681,6 +683,93 @@ def thumb(path: str):
 # ------------------------------------------------- background scan (optional)
 
 _scan_proc: subprocess.Popen | None = None
+
+
+class MeldSaveBody(BaseModel):
+    image_b64: str                      # PNG blend, base64 (no data: prefix)
+    members: list[str]                  # melded component paths
+
+
+MELD_MAX = 8
+
+
+def _latest_meld(fid: str) -> dict | None:
+    """Latest ledger meld for this family: {result, members} — or None."""
+    for e in reversed(_history().get(fid, [])):
+        if e.get("meld_result"):
+            return {"result": e["meld_result"],
+                    "members": sorted((e.get("members") or {}).keys())}
+    return None
+
+
+@router.post("/families/{fid}/meld-save")
+def meld_save(fid: str, body: MeldSaveBody):
+    """FaceCycle 'Save back': write the blend as a NEW auto-named file in the
+    gallery root (never overwrites — provenance), record the family ACCEPTED
+    (every melded component 'kept') in the ledger, and queue ALL components
+    onto the pending-delete manifest immediately (on-the-spot collapse).
+    The result file does not re-enter hash scanning. Cancel never calls this,
+    so 'nothing persists without Save back' holds by construction."""
+    fam = _load_family(fid)  # 404 on unknown family
+    known = {m["path"].replace("\\", "/") for m in fam.get("members", [])}
+    comps = [p.replace("\\", "/") for p in body.members]
+    if not comps:
+        raise HTTPException(400, "no meld members")
+    if len(comps) > MELD_MAX:
+        raise HTTPException(400, f"meld accepts at most {MELD_MAX} members")
+    bad = [p for p in comps if p not in known]
+    if bad:
+        raise HTTPException(400, f"path not a family member: {bad[0]}")
+    import base64 as _b64
+    try:
+        data = _b64.b64decode(body.image_b64, validate=True)
+    except Exception:
+        raise HTTPException(400, "image_b64 is not valid base64")
+    # hash sanity: must actually be a PNG with a plausible IHDR header
+    if not data.startswith(b"\x89PNG\r\n\x1a\n") or len(data) < 33:
+        raise HTTPException(400, "meld result must be a PNG")
+    groot = _gallery_mod.GALLERY_ROOT  # module attr: test monkeypatch-safe
+    groot.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    name = f"meld-{fid}-{ts}.png"
+    dest = groot / name
+    n = 0
+    while dest.exists():  # auto-name, NEVER overwrite
+        n += 1
+        name = f"meld-{fid}-{ts}-{n}.png"
+        dest = groot / name
+    dest.write_bytes(data)
+
+    # Ledger: ACCEPTED by default — 'why work on it only to throw it away'.
+    entry = {
+        "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "family": fid,
+        "members": {p: "kept" for p in comps},
+        "note": f"meld saved → {name}",
+        "meld_result": name,
+    }
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    with LEDGER.open("a") as fh:            # append-only by design
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    # On-the-spot collapse: every component goes to the deletion queue NOW.
+    from .pending import _load, _save
+    m = _load()
+    now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    added = 0
+    for p in comps:
+        key = p
+        try:
+            key = jailed(p).resolve().relative_to(
+                _gallery_mod.GALLERY_ROOT.resolve()).as_posix()
+        except (HTTPException, OSError, ValueError):
+            pass  # dupe-pool-only member: keep dupe-relative manifest key
+        if key not in m:
+            m[key] = now
+            added += 1
+    _save(m)
+    return {"saved_as": name, "pending_added": added, "pending_count": len(m),
+            "members": comps}
 
 
 @router.post("/scan")

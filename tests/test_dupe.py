@@ -5,6 +5,7 @@ over Pillow-generated near-dupes as the end-to-end proof (skipped if numpy
 is unavailable, but the ellieedit venv carries it).
 """
 
+import base64
 import json
 import subprocess
 import sys
@@ -632,3 +633,76 @@ def test_signal_events_append_only(env, client):
             "family": "nope", "event": "shown"}).status_code == 400
     finally:
         d.SIGNALS_LOG = orig
+
+
+# ---------------------------------------------------------------- meld-save
+
+def _meld_b64(tmp_path):
+    p = tmp_path / "blend.png"
+    Image.new("RGB", (16, 16), (10, 120, 200)).save(p)
+    return base64.b64encode(p.read_bytes()).decode()
+
+
+def test_meld_save_writes_result_ledger_and_pending(env, client, tmp_path):
+    import base64
+    root, _, _ = env
+    before = sorted(p.name for p in root.parent.rglob("meld-*"))
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/meld-save", json={
+        "image_b64": _meld_b64(tmp_path),
+        "members": ["a.png", "b.png", "sub/c.png"],
+    })
+    assert r.status_code == 200
+    j = r.json()
+    # 1. New auto-named file in the gallery root; components untouched.
+    assert j["saved_as"].startswith("meld-fam-aaaaaaaaaaaa-")
+    saved = gallery_mod.GALLERY_ROOT / j["saved_as"]
+    assert saved.is_file() and saved.stat().st_size > 0
+    assert (root / "a.png").exists()  # component NOT deleted directly
+    # 2. Manifest gains EXACTLY the N components.
+    m = pending_mod.load_manifest()
+    assert set(m) == {"a.png", "b.png", "sub/c.png"}
+    # 3. Ledger ACCEPTED entry: every meld member 'kept' + meld_result.
+    entries = [json.loads(l) for l in dupe_mod.LEDGER.read_text().splitlines()]
+    meld_e = [e for e in entries if e.get("meld_result")]
+    assert len(meld_e) == 1
+    assert meld_e[0]["family"] == "fam-aaaaaaaaaaaa"
+    assert meld_e[0]["members"] == {"a.png": "kept", "b.png": "kept",
+                                    "sub/c.png": "kept"}
+    # 4. family_detail surfaces the meld so the detail view can render it.
+    d = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
+    assert d["meld"]["result"] == j["saved_as"]
+    assert d["state"] == "resolved"
+
+
+def test_meld_save_rejections(env, client, tmp_path):
+    import base64 as b64
+    # unknown member → 400, nothing written
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/meld-save", json={
+        "image_b64": _meld_b64(tmp_path), "members": ["a.png", "nope.png"]})
+    assert r.status_code == 400
+    assert pending_mod.load_manifest() == {}
+    # not a PNG → 400
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/meld-save", json={
+        "image_b64": b64.b64encode(b"not a png at all.........").decode(),
+        "members": ["a.png"]})
+    assert r.status_code == 400
+    # empty members → 400
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/meld-save", json={
+        "image_b64": _meld_b64(tmp_path), "members": []})
+    assert r.status_code == 400
+    # unknown family → 404
+    r = client.post("/api/dupe/families/fam-ffffffffffff/meld-save", json={
+        "image_b64": _meld_b64(tmp_path), "members": ["a.png"]})
+    assert r.status_code == 404
+    # no meld-save call happened: manifest empty, no gallery-root meld file
+    assert pending_mod.load_manifest() == {}
+    assert not list(gallery_mod.GALLERY_ROOT.glob("meld-*"))
+
+
+def test_meld_save_never_overwrites(env, client, tmp_path):
+    r1 = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/meld-save", json={
+        "image_b64": _meld_b64(tmp_path), "members": ["a.png", "b.png"]})
+    r2 = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/meld-save", json={
+        "image_b64": _meld_b64(tmp_path), "members": ["a.png", "b.png"]})
+    assert r1.json()["saved_as"] != r2.json()["saved_as"]
+    assert r2.json()["pending_added"] == 0  # already queued

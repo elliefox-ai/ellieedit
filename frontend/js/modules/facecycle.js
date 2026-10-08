@@ -63,6 +63,11 @@ function panelHTML() {
     .thumb-del { position: absolute; top: 2px; right: 2px; width: 16px; height: 16px; background: rgba(0,0,0,0.75); color: #d4d4e0; border: none; border-radius: 50%; font-size: 13px; line-height: 14px; text-align: center; cursor: pointer; opacity: 0; transition: opacity .15s; padding: 0; }
     .thumb:hover .thumb-del { opacity: 1; }
     .thumb-del:hover { background: rgba(200,60,60,0.85); }
+    /* Dupe→Meld save-back bar (2026-10-08g): visible only while a meld
+       batch from the Dupe view is loaded. */
+    .fc-meld-bar { display:none; align-items:center; gap:10px; padding:8px 16px;
+      background:#1d2438; border-top:1px solid #2f5a8a; }
+    .fc-meld-bar .msg { font-size:12px; color:#7ab8e8; flex:1; }
   </style>
   <div class="fc-header">
     <div class="fc-row top">
@@ -107,6 +112,11 @@ function panelHTML() {
   </div>
   <div class="fc-main" data-id="main-view">
     <div class="fc-status" data-id="status-bar"></div>
+    <div class="fc-meld-bar" data-id="meld-bar" style="display:none">
+      <span class="msg" data-id="meld-msg"></span>
+      <button class="ee-btn primary" data-act="meld-save" style="min-height:40px">💾 Save back → family</button>
+      <button class="ee-btn" data-act="meld-cancel" style="min-height:40px">✕ Cancel</button>
+    </div>
     <div class="fc-canvas-wrap" data-id="canvas-container"></div>
     <div class="fc-thumbs" data-id="thumbnail-strip"></div>
     <div class="fc-gens" data-id="gen-strip"></div>
@@ -123,6 +133,8 @@ export class FaceCycle {
       dropZone: $('drop-zone'), mainView: $('main-view'), fileInput: $('file-input'),
       thumbnailStrip: $('thumbnail-strip'), canvasContainer: $('canvas-container'),
       statusBar: $('status-bar'), exportBtn: act('export'), resetBtn: act('reset'),
+      meldBar: $('meld-bar'), meldMsg: $('meld-msg'),
+      meldSaveBtn: act('meld-save'), meldCancelBtn: act('meld-cancel'),
       removeAllBtn: act('remove-all'), detectBtn: act('detect'), clickAddBtn: act('click-add'),
       drawBoxBtn: act('draw-box'), drawMaskBtn: act('draw-mask'),
       brushControls: $('brush-controls'), brushSizeSlider: $('brush-size'),
@@ -251,6 +263,9 @@ export class FaceCycle {
     this.el.undoBtn.addEventListener('click', () => this.undo());
     this.el.layerToggleBtn.addEventListener('click', () => this.toggleLayer());
     this.el.exportBtn.addEventListener('click', () => this.exportComposite());
+    // ── Dupe→Meld explicit exits (2026-10-08g) ──────────────────────
+    this.el.meldSaveBtn.addEventListener('click', () => this.meldSaveBack());
+    this.el.meldCancelBtn.addEventListener('click', () => this.meldCancel());
     this.el.repaintPromptInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); this.generateRepaint(); }
     });
@@ -273,15 +288,18 @@ export class FaceCycle {
 
     // Multi-image handoff: Gallery's ☰-select bar dispatches
     //   'ellieedit:facecycle-handoff' { detail: { urls, names } }
-    // (urls are jailed /api/gallery/file?path=… links, 1..8 of them).
-    // We reset to a fresh stack and load every image through the normal
-    // handleFiles path, so the thumb strip visibly shows what arrived.
+    // (urls are jailed file links, 1..8 of them). Dupe-view meld batches add
+    //   detail.meld = { family, members } — then the explicit exits here are
+    //   Save back (write blend + collapse, server-side meld-save) or Cancel
+    //   (return marking NOTHING — no manifest, no ledger writes).
     window.addEventListener('ellieedit:facecycle-handoff', this.onHandoffEvent = async e => {
-      const { urls, names } = e.detail || {};
+      const { urls, names, meld } = e.detail || {};
       if (!Array.isArray(urls) || !urls.length) return;
       if (!this.panel.classList.contains('active')) return;
       try {
-        this.resetAll();
+        this.resetAll();          // clears any prior meld context
+        this.meldCtx = meld || null;
+        this.paintMeldBar();
         const files = await Promise.all(urls.map(async (url, i) => {
           const r = await fetch(url);
           if (!r.ok) throw new Error(`${names[i] || url}: HTTP ${r.status}`);
@@ -290,7 +308,8 @@ export class FaceCycle {
         }));
         await this.handleFiles(files);
         // Visible receipt: the status bar names exactly what was handed off.
-        this.el.statusBar.innerHTML = `<span class="badge" style="color:#8ad08a">→ ${files.length} image${files.length !== 1 ? 's' : ''} handed off from Gallery:</span> ${files.map(f => f.name).join(', ')}`;
+        const src = meld ? 'Dupe family' : 'Gallery';
+        this.el.statusBar.innerHTML = `<span class="badge" style="color:#8ad08a">→ ${files.length} image${files.length !== 1 ? 's' : ''} handed off from ${src}:</span> ${files.map(f => f.name).join(', ')}`;
       } catch (err) {
         alert('FaceCycle handoff failed: ' + err.message);
       }
@@ -307,6 +326,8 @@ export class FaceCycle {
 
   resetAll() {
     this.state.images = [];
+    this.meldCtx = null;          // leaving a meld batch = no Save back exits
+    this.paintMeldBar();
     this.state.activeRegions = [];
     this.state.selections = {};
     this.state.baseVariant = 0;
@@ -1953,6 +1974,69 @@ export class FaceCycle {
     this.el.layerToggleBtn.textContent = this.stack.editLayerVisible ? '👁 Edit layer: On' : '👁 Edit layer: Off';
     this.el.layerToggleBtn.classList.toggle('active-toggle', !this.stack.editLayerVisible);
     this.render();
+  }
+
+  // ── Dupe→Meld (2026-10-08g) ─────────────────────────────────────────
+  // Explicit exits for a meld batch. Save back posts the blend to the
+  // server (new auto-named gallery-root file + ledger ACCEPTED + every
+  // component onto the deletion queue), then returns to the Dupe family.
+  // Cancel returns marking NOTHING — no fetch, no writes.
+  paintMeldBar() {
+    if (!this.el.meldBar) return;
+    const on = !!this.meldCtx;
+    this.el.meldBar.style.display = on ? 'flex' : 'none';
+    if (on) {
+      this.el.meldMsg.textContent =
+        `⑂ Meld batch from family ${this.meldCtx.family} (${this.meldCtx.members.length} members). ` +
+        `Save back collapses the group; Cancel writes nothing.`;
+    }
+  }
+
+  async meldSaveBack() {
+    const ctx = this.meldCtx;
+    if (!ctx) return;
+    try {
+      const blob = await this.exportBlob();
+      if (!blob) throw new Error('nothing blended to save');
+      const b64 = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result.split(',')[1]);
+        fr.onerror = () => rej(new Error('blob read failed'));
+        fr.readAsDataURL(blob);
+      });
+      const r = await fetch(`/api/dupe/families/${encodeURIComponent(ctx.family)}/meld-save`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_b64: b64, members: ctx.members }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+      const j = await r.json();
+      this.meldCtx = null;
+      this.resetAll();
+      window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'dupe' } }));
+      window.dispatchEvent(new CustomEvent('ellieedit:dupe-meld-saved',
+        { detail: { family: ctx.family, saved_as: j.saved_as } }));
+    } catch (err) {
+      alert('Meld save-back failed: ' + err.message);
+    }
+  }
+
+  meldCancel() {
+    this.meldCtx = null;
+    this.paintMeldBar();
+    window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'dupe' } }));
+  }
+
+  exportBlob() {
+    if (!this.state.images.length) return Promise.resolve(null);
+    const exp = document.createElement('canvas');
+    exp.width = this.state.width;
+    exp.height = this.state.height;
+    const ectx = exp.getContext('2d');
+    const baseV = this.state.baseVariant;
+    ectx.putImageData(this.state.images[baseV].processedData, 0, 0);
+    if (this.stack.editLayer) ectx.drawImage(this.stack.editLayer, 0, 0);
+    this.drawRegionState(ectx, { exporting: true });
+    return new Promise(res => exp.toBlob(res, 'image/png'));
   }
 
   exportComposite() {
