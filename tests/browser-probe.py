@@ -1,7 +1,9 @@
-# Visual probe — curation redesign flow (2026-10-07s).
+# Visual probe — curation redesign flow (2026-10-07t).
 # Run: .venv/bin/python tests/browser-probe.py   (server on 127.0.0.1:8800)
 # Uses a dedicated probe subdir with generated PNGs so the pending-delete
 # CONFIRM step only ever destroys probe files. Restores a clean manifest.
+# 07t coverage: view filter (All/Active/Pending), pending badges in All,
+# bottom-bar Delete all, post-ladder champion highlight + rejected badges.
 
 import asyncio, json, os, sys
 from pathlib import Path
@@ -85,9 +87,48 @@ async def main():
                 "async () => await fetch('/api/pending').then(r => r.json()).then(j => j.count)")
             await pg.screenshot(path=".probes/04-send-rejected.png")
 
-            # ── 4. Delete-mode marking (red chrome + MARKING badge) ────────
+            # ── 4. Gallery return: sync, filter views, champion highlight ──
             await pg.click('.tab[data-name="gallery"]')
-            await pg.wait_for_timeout(400)
+            await pg.wait_for_timeout(800)
+            # 4a. Default Active view HIDES the 3 pending images.
+            report["activeView"] = await pg.evaluate(
+                """() => ({cells: document.querySelectorAll('.gal-cell').length,
+                          badge: [...document.querySelectorAll('.gal-cell.ispending')].length,
+                          champion: !!document.querySelector('.gal-cell.champion')})""")
+            await pg.screenshot(path=".probes/04a-active-hides-pending.png")
+            # 4b. All view: 4 cells, 3 red-badged pendings, champion visible.
+            await pg.evaluate("() => document.querySelector('[data-act=view-all]').click()")
+            await pg.wait_for_timeout(1000)
+            report["allView"] = await pg.evaluate(
+                "() => ({cells: document.querySelectorAll('.gal-cell').length,"
+                " badged: document.querySelectorAll('.gal-cell.ispending').length})")
+            await pg.screenshot(path=".probes/04b-all-badged-pending.png")
+            # 4c. Pending filter: 3 cells with Return buttons, Delete all in the
+            # sticky BOTTOM bar (destructive lives low/left, never thumb-top).
+            await pg.evaluate("() => document.querySelector('[data-act=view-pending]').click()")
+            await pg.wait_for_timeout(1000)
+            report["pendingView"] = await pg.evaluate(
+                """() => ({cells: document.querySelectorAll('.gal-cell').length,
+                          returnBtns: document.querySelectorAll('.pd-return').length,
+                          barOn: document.querySelector('[data-id=pending-bar]').classList.contains('on'),
+                          deleteAllBottom: (() => { const b = document.querySelector('[data-act=pd-delete-all]'); const r = b.getBoundingClientRect(); return r.top > window.innerHeight * 0.6 && r.left < window.innerWidth / 2; })(),
+                          backTopHidden: ![...document.querySelectorAll('.gal-header button')].some(b => /Pending/.test(b.textContent) && b.getBoundingClientRect().top < 100 && /Delete all/.test(b.textContent))})""")
+            await pg.screenshot(path=".probes/04c-pending-bottom-bar.png")
+
+            # ── 5. Champion highlight on Gallery return ─────────────────────
+            await pg.evaluate("() => document.querySelector('[data-act=view-all]').click()")
+            await pg.wait_for_timeout(800)
+            await pg.click('.tab[data-name="ladder"]')
+            await pg.wait_for_timeout(300)
+            report["ladderSummarySurvives"] = await pg.evaluate(
+                "() => document.querySelector('[data-id=res-summary]')?.textContent || null")
+            await pg.click('.tab[data-name="gallery"]')
+            await pg.wait_for_timeout(600)
+            report["championReturn"] = await pg.evaluate(
+                "() => { const c = document.querySelector('.gal-cell.champion'); return c ? {flash: c.classList.contains('flash'), name: c.querySelector('.name')?.textContent} : null; }")
+            await pg.screenshot(path=".probes/05-champion-highlight.png")
+
+            # ── 6. Delete-mode marking (red chrome + MARKING badge) ────────
             await pg.evaluate("() => document.querySelector('[data-act=delete-mode]').click()")
             await pg.evaluate("() => [...document.querySelectorAll('.gal-cell')].slice(0, 2).forEach(c => c.click())")
             await pg.wait_for_timeout(700)
@@ -96,20 +137,15 @@ async def main():
                           markingBadge: !!document.querySelector('#tabbar .marking-badge'),
                           markCount: document.querySelector('[data-id=mark-count]').textContent,
                           barOn: document.querySelector('[data-id=marking-bar]').classList.contains('on')})""")
-            await pg.screenshot(path=".probes/05-delete-mode-marking.png")
+            await pg.screenshot(path=".probes/06-delete-mode-marking.png")
             await pg.evaluate("() => document.querySelector('[data-act=done-marking]').click()")
             await pg.wait_for_timeout(400)
             report["badgeGoneAfterDone"] = await pg.evaluate(
                 "() => !document.querySelector('#tabbar .marking-badge')")
 
-            # ── 5. Pending (clemency) view → two-step confirm ──────────────
-            await pg.evaluate("() => document.querySelector('[data-act=show-pending]').click()")
+            # ── 7. Bottom-bar two-step confirm (Pending filter view) ───────
+            await pg.evaluate("() => document.querySelector('[data-act=view-pending]').click()")
             await pg.wait_for_timeout(1000)
-            report["pendingView"] = await pg.evaluate(
-                """() => ({summary: document.querySelector('[data-id=pd-summary]').textContent,
-                          cells: document.querySelectorAll('.pd-cell').length,
-                          returnBtns: [...document.querySelectorAll('.pd-cell button')].every(b => /Return/.test(b.textContent))})""")
-            await pg.screenshot(path=".probes/06-pending-view.png")
             await pg.evaluate("() => document.querySelector('[data-act=pd-delete-all]').click()")
             await pg.wait_for_timeout(300)
             report["confirmText"] = await pg.evaluate(
