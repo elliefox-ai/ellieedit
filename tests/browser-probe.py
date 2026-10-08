@@ -36,6 +36,10 @@ async def click_btn(pg, pattern, scope=""):
 
 async def main():
     manifest_backup = MANIFEST.read_bytes() if MANIFEST.exists() else None
+    # ISOLATE: run against an empty manifest so the in-probe CONFIRM can only
+    # ever delete probe files — never real queued entries (which may resolve
+    # under either the gallery or dupe root). Backup restored at the end.
+    MANIFEST.write_text("{}")
     try:
         async with async_playwright() as p:
             b = await p.chromium.launch()
@@ -112,7 +116,7 @@ async def main():
                           returnBtns: document.querySelectorAll('.pd-return').length,
                           barOn: document.querySelector('[data-id=pending-bar]').classList.contains('on'),
                           deleteAllBottom: (() => { const b = document.querySelector('[data-act=pd-delete-all]'); const r = b.getBoundingClientRect(); return r.top > window.innerHeight * 0.6 && r.left < window.innerWidth / 2; })(),
-                          backTopHidden: ![...document.querySelectorAll('.gal-header button')].some(b => /Pending/.test(b.textContent) && b.getBoundingClientRect().top < 100 && /Delete all/.test(b.textContent))})""")
+                          backTopHidden: ![...document.querySelectorAll('.gal-header button')].some(b => /Deletion/.test(b.textContent) && b.getBoundingClientRect().top < 100 && /Delete all/.test(b.textContent))})""")
             await pg.screenshot(path=".probes/04c-pending-bottom-bar.png")
 
             # ── 5. Champion highlight on Gallery return ─────────────────────

@@ -101,3 +101,46 @@ def test_confirm_idempotent_when_missing(client, env):
     r = client.post("/api/pending/confirm", json={})
     assert r.json()["deleted"] == 0
     assert client.get("/api/pending").json()["count"] == 0
+
+
+def test_dupe_pool_fallback_listing(monkeypatch, tmp_path):
+    """Regression (2026-10-08f): dupe-view rejects are queued as DUPE_ROOT-
+    relative paths that pass the gallery path-shape jail but only exist under
+    the dupe pool. Listing, size-stat, and thumbs must resolve through the
+    dupe jail (mirroring confirm) — else the Deletion view renders blank
+    cells and '0 B'."""
+    from backend.routers import dupe as dupe_mod
+
+    groot = tmp_path / "gallery"
+    droot = tmp_path / "dupes"
+    groot.mkdir(); droot.mkdir()
+    (droot / "pool1").mkdir()
+    Image.new("RGB", (4, 4)).save(droot / "pool1" / "reject.png")
+    monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", groot)
+    monkeypatch.setattr(pending_mod, "MANIFEST", tmp_path / "pending.json")
+    monkeypatch.setattr(dupe_mod, "DUPE_ROOT", droot)
+    # Write the manifest directly the way dupe send-pending does for
+    # pool-outside-gallery members.
+    import json, time
+    (tmp_path / "pending.json").write_text(json.dumps(
+        {"pool1/reject.png": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())}))
+
+    client = TestClient(app)
+    lst = client.get("/api/pending").json()
+    assert lst["count"] == 1 and lst["bytes"] > 0
+    assert lst["items"][0]["size"] == (droot / "pool1" / "reject.png").stat().st_size
+    # Pending listing surfaces it with real dimensions.
+    d = client.get("/api/gallery/list", params={"pending": "pending"}).json()
+    assert [i["path"] for i in d["items"]] == ["pool1/reject.png"]
+    assert d["items"][0]["width"] == 4
+    # Thumb + file resolve through the fallback jail.
+    assert client.get("/api/gallery/thumb",
+                      params={"path": "pool1/reject.png"}).status_code == 200
+    assert client.get("/api/gallery/file",
+                      params={"path": "pool1/reject.png"}).status_code == 200
+    # Jail escapes stay rejected (no dupe fallback for violations).
+    outside = tmp_path / "secret.png"
+    outside.write_bytes(b"x")
+    (groot / "escape.png").symlink_to(outside)
+    assert client.get("/api/gallery/thumb",
+                      params={"path": "escape.png"}).status_code == 400

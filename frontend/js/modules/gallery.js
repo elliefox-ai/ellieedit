@@ -66,7 +66,7 @@ function panelHTML() {
     .gal-cell.ispending { border-color: #d04040; }
     .gal-cell.ispending img { filter: sepia(0.35) hue-rotate(-30deg) brightness(0.8); }
     .gal-cell.ispending::before {
-      content: 'PENDING'; position: absolute; top: 4px; left: 4px; z-index: 2;
+      content: 'DELETION'; position: absolute; top: 4px; left: 4px; z-index: 2;
       background: #a02020; color: #fff; font-size: 8px; font-weight: 700;
       padding: 1px 5px; border-radius: 6px; letter-spacing: 0.5px;
     }
@@ -131,7 +131,7 @@ function panelHTML() {
     <div class="gal-viewseg">
       <button class="ee-btn gal-btn" data-act="view-all">All</button>
       <button class="ee-btn gal-btn toggled" data-act="view-active">Active</button>
-      <button class="ee-btn gal-btn" data-act="view-pending">🗑 Pending (<span data-id="pending-count">0</span>)</button>
+      <button class="ee-btn gal-btn" data-act="view-pending">🗑 Deletion (<span data-id="pending-count">0</span>)</button>
     </div>
     <button class="ee-btn gal-btn" data-act="select-mode">☰ Select</button>
     <button class="ee-btn gal-btn danger" data-act="delete-mode" title="Mark images for pending delete">🚨</button>
@@ -145,7 +145,7 @@ function panelHTML() {
     <button class="ee-btn primary" data-act="ladder">Ladder <span data-id="sel-count">0</span></button>
   </div>
   <div class="gal-bar marking" data-id="marking-bar">
-    <span class="msg" data-id="mark-msg">Marking for delete — nothing is deleted until you confirm in Pending.</span>
+    <span class="msg" data-id="mark-msg">Marking for delete — nothing is deleted until you confirm in the Deletion view.</span>
     <button class="ee-btn" data-act="exit-marking">Exit marking</button>
     <button class="ee-btn primary" data-act="done-marking">✓ Done marking (<span data-id="mark-count">0</span>)</button>
   </div>
@@ -305,8 +305,8 @@ export class Gallery {
     if (!on) return;
     const n = this.pendingSet.size;
     this.el.pdMsg.textContent = n
-      ? `Pending Delete — ${n} image${n === 1 ? '' : 's'} · ${fmtBytes(this.pdBytes)}. Nothing is deleted until you confirm.`
-      : 'Pending Delete — nothing marked.';
+      ? `Deletion queue — ${n} image${n === 1 ? '' : 's'} · ${fmtBytes(this.pdBytes)}. Nothing is deleted until you confirm.`
+      : 'Deletion queue — nothing marked.';
     this.el.pdDeleteAll.style.display = n ? '' : 'none';
   }
 

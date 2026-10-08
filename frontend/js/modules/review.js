@@ -152,7 +152,7 @@ function panelHTML() {
           <button class="ee-btn primary" data-act="res-blend">Blend these two</button>
           <button class="ee-btn" data-act="res-keep-exit">Keep Champion &amp; exit</button>
           <button class="ee-btn" data-act="res-redo">Redo round</button>
-          <button class="ee-btn" data-act="res-send-pending">Send rejected → Pending Delete</button>
+          <button class="ee-btn" data-act="res-send-pending">Send rejected → Deletion queue</button>
         </div>
       </div>
       <div class="rv-rejected" data-id="rejected">
@@ -272,7 +272,7 @@ export class Review {
       if (btn) btn.disabled = true;
       this.toast(`${paths.length} marked for delete`);
     } catch (err) {
-      this.toast('Send to Pending failed: ' + err.message, true);
+      this.toast("Send to Deletion queue failed: " + err.message, true);
     }
   }
 
@@ -357,7 +357,7 @@ export class Review {
     const sendBtn = this.panel.querySelector('[data-act="res-send-pending"]');
     if (sendBtn) {
       sendBtn.disabled = !l.rejected.length;
-      sendBtn.textContent = `Send ${l.rejected.length} rejected → Pending Delete`;
+      sendBtn.textContent = `Send ${l.rejected.length} rejected → Deletion queue`;
     }
     this.el.results.style.display = 'flex';
     this.el.duel.classList.add('hidden');

@@ -18,7 +18,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .gallery import EXTS, GALLERY_ROOT, jailed
+from .gallery import EXTS, GALLERY_ROOT, jailed, resolve_flex
 
 log = __import__("logging").getLogger("ellieedit.pending")
 
@@ -61,8 +61,9 @@ def _entries(m: dict) -> list[dict]:
     total = 0
     for rel, added_at in sorted(m.items()):
         try:
-            size = jailed(rel).stat().st_size
-        except (HTTPException, OSError):
+            # Gallery root first, dupe-pool fallback (same as confirm/listing).
+            size = resolve_flex(rel).stat().st_size
+        except Exception:
             size = None  # file vanished; keep it listed, size unknown
         if size:
             total += size

@@ -1573,7 +1573,7 @@ registerModule({
         return;
       }
       const msg = `Commit family?\n` +
-        `${keeps} pick(s) · ${melds} melded · ${rejects} rejected → Pending Delete.\n` +
+        `${keeps} pick(s) · ${melds} melded · ${rejects} rejected → Deletion queue.\n` +
         `Rejects go to the pending manifest (still reversible there until confirm).`;
       if (!window.confirm(msg)) return;
       try {

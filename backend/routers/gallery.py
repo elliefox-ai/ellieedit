@@ -49,6 +49,24 @@ def jailed(rel: str) -> Path:
     return candidate
 
 
+def resolve_flex(rel: str) -> Path:
+    """Resolve a manifest-style rel under GALLERY_ROOT; on miss, fall back to
+    the dupe-pool jail (mirrors pending.confirm). The dupe view queues
+    pool-relative paths that pass the gallery path-shape jail but only exist
+    under DUPE_ROOT — without this fallback every pending listing, size-stat,
+    and thumb resolves to nothing (blank grid, '0 B'). Raises 404 on a
+    double miss. Jail escapes stay 400 (strict gallery jail); only a passing
+    jail with a missing file falls through to the dupe pool."""
+    p = jailed(rel)  # raises 400 on any gallery-jail violation
+    if p.is_file():
+        return p
+    from .dupe import jailed as dupe_jailed
+    p = dupe_jailed(rel)  # raises 400 on dupe-jail violations
+    if not p.is_file():
+        raise HTTPException(404, "not found under gallery or dupe root")
+    return p
+
+
 def _thumb_path(src: Path) -> Path:
     key = hashlib.sha1(f"{src}|{src.stat().st_mtime_ns}".encode()).hexdigest()
     return THUMB_CACHE_DIR / f"{key}.webp"
@@ -160,20 +178,20 @@ def _pending_listing(pending_set: set, cursor: str, root_real: Path) -> dict:
     files = []
     for rel in pending_set:
         try:
-            f = jailed(rel)
+            f = resolve_flex(rel)
             st = f.stat()
             if f.suffix.lower() not in EXTS:
                 continue
-            files.append((int(st.st_mtime), f))
+            files.append((int(st.st_mtime), f, rel))
         except (HTTPException, OSError):
-            continue  # vanished or jailed: skip in the grid
+            continue  # vanished or jailed under both roots: skip in the grid
     files.sort(reverse=True)
     start = 0
     if cursor:
         try:
             cm, cn = cursor.split(":", 1)
             cm = int(cm)
-            start = next((i + 1 for i, (m, e) in enumerate(files)
+            start = next((i + 1 for i, (m, e, _r) in enumerate(files)
                           if m == cm and e.name == cn), None)
             if start is None:
                 raise ValueError
@@ -181,13 +199,14 @@ def _pending_listing(pending_set: set, cursor: str, root_real: Path) -> dict:
             raise HTTPException(400, "bad cursor")
     page = files[start:start + PAGE_SIZE]
     items = []
-    for mtime, f in page:
+    for mtime, f, rel in page:
         try:
             with Image.open(f) as im:
                 w, h = im.size
         except Exception:
             continue
-        rel = f.relative_to(root_real).as_posix()
+        # path stays the manifest key (gallery- or dupe-relative); the media
+        # endpoints resolve through the same flexible jail.
         items.append({"name": f.name, "path": rel, "mtime": int(mtime),
                       "width": w, "height": h, "thumb": True, "pending": True})
     next_cursor = f"{page[-1][0]}:{page[-1][1].name}" if page and start + PAGE_SIZE < len(files) else None
@@ -234,7 +253,7 @@ def cleanup_tmp_dir():
 
 @router.get("/thumb")
 def thumbnail(path: str = Query(...)):
-    src = jailed(path)
+    src = resolve_flex(path)
     if not src.is_file() or src.suffix.lower() not in EXTS:
         raise HTTPException(404, "not an image")
     try:
@@ -247,7 +266,7 @@ def thumbnail(path: str = Query(...)):
 
 @router.get("/file")
 def file(path: str = Query(...)):
-    src = jailed(path)
+    src = resolve_flex(path)
     if not src.is_file() or src.suffix.lower() not in EXTS:
         raise HTTPException(404, "not an image")
     media = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
