@@ -21,6 +21,7 @@
 //                    prev/next, tap = pick, verdict dots.
 // NOTHING persists before Commit; commit = verdict POST + send-pending.
 import { registerModule } from '../shell.js';
+import { sigIsOverride, sigChipText } from './dupe-signals.js';
 
 const api = (p, opts) => fetch(`/api/dupe${p}`, opts).then(r => {
   if (!r.ok) return r.json().then(e => Promise.reject(new Error(e.detail || r.status)));
@@ -66,6 +67,26 @@ registerModule({
       .verdict-tag { border-radius:8px; padding:1px 7px; font-size:10px; }
       .verdict-tag.kept { background:#1d3a25; color:#7de08a; }
       .verdict-tag.rejected { background:#3a1d1d; color:#e87a7a; }
+      /* signal-conflict surfacing (2026-10-08d) */
+      .sig-flag { background:#3a2d10; border:1px solid #7a5f1e; color:#e8c37a;
+                  border-radius:8px; padding:1px 7px; font-size:10px; cursor:help; }
+      #ss-signals { margin:6px 12px 0; padding:6px 10px; background:#14142680;
+                    border:1px solid #2a2a44; border-radius:8px; font-size:11px;
+                    color:#b0b0d0; flex-shrink:0; }
+      #ss-signals .sig-line { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+      #ss-signals .sig-conflict { color:#e8c37a; cursor:help; }
+      #ss-signals .sig-err { color:#e87a7a; }
+      #ss-signals .sig-chip { background:#2a2a44; border-radius:8px; padding:1px 7px;
+                              font-size:10px; color:#b0b0d0; max-width:220px;
+                              overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      #ss-signals .sig-chip.conflict { background:#3a2d10; color:#e8c37a; }
+      #ss-suggest { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+                    margin-top:6px; padding-top:6px; border-top:1px solid #2a2a44; }
+      #ss-suggest .lbl { color:#7de08a; }
+      #ss-suggest .ee-btn { font-size:11px; padding:8px 14px; min-height:40px; }
+      .sig-mini { position:absolute; top:2px; left:2px; background:#000000b0;
+                  border-radius:6px; padding:0 5px; font-size:9px; color:#b0b0d0; }
+      .sig-mini.reject { color:#e87a7a; } .sig-mini.keep { color:#7de08a; }
       .verdict-tag.melded { background:#1d2a3a; color:#7ab8e8; }
       .dupe-more { display:flex; justify-content:center; padding:12px; }
       .fam-card.skel { opacity:0.5; pointer-events:none; }
@@ -297,6 +318,11 @@ registerModule({
     let committed = false;
     let commitSummary = null;
     let surveyFocus = 0;       // keyboard-highlighted cell index in survey grid
+    // signal-conflict surfacing (2026-10-08d)
+    let signals = null;        // /families/{id}/signals payload for current
+    let sigSuggestion = null;  // shown suggestion (for once-only override log)
+    let sigDismissed = false;  // suggestion dismissed this detail visit
+    let sigShownLogged = false;
 
     function job(text, cls = '') {
       jobbar.querySelectorAll('.badge.dupe').forEach(b => b.remove());
@@ -364,6 +390,7 @@ registerModule({
       meta.innerHTML =
         `<span>${f.id}</span><span>${f.size} members</span>` +
         (f.tiers || []).map(t => `<span class="tier-badge ${t}">${t}</span>`).join('') +
+        (f.conflict ? '<span class="sig-flag" title="signal conflict — prior verdict splits members the hashes call near-identical">⚡</span>' : '') +
         (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '');
       card.append(strip, meta);
       card.addEventListener('click', () => renderDetail(f.id));
@@ -618,6 +645,7 @@ registerModule({
 
     function doPick(m) {
       if (verdictOf(m)) return;
+      sigLogOverride(m.path, 'kept');
       draft.verdicts[m.path] = 'kept';
       draft.picks.push(m.path);
       renderSpread();
@@ -629,6 +657,7 @@ registerModule({
     }
     function doReject(m) {
       if (verdictOf(m)) return;
+      sigLogOverride(m.path, 'rejected');
       draft.verdicts[m.path] = 'rejected';
       renderSpread();
     }
@@ -639,6 +668,128 @@ registerModule({
     function duel(m) {
       const i = current.members.indexOf(m);
       if (i >= 0) { championIdx = i; renderSpread(); }
+    }
+
+    // ── SIGNAL-CONFLICT SURFACING (2026-10-08d) ────────────────────────
+    // Two curation signals: dupelib hash tiers + prior verdict history.
+    // Duel history is honestly unavailable (no .duel-curator state on this
+    // host, not path-addressable) — the chips show verdict history only.
+    // Disagreement is information, never an action: Apply fills the DRAFT.
+    function sigEvent(event, detail) {
+      if (!current) return Promise.resolve();
+      return api('/signals/event', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ family: current.id, event, detail }),
+      }).catch(e => trace(`sigEvent(${event}) failed: ${e.message}`));
+    }
+
+    async function loadSignals(fid) {
+      signals = null; sigSuggestion = null; sigDismissed = false; sigShownLogged = false;
+      try {
+        const sig = await api(`/families/${fid}/signals`);
+        if (!current || current.id !== fid) { trace('signals stale — dropped'); return; }
+        signals = sig;
+        trace(`signals: conflicts=${sig.conflicts.length} suggestion=${!!sig.suggestion}`);
+        renderSignalsBar();
+      } catch (e) {
+        // error-chip instrumentation: never break the detail view
+        trace(`signals failed: ${e.message}`);
+        console.error('[dupe signals]', e.message);
+        const bar = el.detail.querySelector('#ss-signals');
+        if (bar) bar.innerHTML = `<div class="sig-err">signals unavailable: ${e.message}</div>`;
+      }
+    }
+
+    function ensureSignalsBar() {
+      let bar = el.detail.querySelector('#ss-signals');
+      if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'ss-signals';
+        el.detail.insertBefore(bar, el.detail.firstChild);
+      }
+      return bar;
+    }
+
+    function renderSignalsBar() {
+      // History chips + conflict lines render in committed mode too — a
+      // resolved family being revisited is exactly where prior disagreements
+      // matter. Only the Apply suggestion stays gated to uncommitted detail.
+      if (!signals) return;
+      const bar = ensureSignalsBar();
+      bar.innerHTML = '';
+      const line = document.createElement('div');
+      line.className = 'sig-line';
+      // per-member history chips (verdict history; duels unavailable)
+      for (const m of current.members) {
+        const h = signals.members[m.path];
+        const t = sigChipText(h);
+        if (!t) continue;
+        const chip = document.createElement('span');
+        chip.className = 'sig-chip' + (signals.conflict_members.includes(m.path) ? ' conflict' : '');
+        chip.textContent = `${m.name}: ${t}`;
+        chip.title = t === 'kept ×1' || t.startsWith('kept ×')
+          ? 'prior verdict history — kept entries' : 'prior verdict history';
+        line.appendChild(chip);
+      }
+      // explicit disagreement lines
+      for (const c of signals.conflicts) {
+        const d = document.createElement('span');
+        d.className = 'sig-conflict';
+        d.textContent = `⚡ ${c.detail}`;
+        d.title = 'signals disagree — your verdicts vs the hash tiers. No auto-verdicts.';
+        line.appendChild(d);
+      }
+      if (!line.children.length) {
+        const n = document.createElement('span');
+        n.textContent = 'no prior verdict history for this family';
+        line.appendChild(n);
+      }
+      bar.appendChild(line);
+      // suggestion — only on strong agreement, dismissible, never silent
+      if (signals.suggestion && !sigDismissed && !committed) {
+        const s = signals.suggestion;
+        if (!sigShownLogged) { sigShownLogged = true; sigEvent('shown', s.label); }
+        sigSuggestion = s;
+        const row = document.createElement('div');
+        row.id = 'ss-suggest';
+        const lbl = document.createElement('span');
+        lbl.className = 'lbl';
+        lbl.textContent = `Signals suggest: keep ${Path_name(s.keep)}, reject rest`;
+        const apply = document.createElement('button');
+        apply.className = 'ee-btn primary';
+        apply.id = 'ss-suggest-apply';
+        apply.textContent = 'Apply suggestion';
+        apply.title = 'fills the DRAFT — nothing persists until Commit';
+        apply.addEventListener('click', () => {
+          for (const p of s.reject) draft.verdicts[p] = 'rejected';
+          if (!draft.picks.includes(s.keep)) draft.picks.push(s.keep);
+          draft.verdicts[s.keep] = 'kept';
+          sigEvent('applied', s.label);
+          sigDismissed = true;   // consumed — re-renders must not resurrect it
+          renderSpread();
+          job('suggestion applied to draft — commit when ready');
+        });
+        const dis = document.createElement('button');
+        dis.className = 'ee-btn';
+        dis.id = 'ss-suggest-dismiss';
+        dis.textContent = '✕ Dismiss';
+        dis.title = 'dismiss — logged as calibration data';
+        dis.addEventListener('click', () => {
+          sigDismissed = true;
+          sigEvent('dismissed', s.label);
+          row.remove();
+        });
+        row.append(lbl, apply, dis);
+        bar.appendChild(row);
+      }
+    }
+
+    function Path_name(p) { return (p || '').split('/').pop(); }
+
+    function sigLogOverride(path, verdict) {
+      if (!sigSuggestion || !sigIsOverride(sigSuggestion, path, verdict)) return;
+      sigEvent('override', `manual ${verdict} on ${path} vs suggestion: ${sigSuggestion.label}`);
+      sigSuggestion = null;   // once per suggestion
     }
 
     // ── UNIFIED ZOOM (2026-10-08a) — one surface, entered from spread
@@ -1188,6 +1339,7 @@ registerModule({
       for (const m of fm) {
         const c = document.createElement('div');
         c.className = 'ss-fan-card';
+        c.style.position = 'relative';
         c.title = `tap to duel the champion — ${m.name}`;
         const img = document.createElement('img');
         img.loading = 'lazy';
@@ -1195,6 +1347,25 @@ registerModule({
         const nm = document.createElement('div');
         nm.className = 'nm';
         nm.textContent = m.name;
+        // prior-verdict history badge, if the operator has judged this
+        // member before (signal chips, never auto-applied)
+        const h = signals && signals.members[m.path];
+        const ht = h && sigChipText(h);
+        if (ht) {
+          const badge = document.createElement('span');
+          badge.className = 'sig-mini ' + (h.last === 'rejected' ? 'reject' : 'keep');
+          badge.textContent = h.last === 'rejected' ? `✕${h.rejected}` : `✓${h.kept}`;
+          badge.title = `prior verdicts: ${ht}`;
+          c.appendChild(badge);
+        }
+        if (signals && signals.conflict_members.includes(m.path)) {
+          const fl = document.createElement('span');
+          fl.className = 'sig-mini';
+          fl.style.color = '#e8c37a';
+          fl.textContent = '⚡';
+          fl.title = 'conflicts with hash tiers — see the signals bar';
+          c.appendChild(fl);
+        }
         c.append(img, nm);
         c.addEventListener('click', () => duel(m));
         fan.appendChild(c);
@@ -1306,6 +1477,10 @@ registerModule({
         }
       }, { passive: true });
       fan.addEventListener('touchend', () => { pinch = null; }, { passive: true });
+
+      // signals bar survives spread re-renders (renderSpread wipes
+      // el.detail) — re-hung after every rebuild, suggestion state intact
+      renderSignalsBar();
     }
 
     function renderCommitted(summary) {
@@ -1344,6 +1519,7 @@ registerModule({
         committed = false;
         commitSummary = null;
         draft = { verdicts: {}, picks: [], melded: null };
+        loadSignals(fid);   // lazy, non-blocking — detail renders first
         // resolved families: pre-load existing verdicts as the committed truth
         for (const [p, v] of Object.entries(f.verdicts || {})) {
           if (v) draft.verdicts[p] = v;

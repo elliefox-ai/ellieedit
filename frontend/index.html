@@ -86,7 +86,7 @@
 <script type="module" src="/js/shell.js"></script>
 <script>
   if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => navigator.register('/sw.js').catch(() => {}));
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
   }
 </script>
 </body>
