@@ -202,15 +202,20 @@ async def main():
             await pg.screenshot(path=".probes/09-pending-global-crossfolder.png")
             await _mark([other_rel], on=False)
 
-            # ── 9 (07u). Select-mode active styling: filled pill + count in
-            # the button; delete-mode red filled state verified alongside.
+            # ── 9 (08e fix). Select-mode active styling — uses a FRESH dir.
+            # The original clicked cells right after switching views in the
+            # (by now emptied) probe dir; the async reload raced the clicks
+            # and it only passed when stale cells were clicked. A fresh dir
+            # makes the selection deterministic.
             await pg.evaluate("() => document.querySelector('[data-act=view-active]').click()")
-            for _ in range(20):
-                n_cells = await pg.evaluate("() => document.querySelectorAll('.gal-cell').length")
-                if n_cells:
-                    break
-                await pg.wait_for_timeout(300)
-            await pg.wait_for_timeout(400)
+            sel_dir = GALLERY_ROOT / f"probe-sel-{os.getpid()}"
+            sel_dir.mkdir(exist_ok=True)
+            Image.new("RGB", (300, 200), (200, 120, 20)).save(sel_dir / "s0.png")
+            Image.new("RGB", (300, 200), (20, 120, 200)).save(sel_dir / "s1.png")
+            await pg.reload(wait_until="networkidle")
+            await pg.wait_for_timeout(1200)
+            await pg.select_option('[data-id="dir-select"]', sel_dir.name)
+            await pg.wait_for_timeout(1200)
             await pg.evaluate("() => document.querySelector('[data-act=select-mode]').click()")
             await pg.wait_for_timeout(300)
             await pg.evaluate("() => [...document.querySelectorAll('.gal-cell')].slice(0, 2).forEach(c => c.click())")
@@ -229,7 +234,69 @@ async def main():
             await pg.wait_for_timeout(300)
             report["deleteActive"] = await _btnstyle('[data-act=delete-mode]')
             await pg.evaluate("() => document.querySelector('[data-act=done-marking]').click()")
+            import shutil
+            shutil.rmtree(sel_dir, ignore_errors=True)
             await pg.screenshot(path=".probes/10-select-active-styling.png")
+
+            # ── 11 (08e). Gallery → FaceCycle multi-select handoff ──────────
+            # Fresh probe dir, own images, never added to the pending manifest;
+            # removed below so the disk-clean check is unaffected. Console
+            # errors are collected across the section and must stay empty.
+            console_errors = []
+            pg.on('console', lambda m: console_errors.append(m.text) if m.type == 'error' else None)
+            fc_dir = GALLERY_ROOT / f"probe-fc-{os.getpid()}"
+            fc_dir.mkdir(exist_ok=True)
+            for i, color in enumerate([(200, 90, 30), (30, 90, 200), (30, 170, 130)]):
+                Image.new("RGB", (256, 256), color).save(fc_dir / f"fc-{i}.png")
+            try:
+                # fc_dir was created after page load — reload so refreshDirs
+                # picks it up in the dropdown.
+                await pg.reload(wait_until="networkidle")
+                await pg.wait_for_timeout(1200)
+                await pg.select_option('[data-id="dir-select"]', fc_dir.name)
+                await pg.wait_for_timeout(1200)
+                await pg.evaluate("() => document.querySelector('[data-act=select-mode]').click()")
+                await pg.evaluate("() => [...document.querySelectorAll('.gal-cell')].slice(0, 3).forEach(c => c.click())")
+                await pg.wait_for_timeout(400)
+                report["fcBar"] = await pg.evaluate(
+                    """() => { const b = document.querySelector('[data-act=to-facecycle-multi]');
+                             const r = b.getBoundingClientRect();
+                             return {visible: b.style.display !== 'none',
+                                     touch40: r.height >= 40,
+                                     text: b.textContent.trim()}; }""")
+                await pg.screenshot(path=".probes/11a-multiselect-fc-action.png")
+                await pg.evaluate("() => document.querySelector('[data-act=to-facecycle-multi]').click()")
+                await pg.wait_for_timeout(1500)
+                report["fcHandoff"] = await pg.evaluate(
+                    """() => ({tab: document.querySelector('.tab.active').dataset.name,
+                             dropZoneHidden: document.querySelector('[data-id=drop-zone]').style.display === 'none',
+                             mainVisible: document.querySelector('[data-id=main-view]').style.display === 'flex',
+                             thumbs: [...document.querySelectorAll('[data-id=thumbnail-strip] .thumb .label')].map(l => l.textContent),
+                             receipt: document.querySelector('[data-id=status-bar]').textContent});""")
+                assert report["fcHandoff"]["tab"] == "facecycle", "did not navigate to FaceCycle"
+                assert len(report["fcHandoff"]["thumbs"]) == 3, "thumb strip does not show 3 handed-off images"
+                assert "handed off from Gallery" in report["fcHandoff"]["receipt"], "no visible receipt"
+                await pg.screenshot(path=".probes/11b-facecycle-preload.png")
+                # Selection persists on return: rings still on, bar still shows the action.
+                await pg.click('.tab[data-name="gallery"]')
+                await pg.wait_for_timeout(800)
+                report["fcReturn"] = await pg.evaluate(
+                    "() => ({selRings: document.querySelectorAll('.gal-cell.sel').length," 
+                    "        fcBtnVisible: document.querySelector('[data-act=to-facecycle-multi]').style.display !== 'none'})")
+                assert report["fcReturn"]["selRings"] == 3, "selection did not persist on return"
+                await pg.screenshot(path=".probes/11c-gallery-return-persist.png")
+                # iPad 1024×768 screenshots of both states.
+                await pg.set_viewport_size({"width": 1024, "height": 768})
+                await pg.wait_for_timeout(400)
+                await pg.screenshot(path=".probes/11d-ipad-gallery-bar.png")
+                await pg.click('.tab[data-name="facecycle"]')
+                await pg.wait_for_timeout(600)
+                await pg.screenshot(path=".probes/11e-ipad-facecycle.png")
+                report["consoleErrors"] = console_errors
+                assert not console_errors, f"console errors: {console_errors}"
+            finally:
+                import shutil
+                shutil.rmtree(fc_dir, ignore_errors=True)
 
             # Verify on disk: every probe file should be gone.
             report["filesLeftOnDisk"] = [p.name for p in probe_files if p.exists()]
