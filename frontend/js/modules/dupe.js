@@ -175,7 +175,6 @@ registerModule({
       .ss-cell.reject { border-color:#8a2f2f; }
       .ss-cell.meld { border-color:#2f5a8a; }
       .ss-cell img { width:100%; height:110px; object-fit:cover; background:#0f0f1a; display:block; }
-      .ss-cell .tools { position:absolute; top:4px; right:4px; }
       .ss-cell .nm { font-size:9px; color:#8a8aaa; padding:2px 4px; white-space:nowrap;
                      overflow:hidden; text-overflow:ellipsis; }
       .ss-focus { flex:1; min-height:0; display:flex; align-items:center;
@@ -376,7 +375,7 @@ registerModule({
     }
 
     // ───────────────────────────────────────── STACK-SPREAD detail view ──
-    const DRAFT_CLASSES = { pick: 'pick', rejected: 'reject', melded: 'meld', deferred: 'defer' };
+    const DRAFT_CLASSES = { kept: 'pick', pick: 'pick', rejected: 'reject', melded: 'meld', deferred: 'defer' };
 
     function verdictOf(m) { return draft.verdicts[m.path] || null; }
 
@@ -475,52 +474,43 @@ registerModule({
       if (i >= 0) { championIdx = i; renderSpread(); }
     }
 
-    function openFullSize(m) {
-      const ov = document.createElement('div');
-      ov.className = 'ss-overlay';
-      ov.id = 'ss-fullview';
-      const top = document.createElement('div');
-      top.className = 'ss-ov-top';
-      const nm = document.createElement('span');
-      nm.textContent = `${m.name} — full size (${m.path})`;
-      const close = document.createElement('button');
-      close.className = 'ee-btn';
-      close.textContent = '✕ Close';
-      close.addEventListener('click', () => ov.remove());
-      const frame = document.createElement('div');
-      frame.style.cssText = 'flex:1;min-height:0;display:flex;align-items:center;justify-content:center;';
-      const img = document.createElement('img');
-      img.src = fileUrl(m.path);
-      img.alt = m.name;
-      frame.appendChild(img);
-      top.append(nm, close);
-      ov.append(top, frame);
-      el.detail.appendChild(ov);
-    }
-
-    function focusDeck(startIdx) {
+    // ── UNIFIED ZOOM (2026-10-08a) — one surface, entered from spread
+    // (champion ⤢), survey (cell tap). Full-size /api/dupe/file image,
+    // prev/next cycling across ALL family members (‹ › buttons + swipe),
+    // position label, pick/reject in place. Exit: '‹ back to <parent>'
+    // restores the origin (spread or survey) with draft intact; swipe-down
+    // or tap on the top bar also dismisses. Each level has exactly one exit
+    // to its parent: families ← spread ← survey ← zoom.
+    function openZoom(startIdx, origin) {
       const list = current.members;
       let idx = Math.max(0, Math.min(startIdx, list.length - 1));
+      trace(`zoom open idx=${idx + 1}/${list.length} origin=${origin}`);
       const ov = document.createElement('div');
       ov.className = 'ss-overlay';
-      ov.id = 'ss-focusview';
+      ov.id = 'ss-zoom';
       const top = document.createElement('div');
       top.className = 'ss-ov-top';
       const info = document.createElement('span');
+      info.id = 'ss-zoom-pos';
       const back = document.createElement('button');
       back.className = 'ee-btn';
-      back.textContent = '← Back to survey';
-      back.addEventListener('click', () => { ov.remove(); openSurvey(); });
-      const close = document.createElement('button');
-      close.className = 'ee-btn';
-      close.textContent = '✕ Close';
-      close.addEventListener('click', () => { ov.remove(); renderSpread(); });
+      back.id = 'ss-zoom-back';
+      back.style.minHeight = '44px';
+      back.textContent = origin === 'survey' ? '‹ back to survey' : '‹ back to spread';
+      const dismiss = () => {
+        trace(`zoom close → ${origin} (draft intact)`);
+        ov.remove();
+        if (origin === 'survey') openSurvey(); else renderSpread();
+      };
+      back.addEventListener('click', dismiss);
+      // tap on the top bar (outside buttons) = dismiss; swipe-down likewise.
+      top.addEventListener('click', e => { if (!e.target.closest('button')) dismiss(); });
       const stage = document.createElement('div');
       stage.className = 'ss-focus';
       const dots = document.createElement('div');
       dots.className = 'dots';
       const img = document.createElement('img');
-      img.alt = 'focus';
+      img.alt = 'zoom';
       const prev = document.createElement('button');
       prev.className = 'ss-nav prev'; prev.textContent = '‹';
       const next = document.createElement('button');
@@ -530,15 +520,32 @@ registerModule({
       const pickBtn = document.createElement('button');
       pickBtn.className = 'ee-btn';
       pickBtn.style.minHeight = '44px';
-      function paint() {
+      pickBtn.id = 'ss-zoom-pick';
+      const rejBtn = document.createElement('button');
+      rejBtn.className = 'ee-btn ss-reject';
+      rejBtn.style.minHeight = '44px';
+      rejBtn.id = 'ss-zoom-reject';
+      const paint = () => {
         const m = list[idx];
         img.src = fileUrl(m.path);
-        info.textContent = `Focus ${idx + 1}/${list.length} · ${m.name}`;
+        info.textContent = `${idx + 1} / ${list.length} · ${m.name}`;
         const v = verdictOf(m);
-        pickBtn.textContent = v === 'kept' ? `Un-pick #${draft.picks.indexOf(m.path) + 1 || ''} ✓`
-                            : v ? `verdict: ${v} (tap deck to undo)` : 'Tap image = pick';
+        pickBtn.textContent = v === 'kept' ? `Un-pick ✓ (#${draft.picks.indexOf(m.path) + 1})`
+                            : v ? `verdict: ${v}` : '✓ Pick';
         pickBtn.disabled = !!v && v !== 'kept';
-        pickBtn.onclick = () => { if (v === 'kept') unPick(m); };
+        rejBtn.textContent = v === 'rejected' ? 'Un-reject' : '✕ Reject';
+        rejBtn.disabled = !!v && v !== 'rejected';
+        pickBtn.onclick = () => {
+          if (v === 'kept') { unPickNoRender(m); } else if (!v) { draft.verdicts[m.path] = 'kept'; draft.picks.push(m.path); }
+          trace(`zoom pick idx=${idx + 1} verdict=${verdictOf(m)}`);
+          paint();
+        };
+        rejBtn.onclick = () => {
+          if (v === 'rejected') { delete draft.verdicts[m.path]; }
+          else if (!v) { draft.verdicts[m.path] = 'rejected'; }
+          trace(`zoom reject idx=${idx + 1} verdict=${verdictOf(m)}`);
+          paint();
+        };
         dots.innerHTML = '';
         list.forEach((mm, i) => {
           const d = document.createElement('span');
@@ -548,17 +555,29 @@ registerModule({
           d.title = mm.name;
           dots.appendChild(d);
         });
+      };
+      // verdict helpers that DON'T re-render the spread (which would wipe
+      // this overlay); draft mutation only, origin re-renders on exit.
+      function unPickNoRender(m) {
+        delete draft.verdicts[m.path];
+        draft.picks = draft.picks.filter(p => p !== m.path);
       }
-      prev.addEventListener('click', () => { idx = (idx - 1 + list.length) % list.length; paint(); });
-      next.addEventListener('click', () => { idx = (idx + 1) % list.length; paint(); });
-      // swipe prev/next, tap = pick — pointer based, no scroll fight (pan off)
+      const cycle = (dir) => {
+        idx = (idx + dir + list.length) % list.length;
+        trace(`zoom cycle → ${idx + 1}/${list.length}`);
+        paint();
+      };
+      prev.addEventListener('click', () => cycle(-1));
+      next.addEventListener('click', () => cycle(1));
+      // swipe: left/right = cycle, down = dismiss, tap = pick. Pointer based,
+      // touch-action:none on the stage — no page-scroll fight.
       let down = null;
       stage.addEventListener('pointerdown', e => {
         down = { x: e.clientX, y: e.clientY, t: Date.now(), moved: false };
-        stage.setPointerCapture(e.pointerId);
+        try { stage.setPointerCapture(e.pointerId); } catch (_) {}
       });
       stage.addEventListener('pointermove', e => {
-        if (down && Math.abs(e.clientX - down.x) > 12) down.moved = true;
+        if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 12) down.moved = true;
       });
       stage.addEventListener('pointerup', e => {
         if (!down) return;
@@ -566,16 +585,16 @@ registerModule({
         const tap = !down.moved && Date.now() - down.t < 500;
         down = null;
         if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
-          dx < 0 ? next.click() : prev.click();
+          cycle(dx < 0 ? 1 : -1);
+        } else if (dy > 80) {
+          dismiss();
         } else if (tap && !e.target.closest('button')) {
-          const m = list[idx];
-          verdictOf(m) ? (verdictOf(m) === 'kept' && unPick(m)) : doPick(m);
-          paint();
+          pickBtn.click();
         }
       });
       stage.append(img, prev, next, dots, tools);
-      tools.append(pickBtn);
-      top.append(info, back, close);
+      tools.append(pickBtn, rejBtn);
+      top.append(back, info);
       ov.append(top, stage);
       el.detail.appendChild(ov);
       paint();
@@ -589,11 +608,11 @@ registerModule({
       const top = document.createElement('div');
       top.className = 'ss-ov-top';
       const info = document.createElement('span');
-      info.textContent = `Survey — all ${current.members.length} members · tap a card for focus deck · ⤢ = full size`;
+      info.textContent = `Survey — all ${current.members.length} members · tap an image to inspect`;
       const close = document.createElement('button');
       close.className = 'ee-btn';
       close.textContent = '✕ Back to stack';
-      close.addEventListener('click', closeSurvey);
+      close.addEventListener('click', () => { closeSurvey(); renderSpread(); });
       const grid = document.createElement('div');
       grid.className = 'ss-survey-grid';
       current.members.forEach((m, i) => {
@@ -606,16 +625,10 @@ registerModule({
         const nm = document.createElement('div');
         nm.className = 'nm';
         nm.textContent = m.name;
-        const tools = document.createElement('div');
-        tools.className = 'tools';
-        const fs = document.createElement('button');
-        fs.className = 'ss-tool';
-        fs.textContent = '⤢';
-        fs.title = 'full size';
-        fs.addEventListener('click', e => { e.stopPropagation(); openFullSize(m); });
-        tools.appendChild(fs);
-        cell.addEventListener('click', () => focusDeck(i));
-        cell.append(img, nm, tools);
+        // no overlay icon — the whole cell is the tap target; near-twin
+        // differences live in exactly the pixels an icon used to cover.
+        cell.addEventListener('click', () => openZoom(i, 'survey'));
+        cell.append(img, nm);
         grid.appendChild(cell);
       });
       top.append(info, close);
@@ -839,7 +852,8 @@ registerModule({
       const tools = document.createElement('div');
       tools.className = 'ss-champ-tools';
       tools.append(
-        toolBtn('⤢', 'open full-size image', () => openFullSize(champ)),
+        toolBtn('⤢', 'inspect full-size — cycle members, pick/reject in place',
+                () => openZoom(current.members.indexOf(champ), 'spread')),
         toolBtn('☰', 'actions: meld / defer / reject remainder', (e) => {
           const r = e.target.getBoundingClientRect();
           openMenu(r.left, r.bottom + 6);
