@@ -353,6 +353,109 @@ async def main():
             await pg2.screenshot(path=".probes/ss-08-kbd-legend.png")
             await b2.close()
 
+            # ── 6d. SIFT (keep-K-of-N, 2026-10-08c) ───────────────────
+            # Entry from the spread header; same draft; sweep + ranks.
+            header0 = await pg.evaluate(
+                "() => (document.querySelector('.ss-header')||{textContent:''}).textContent")
+            await pg.evaluate("() => document.querySelector('#ss-sift-btn').click()")
+            await pg.wait_for_timeout(1200)
+            sift0 = await pg.evaluate("""() => {
+              const g = document.querySelector('#ss-sift-grid');
+              const cells = g ? [...g.querySelectorAll('.ss-cell')] : [];
+              return {
+                open: !!document.querySelector('#ss-sift'),
+                grid_h: g ? Math.round(g.getBoundingClientRect().height) : 0,
+                cells: cells.length,
+                visible_cells: cells.filter(c => c.getBoundingClientRect().height > 0).length,
+                count: (document.querySelector('#ss-sift .keep-count')||{}).textContent || null,
+                sweep: (() => { const b = document.querySelector('#ss-sift-sweep');
+                  const r = b && b.getBoundingClientRect();
+                  return r && r.height >= 44; })(),
+                kept_cells: g ? g.querySelectorAll('.ss-cell.keep').length : 0,
+              };
+            }""")
+            report["sift_enter"] = sift0
+            assert sift0["open"] and sift0["grid_h"] > 0 and sift0["visible_cells"] > 0, \
+                f"sift view did not open visibly: {sift0}"
+            assert sift0["sweep"], "sift sweep button under 44px"
+            assert "kept of" in sift0["count"], f"keep counter missing: {sift0}"
+            await pg.screenshot(path=".probes/ss-09-sift-grid.png")
+            # keep 2 unhandled cells by tap (ordinal badges appear)
+            await pg.evaluate("""() => {
+              const cells = [...document.querySelectorAll('#ss-sift-grid .ss-cell')]
+                .filter(c => !c.classList.contains('keep') && !c.classList.contains('reject'));
+              cells[0].querySelector('img').dispatchEvent(
+                new MouseEvent('click', {bubbles: true}));
+            }""")
+            await pg.wait_for_timeout(500)
+            await pg.evaluate("""() => {
+              const cells = [...document.querySelectorAll('#ss-sift-grid .ss-cell')]
+                .filter(c => !c.classList.contains('keep') && !c.classList.contains('reject'));
+              cells[0].querySelector('img').dispatchEvent(
+                new MouseEvent('click', {bubbles: true}));
+            }""")
+            await pg.wait_for_timeout(500)
+            sift1 = await pg.evaluate("""() => ({
+              count: document.querySelector('#ss-sift .keep-count').textContent,
+              ords: [...document.querySelectorAll('#ss-sift-grid .ord-badge')]
+                .map(o => o.textContent),
+              badge_h: (() => { const o = document.querySelector('#ss-sift-grid .ord-badge');
+                const r = o && o.getBoundingClientRect(); return r && r.height > 0; })(),
+            })""")
+            report["sift_keep2"] = sift1
+            assert sift1["ords"] == ["1st", "2nd"], f"ordinal badges wrong: {sift1}"
+            assert sift1["badge_h"], "ordinal badge invisible"
+            # keyboard: arrows move focus, P toggles a 3rd keep, F rejects focused
+            await pg.keyboard.press("ArrowRight")
+            await pg.wait_for_timeout(300)
+            foc = await pg.evaluate(
+                "() => [...document.querySelectorAll('#ss-sift-grid .ss-cell')]"
+                ".findIndex(c => c.classList.contains('kbd-focus'))")
+            assert foc == 1, f"sift arrow focus did not move: {foc}"
+            await pg.keyboard.press("p")
+            await pg.wait_for_timeout(400)
+            p_count = await pg.inner_text("#ss-sift .keep-count")
+            assert p_count.startswith("3 kept"), f"P did not keep focused cell: {p_count}"
+            await pg.keyboard.press("p")   # toggle it back off (reversible)
+            await pg.wait_for_timeout(400)
+            off_count = await pg.inner_text("#ss-sift .keep-count")
+            assert off_count.startswith("2 kept"), f"P toggle-off broken: {off_count}"
+            await pg.keyboard.press("f")   # reject the focused cell
+            await pg.wait_for_timeout(400)
+            f_cells = await pg.evaluate(
+                "() => document.querySelectorAll('#ss-sift-grid .ss-cell').length")
+            total_mem = await pg.evaluate(
+                "() => document.querySelectorAll('.ss-header .ss-dot').length")
+            assert f_cells == total_mem - 1, \
+                f"F did not remove the focused cell from the sift grid: {f_cells} vs {total_mem}"
+            # sweep: reject the rest, then individual rejection stays possible
+            await pg.evaluate("() => document.querySelector('#ss-sift-sweep').click()")
+            await pg.wait_for_timeout(600)
+            sift2 = await pg.evaluate("""() => ({
+              cells: document.querySelectorAll('#ss-sift-grid .ss-cell').length,
+              kept: document.querySelectorAll('#ss-sift-grid .ss-cell.keep').length,
+              count: document.querySelector('#ss-sift .keep-count').textContent,
+              sweep_disabled: document.querySelector('#ss-sift-sweep').disabled,
+            })""")
+            report["sift_sweep"] = sift2
+            assert sift2["cells"] == sift2["kept"], \
+                f"sweep left non-kept cells in the grid: {sift2}"
+            assert sift2["sweep_disabled"], "sweep should disable with nothing unhandled"
+            await pg.screenshot(path=".probes/ss-10-sift-post-sweep.png")
+            # exit → spread with the same draft (chips + discard row grow)
+            await pg.evaluate("() => [...document.querySelectorAll('#ss-sift .ss-ov-top .ee-btn')]"
+                ".find(b => b.textContent.includes('Back to stack')).click()")
+            await pg.wait_for_timeout(1200)
+            back = await pg.evaluate("""() => ({
+              sift_gone: !document.querySelector('#ss-sift'),
+              header: !!document.querySelector('.ss-header'),
+              chips: document.querySelectorAll('.ss-pick-chip').length,
+              dead: document.querySelectorAll('.ss-dead').length,
+            })""")
+            report["sift_back_to_spread"] = back
+            assert back["sift_gone"] and back["header"] and back["chips"] >= 3 \
+                and back["dead"] >= 1, f"sift exit did not carry draft to spread: {back}"
+
             # ── 7. Commit → verdict + pending manifest ───────────────
             counts = await pg.evaluate("""() =>
               (document.querySelector('.ss-header')||{textContent:''}).textContent""")
@@ -389,6 +492,19 @@ async def main():
             probe_paths = report["manifest_added"]
             ledger_tail = LEDGER.read_text().strip().splitlines()[-1:] if LEDGER.exists() else []
             report["ledger_last"] = ledger_tail
+            # Sift rank payload: latest ledger entry must carry 1-based ranks
+            # for every kept pick, and rejects in the pending manifest.
+            if ledger_tail:
+                last_e = json.loads(ledger_tail[0])
+                kept_paths = [p for p, v in last_e.get("members", {}).items()
+                              if v == "kept"]
+                ranks = last_e.get("ranks", {})
+                assert set(ranks.keys()) == set(kept_paths) and len(ranks) >= 3, \
+                    f"sift ranks missing/mismatched in ledger: {ranks} vs kept {kept_paths}"
+                assert sorted(ranks.values()) == list(range(1, len(ranks) + 1)), \
+                    f"ranks not 1..K: {ranks}"
+                report["sift_ranks"] = ranks
+                assert report["manifest_added"], "sweep rejects did not reach pending manifest"
 
             # ── 8. Zero console errors ──────────────────────────────────
             report["console_errors"] = console_errors
