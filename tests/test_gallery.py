@@ -9,6 +9,7 @@ from PIL import Image
 
 from backend.main import app
 from backend.routers import gallery as gallery_mod
+from backend.routers import pending as pending_mod
 
 
 @pytest.fixture
@@ -120,6 +121,68 @@ def test_pagination(client):
 
 def test_bad_cursor(client):
     assert client.get("/api/gallery/list", params={"cursor": "garbage"}).status_code == 400
+
+
+# ---- pending filter (2026-10-07t) -----------------------------------------
+
+@pytest.fixture
+def pclient(client, tmp_path, monkeypatch):
+    """Gallery client with a manifest containing b.jpg (newest file)."""
+    monkeypatch.setattr(pending_mod, "MANIFEST", tmp_path / "pending.json")
+    r = client.post("/api/pending", json={"paths": ["b.jpg"]})
+    assert r.json() == {"added": 1, "count": 1}
+    return client
+
+
+def test_list_pending_tag(pclient):
+    items = pclient.get("/api/gallery/list").json()["items"]
+    assert {i["name"]: i["pending"] for i in items} == {"b.jpg": True, "a.png": False}
+
+
+def test_list_active_excludes_manifest(pclient):
+    names = [i["name"] for i in pclient.get(
+        "/api/gallery/list", params={"pending": "active"}).json()["items"]]
+    assert names == ["a.png"]
+
+
+def test_list_pending_only_manifest(pclient):
+    names = [i["name"] for i in pclient.get(
+        "/api/gallery/list", params={"pending": "pending"}).json()["items"]]
+    assert names == ["b.jpg"]
+
+
+def test_list_pending_bad_value(client):
+    assert client.get("/api/gallery/list", params={"pending": "bogus"}).status_code == 400
+
+
+def test_list_pending_pagination_both_views(pclient):
+    """PAGE_SIZE=1: each filtered view paginates over its own file set only."""
+    import backend.routers.gallery as g
+    old = g.PAGE_SIZE
+    g.PAGE_SIZE = 1
+    try:
+        # Active view: a.png only (b.jpg is in the manifest).
+        d1 = pclient.get("/api/gallery/list", params={"pending": "active"}).json()
+        assert [i["name"] for i in d1["items"]] == ["a.png"]
+        assert d1["next_cursor"] is None
+        # Pending view: b.jpg only, same single page.
+        d2 = pclient.get("/api/gallery/list", params={"pending": "pending"}).json()
+        assert [i["name"] for i in d2["items"]] == ["b.jpg"]
+        assert d2["next_cursor"] is None
+        # All view still paginates over both, newest first.
+        d3 = pclient.get("/api/gallery/list").json()
+        assert [i["name"] for i in d3["items"]] == ["b.jpg"]
+        d4 = pclient.get("/api/gallery/list", params={"cursor": d3["next_cursor"]}).json()
+        assert [i["name"] for i in d4["items"]] == ["a.png"]
+    finally:
+        g.PAGE_SIZE = old
+
+
+def test_list_pending_subdir_filter(pclient):
+    """Manifest entries outside the listed dir simply never appear."""
+    names = [i["name"] for i in pclient.get(
+        "/api/gallery/list", params={"dir": "sub", "pending": "active"}).json()["items"]]
+    assert names == ["c.png"]
 
 
 def test_list_excludes_temp_dir(client):

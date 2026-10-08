@@ -68,7 +68,18 @@ def get_thumbnail(src: Path) -> Path:
 
 
 @router.get("/list")
-def list_images(dir: str = "", cursor: str = ""):
+def list_images(dir: str = "", cursor: str = "", pending: str = "all"):
+    """pending filter (default 'all' = everything, backward compatible):
+      active  — exclude every path in the pending-delete manifest
+      pending — only manifest paths
+    Every item is tagged `pending: bool` so an 'All' client view can badge
+    manifest images without a second fetch. Filtering happens BEFORE cursor
+    resolution, so pagination is correct within each filtered view."""
+    if pending not in ("all", "active", "pending"):
+        raise HTTPException(400, "pending must be all|active|pending")
+    from .pending import load_manifest  # lazy: pending.py imports this module
+    pending_set = set(load_manifest().keys())
+
     root_real = GALLERY_ROOT.resolve()
     if dir and (Path(dir).is_absolute() or dir.startswith("~")):
         raise HTTPException(400, "dir escapes gallery root")
@@ -95,6 +106,12 @@ def list_images(dir: str = "", cursor: str = ""):
                 continue
     files.sort(reverse=True)  # newest first
 
+    # Pending filter applies before cursoring so cursors stay per-view correct.
+    if pending != "all":
+        files = [(m, e) for (m, e) in files
+                 if (e.relative_to(root_real).as_posix() in pending_set)
+                 == (pending == "pending")]
+
     start = 0
     if cursor:
         # Opaque cursor: "mtime:name" of the last item on the previous page.
@@ -116,12 +133,14 @@ def list_images(dir: str = "", cursor: str = ""):
                 w, h = im.size  # cheap header read
         except Exception:
             continue
+        rel = f.relative_to(root_real).as_posix()
         items.append({
             "name": f.name,
-            "path": f"{f.relative_to(root_real).as_posix()}",
+            "path": rel,
             "mtime": int(mtime),
             "width": w, "height": h,
             "thumb": True,  # generated lazily by /thumb
+            "pending": rel in pending_set,
         })
     next_cursor = f"{page[-1][0]}:{page[-1][1].name}" if page and start + PAGE_SIZE < len(files) else None
     return {"items": items, "subdirs": subdirs, "next_cursor": next_cursor,

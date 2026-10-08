@@ -44,6 +44,12 @@ def _load() -> dict:
     return {}
 
 
+def load_manifest() -> dict:
+    """Public accessor (gallery list filter reads this; keeps MANIFEST
+    indirection so tests can monkeypatch pending_mod.MANIFEST)."""
+    return _load()
+
+
 def _save(m: dict) -> None:
     tmp = MANIFEST.with_suffix(".tmp")
     tmp.write_text(json.dumps(m, indent=1))
