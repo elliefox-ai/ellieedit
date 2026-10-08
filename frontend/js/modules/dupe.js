@@ -194,6 +194,10 @@ registerModule({
         el.list.innerHTML = '';
         el.list.appendChild(skeletons());   // cards-shaped progress immediately
       }
+      // '.fam-list.open' means HIDDEN (see <style> above) — list mode shows the
+      // grid, so 'open' must be removed, never added. (2026-10-07x bugfix:
+      // inverted toggle left the card grid display:none on every browser.)
+      el.list.classList.remove('open');
       el.more.style.display = 'none';
       job(firstPage ? 'loading families…' : 'loading more…');
       try {
@@ -208,7 +212,19 @@ registerModule({
           grid.className = 'fam-grid';
           el.list.appendChild(grid);
         }
-        for (const f of data.items) grid.appendChild(cardFor(f));
+        for (const f of data.items) {
+          try {
+            grid.appendChild(cardFor(f));
+          } catch (cardErr) {
+            // never drop a whole batch on one bad card — render the error
+            const ec = document.createElement('div');
+            ec.className = 'fam-card';
+            ec.style.color = '#e87a7a';
+            ec.textContent = `card error (${f.id}): ${cardErr.message}`;
+            grid.appendChild(ec);
+            console.error('dupe card render failed', f.id, cardErr);
+          }
+        }
         cursor = data.next_cursor || '';
         exhausted = !data.next_cursor;
         el.more.style.display = exhausted ? 'none' : 'flex';
@@ -301,10 +317,8 @@ registerModule({
           el.send.textContent = n ? `Send ${n} rejected → Pending Delete` : 'Send rejected → Pending Delete';
         }
         syncButtons();
-        syncButtons._f = syncButtons;
-
-        el.list.classList.remove('open');
-        el.detail.classList.add('open');
+        el.list.classList.add('open');     // hide list (open = hidden)
+        el.detail.classList.add('open');   // show detail
         el.bottom.style.display = 'flex';
         el.scroll.scrollTop = 0;
         job('');
@@ -354,6 +368,20 @@ registerModule({
         renderList();
       } catch (e) { job(`dupe: ${e.message}`, 'err'); }
     });
+
+    // Diagnostics: surface thrown errors and unhandled rejections into the
+    // status row so a silent blank grid can never happen again (iPad Safari).
+    if (!window.__eeErrorHook) {
+      window.__eeErrorHook = true;
+      const show = (kind, msg) => {
+        const st = document.querySelector('#dupe-status');
+        if (st) st.textContent = `${kind}: ${msg}`;
+        console.error(`[ellieedit ${kind}]`, msg);
+      };
+      window.addEventListener('error', e => show('error', e.message));
+      window.addEventListener('unhandledrejection', e =>
+        show('rejection', e.reason && e.reason.message || String(e.reason)));
+    }
 
     panel.addEventListener('ellieedit:dupe-sync', renderList);
     window.addEventListener('ellieedit:tab-activated', e => {
