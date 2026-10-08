@@ -89,6 +89,12 @@ def list_images(dir: str = "", cursor: str = "", pending: str = "all"):
     if not base.is_dir():
         raise HTTPException(404, "not a directory")
 
+    if pending == "pending":
+        # Pending is a GLOBAL inbox: it must not depend on the folder walk at
+        # all (the walk is per-folder and non-recursive, so manifest images in
+        # other folders would be invisible). List manifest paths directly.
+        return _pending_listing(pending_set, cursor, root_real)
+
     files = []
     subdirs = []
     for entry in sorted(base.iterdir()):
@@ -144,6 +150,48 @@ def list_images(dir: str = "", cursor: str = "", pending: str = "all"):
         })
     next_cursor = f"{page[-1][0]}:{page[-1][1].name}" if page and start + PAGE_SIZE < len(files) else None
     return {"items": items, "subdirs": subdirs, "next_cursor": next_cursor,
+            "root": str(root_real)}
+
+
+def _pending_listing(pending_set: set, cursor: str, root_real: Path) -> dict:
+    """Global pending view: every manifest path, any folder, newest first.
+    Same item shape, tagging, and cursoring as the folder walk — one data
+    source so the status count and grid count cannot diverge."""
+    files = []
+    for rel in pending_set:
+        try:
+            f = jailed(rel)
+            st = f.stat()
+            if f.suffix.lower() not in EXTS:
+                continue
+            files.append((int(st.st_mtime), f))
+        except (HTTPException, OSError):
+            continue  # vanished or jailed: skip in the grid
+    files.sort(reverse=True)
+    start = 0
+    if cursor:
+        try:
+            cm, cn = cursor.split(":", 1)
+            cm = int(cm)
+            start = next((i + 1 for i, (m, e) in enumerate(files)
+                          if m == cm and e.name == cn), None)
+            if start is None:
+                raise ValueError
+        except ValueError:
+            raise HTTPException(400, "bad cursor")
+    page = files[start:start + PAGE_SIZE]
+    items = []
+    for mtime, f in page:
+        try:
+            with Image.open(f) as im:
+                w, h = im.size
+        except Exception:
+            continue
+        rel = f.relative_to(root_real).as_posix()
+        items.append({"name": f.name, "path": rel, "mtime": int(mtime),
+                      "width": w, "height": h, "thumb": True, "pending": True})
+    next_cursor = f"{page[-1][0]}:{page[-1][1].name}" if page and start + PAGE_SIZE < len(files) else None
+    return {"items": items, "subdirs": [], "next_cursor": next_cursor,
             "root": str(root_real)}
 
 

@@ -224,3 +224,62 @@ def test_cleanup_tmp_dir_deletes_old_keeps_new(tmp_path, monkeypatch):
     assert removed == 2
     assert not old.exists() and not legacy.exists()
     assert new.exists()
+
+
+# ---- pending view is a GLOBAL inbox (2026-10-07u) ---------------------------
+
+@pytest.fixture
+def gclient(client, tmp_path, monkeypatch):
+    """Root with images in two folders; manifest holds only sub/b.jpg."""
+    monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", tmp_path)
+    monkeypatch.setattr(pending_mod, "MANIFEST", tmp_path / "pending.json")
+    (tmp_path / "sub").mkdir()
+    Image.new("RGB", (4, 4)).save(tmp_path / "sub" / "b.jpg")
+    Image.new("RGB", (4, 4)).save(tmp_path / "sub" / "c.jpg")
+    (tmp_path / "other").mkdir()
+    Image.new("RGB", (4, 4)).save(tmp_path / "other" / "d.jpg")
+    r = client.post("/api/pending", json={"paths": ["sub/b.jpg", "other/d.jpg"]})
+    assert r.json() == {"added": 2, "count": 2}
+    return client
+
+
+def test_pending_view_ignores_folder(gclient):
+    """Pending view is a GLOBAL inbox: the folder dropdown (dir) is ignored —
+    manifest images from every folder are listed, always."""
+    r = gclient.get("/api/gallery/list",
+                    params={"dir": "sub", "pending": "pending"}).json()
+    assert {i["path"] for i in r["items"]} == {"sub/b.jpg", "other/d.jpg"}
+    r_all = gclient.get("/api/gallery/list", params={"pending": "pending"}).json()
+    assert {i["path"] for i in r_all["items"]} == {"sub/b.jpg", "other/d.jpg"}
+    # Folder-qualified labels so images spanning folders stay identifiable.
+    assert all("/" in i["path"] for i in r["items"])
+
+
+def test_pending_status_count_matches_grid(gclient):
+    """Status-line data source (/api/pending count) == grid count
+    (/api/gallery/list?pending=pending from root)."""
+    manifest_count = gclient.get("/api/pending").json()["count"]
+    grid = gclient.get("/api/gallery/list", params={"pending": "pending"}).json()
+    assert len(grid["items"]) == manifest_count == 2
+    assert all(i["pending"] for i in grid["items"])
+
+
+def test_pending_view_survives_pagination(gclient):
+    """Manifest paths in mixed folders paginate correctly per-view."""
+    import backend.routers.gallery as g
+    old = g.PAGE_SIZE
+    g.PAGE_SIZE = 1
+    try:
+        paths, cursor = [], ""
+        while True:
+            params = {"pending": "pending"}
+            if cursor:
+                params["cursor"] = cursor
+            d = gclient.get("/api/gallery/list", params=params).json()
+            paths += [i["path"] for i in d["items"]]
+            cursor = d["next_cursor"]
+            if not cursor:
+                break
+        assert set(paths) == {"sub/b.jpg", "other/d.jpg"}
+    finally:
+        g.PAGE_SIZE = old
