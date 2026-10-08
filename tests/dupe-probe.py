@@ -1034,6 +1034,178 @@ async def main():
             assert not console_errors, f"console errors: {console_errors}"
             print(json.dumps(report, indent=1))
 
+            # ── 12. TWIN-CLEARING LOOP (2026-10-08m) ────────────────────
+            # Similarity order in the survey grid (greedy dhash chain),
+            # twin chip in zoom, T jump, pin+flip with ZERO /api/dupe/file
+            # requests during the flip, auto-advance (F advances + counter),
+            # C commits and opens the NEXT family. Ledger + manifest writes
+            # are restored/reconciled by the teardown below.
+            await pg.keyboard.press("Escape")   # zoom → survey
+            await pg.wait_for_timeout(1000)
+            await pg.keyboard.press("Escape")   # survey → spread
+            await pg.wait_for_timeout(1000)
+            await pg.evaluate("() => document.querySelector('#dupe-back').click()")
+            await wait_grid_ready(pg)
+            await pg.evaluate("""() => [...document.querySelectorAll('.dupe-top .pill')]
+              .find(p => p.dataset.f === 'unresolved').click()""")
+            await wait_grid_ready(pg)
+            await pg.wait_for_timeout(1500)
+
+            def _ham(a, b):
+                return bin(int(a, 16) ^ int(b, 16)).count("1")
+
+            import urllib.request as _ureq
+            tl_items = json.loads(_ureq.urlopen(
+                BASE + "/api/dupe/families?state=unresolved").read())["items"]
+            tl_fam_dir = _sig_data_dir() / "families"
+            twin_seed = None
+            for it in tl_items:
+                if it["size"] < 2:
+                    continue
+                fp = tl_fam_dir / f"{it['id']}.json"
+                try:
+                    fj = json.loads(fp.read_text())
+                except OSError:
+                    continue
+                mems = fj.get("members", [])
+                hashed = [m for m in mems if m.get("dhash")]
+                if len(hashed) < 2:
+                    continue
+                # expected greedy chain (same algorithm as dupe-view.js)
+                chain = [hashed[0]]
+                rest = hashed[1:]
+                while rest:
+                    cur = chain[-1]
+                    bi = min(range(len(rest)),
+                             key=lambda i: (_ham(cur["dhash"], rest[i]["dhash"]), i))
+                    chain.append(rest.pop(bi))
+                # does the first member have a twin (chip + T jump provable)?
+                first = chain[0]
+                has_twin = any(
+                    o is not first and o.get("dhash")
+                    and _ham(first["dhash"], o["dhash"]) <= 4
+                    for o in mems)
+                if has_twin:
+                    twin_seed = {"id": it["id"], "json": fj,
+                                 "expected": [m["name"] for m in chain] +
+                                             [m["name"] for m in mems
+                                              if not m.get("dhash")]}
+                    break
+            assert twin_seed, "no unresolved family with twin-able hashed members"
+            tl_id = twin_seed["id"]
+            tl_expected = twin_seed["expected"]
+            await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
+              .find(c => c.textContent.includes('{tl_id}')).click()""")
+            await pg.wait_for_selector(".ss-header", timeout=20000)
+            await pg.wait_for_timeout(1500)
+            # similarity order asserted on the survey grid (spread order ==
+            # survey order == zoom order — applied once in renderDetail)
+            await pg.evaluate("() => document.querySelector('#ss-survey-btn').click()")
+            await pg.wait_for_timeout(2500)
+            cell_names = await pg.evaluate(
+                "() => [...document.querySelectorAll('#ss-survey .ss-cell .nm')]"
+                ".map(n => n.textContent)")
+            report["twin_order"] = {"expected": tl_expected[:6],
+                                    "got": cell_names[:6]}
+            assert cell_names[:len(tl_expected)] == tl_expected, \
+                f"similarity order wrong: {cell_names[:6]} vs {tl_expected[:6]}"
+            await pg.screenshot(path=".probes/ss-21-twin-survey-order.png")
+            # zoom: twin chip visible on a twin member
+            await pg.evaluate("""() => document.querySelector('#ss-survey .ss-cell')
+              .dispatchEvent(new MouseEvent('click', {bubbles: true}))""")
+            await pg.wait_for_timeout(2500)
+            chip0 = await pg.evaluate("""() => {
+              const c = document.querySelector('#ss-zoom-twin');
+              return {present: !!c, visible: !!c && c.style.display !== 'none',
+                      text: c && c.textContent,
+                      pos: document.querySelector('#ss-zoom-pos').textContent};
+            }""")
+            report["twin_chip"] = chip0
+            assert chip0["present"] and chip0["visible"] \
+                and chip0["text"].startswith("≈ "), \
+                f"twin chip missing on a twin: {chip0}"
+            await pg.screenshot(path=".probes/ss-22-twin-zoom-chip.png")
+            # pin + flip with ZERO /api/dupe/file requests during the flip
+            await pg.keyboard.press("p")
+            await pg.wait_for_timeout(500)
+            pinned0 = await pg.evaluate("""() => ({
+              info: document.querySelector('#ss-zoom-pin-info').textContent,
+              badge: document.querySelector('.ss-zoom-badge.pin').style.display,
+              btn: document.querySelector('#ss-zoom-pin').textContent,
+            })""")
+            assert pinned0["info"] == "PIN: #1" and pinned0["badge"] == "none" \
+                and "Unpin" in pinned0["btn"], f"pin failed: {pinned0}"
+            file_reqs = []
+            pg.on("request", lambda r: file_reqs.append(r.url)
+                  if "/api/dupe/file" in r.url else None)
+            await pg.keyboard.press("Space")   # flip → pinned twin
+            await pg.wait_for_timeout(600)
+            flipped = await pg.evaluate("""() => ({
+              badge: document.querySelector('.ss-zoom-badge.pin').style.display,
+              border: document.querySelector('#ss-zoom .ss-focus').style.border,
+              cur_hidden: document.querySelector('#ss-zoom .ss-focus > img')
+                .style.visibility,
+            })""")
+            report["twin_flip"] = flipped
+            assert flipped["badge"] != "none" and "231, 161, 58" in flipped["border"] \
+                and flipped["cur_hidden"] == "hidden", \
+                f"flip to pinned broken: {flipped}"
+            await pg.screenshot(path=".probes/ss-23-twin-pinned.png")
+            await pg.keyboard.press("Space")   # flip back
+            await pg.wait_for_timeout(600)
+            assert not file_reqs, \
+                f"flip made /api/dupe/file requests: {file_reqs}"
+            report["twin_flip_zero_network"] = True
+            # auto-advance: F advances to the next unhandled + counter updates
+            await pg.evaluate("() => { localStorage.eeAutoAdvance = '1'; }")
+            await pg.keyboard.press("p")       # unpin (clears pinned state)
+            await pg.wait_for_timeout(400)
+            aa_label = await pg.evaluate(
+                "() => document.querySelector('#ss-zoom-auto').textContent")
+            assert aa_label == "Auto-advance: On", f"auto label wrong: {aa_label}"
+            un0 = await pg.inner_text("#ss-zoom-count")
+            pos_a = await pg.inner_text("#ss-zoom-pos")
+            await pg.keyboard.press("f")
+            await pg.wait_for_timeout(800)
+            pos_b = await pg.inner_text("#ss-zoom-pos")
+            un1 = await pg.inner_text("#ss-zoom-count")
+            report["twin_advance"] = {"before": [pos_a, un0],
+                                      "after": [pos_b, un1]}
+            assert pos_a != pos_b, \
+                f"auto-advance did not move: {pos_a} -> {pos_b}"
+            assert un0 != un1 and "unhandled" in un1, \
+                f"unhandled counter did not update: {un0} -> {un1}"
+            # T jump: chip says the twin is at #N; pressing T lands there
+            chip_t = await pg.evaluate("""() => {
+              const c = document.querySelector('#ss-zoom-twin');
+              return {visible: c.style.display !== 'none', text: c.textContent};
+            }""")
+            if chip_t["visible"]:
+                target = int(chip_t["text"].split("#")[1])
+                await pg.keyboard.press("t")
+                await pg.wait_for_timeout(600)
+                pos_t = await pg.inner_text("#ss-zoom-pos")
+                assert pos_t.startswith(f"All {target} / "), \
+                    f"T jump wrong: chip {chip_t['text']} vs {pos_t}"
+                report["twin_jump"] = pos_t
+            # C: commit & next — commits this family, opens the NEXT one
+            await pg.keyboard.press("c")
+            await pg.wait_for_timeout(4000)
+            next_state = await pg.evaluate("""() => ({
+              fam: (document.querySelector('.ss-header .fam-id')||{}).textContent || null,
+              zoom_gone: !document.querySelector('#ss-zoom'),
+            })""")
+            report["twin_commit_next"] = {**next_state, "from": tl_id}
+            assert next_state["fam"] and next_state["fam"] != tl_id \
+                and next_state["zoom_gone"], \
+                f"commit & next did not open the next family: {next_state}"
+            await pg.screenshot(path=".probes/ss-24-twin-next-family.png")
+            # back out; the committed family flips to resolved in the grid
+            await pg.evaluate("() => document.querySelector('#dupe-back').click()")
+            await wait_grid_ready(pg)
+            assert not console_errors, f"console errors: {console_errors}"
+            print(json.dumps(report, indent=1))
+
             await b.close()
     finally:
         # HARDENED TEARDOWN (2026-10-08h): the old single-pass restore leaked
