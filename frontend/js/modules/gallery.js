@@ -11,6 +11,7 @@
 //   'ellieedit:facecycle-handoff' { urls, names }    + activate 'facecycle'
 import { registerModule } from '../shell.js';
 import { planFaceCycleHandoff } from '../handoff.js';
+import { planMarkBatch } from './marking-batch.js';
 
 function panelHTML() {
   return `
@@ -62,6 +63,13 @@ function panelHTML() {
     .gal-cell.marked { border-color: #d04040; }
     .gal-cell.marked img { filter: brightness(0.7) sepia(0.3) hue-rotate(-30deg); }
     .gal-cell.marked .check { display: block; background: #a02020; }
+    /* Async thumb reveal (2026-10-08i): skeleton shimmer until decoded,
+       then a single opacity fade. Cells keep fixed grid geometry, so no
+       reflow when images land. */
+    .gal-cell.thumb-loading { background: linear-gradient(110deg, #1a1a2e 30%, #24243c 45%, #1a1a2e 60%); background-size: 200% 100%; animation: gal-shimmer 1.4s linear infinite; }
+    .gal-cell.thumb-loading img { opacity: 0; }
+    .gal-cell.thumb-loaded img { opacity: 1; transition: opacity 0.25s ease-in; }
+    @keyframes gal-shimmer { to { background-position: -200% 0; } }
     /* Pending-delete badge (All view + pending filter): red edge + tint */
     .gal-cell.ispending { border-color: #d04040; }
     .gal-cell.ispending img { filter: sepia(0.35) hue-rotate(-30deg) brightness(0.8); }
@@ -209,6 +217,7 @@ export class Gallery {
     this.deleteMode = false;
     this.selected = new Map();  // path -> item (ladder/blend selection)
     this.pdBytes = 0;
+    this.markTouched = new Map(); // path -> desired on-state; committed on exit
     this.io = new IntersectionObserver(entries => {
       for (const e of entries) {
         if (!e.isIntersecting) continue;
@@ -336,6 +345,7 @@ export class Gallery {
     this.el.grid.classList.toggle('marking', on);
     this.el.markingBar.classList.toggle('on', on);
     if (on) this.setSelectMode(false);
+    else this.flushMarkBatch();
     // MARKING badge on the Gallery tab
     const tab = document.querySelector('#tabbar .tab[data-name="gallery"]');
     let badge = tab && tab.querySelector('.marking-badge');
@@ -347,6 +357,35 @@ export class Gallery {
     }
     if (!on && badge) badge.remove();
     this.updateActionBars();
+  }
+
+  // ---- deferred marking commit -------------------------------------------
+  // Marking taps are local-only; both exit paths (Done marking / Exit
+  // marking) funnel here: ONE batched manifest write + ONE syncManifest,
+  // i.e. a single grid refresh instead of one per tap. Marks that were
+  // never committed (page reload before Done) simply never existed server-
+  // side — same clemency contract as before, just batched.
+  async flushMarkBatch() {
+    const { toAdd, toRemove } = planMarkBatch(this.pendingSet, this.markTouched);
+    this.markTouched = new Map();
+    if (!toAdd.length && !toRemove.length) return;
+    try {
+      if (toAdd.length) {
+        await fetch('/api/pending', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: toAdd }),
+        });
+      }
+      if (toRemove.length) {
+        await fetch('/api/pending', {
+          method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: toRemove }),
+        });
+      }
+      await this.syncManifest();
+    } catch (err) {
+      this.toast('Manifest update failed: ' + err.message, true);
+    }
   }
 
   updateMarkCount() {
@@ -425,19 +464,6 @@ export class Gallery {
       this.reload();
     } catch (err) {
       this.toast('Delete failed: ' + err.message, true);
-    }
-  }
-
-  async markPending(item, on) {
-    try {
-      await fetch('/api/pending', {
-        method: on ? 'POST' : 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paths: [item.path] }),
-      });
-      await this.syncManifest();
-    } catch (err) {
-      this.toast('Manifest update failed: ' + err.message, true);
     }
   }
 
@@ -533,7 +559,16 @@ export class Gallery {
     if (item.path === this.championPath) cell.classList.add('champion');
     const img = document.createElement('img');
     img.dataset.src = `/api/gallery/thumb?path=${encodeURIComponent(item.path)}`;
-    img.alt = item.name; img.loading = 'lazy';
+    img.alt = item.name; img.loading = 'lazy'; img.decoding = 'async';
+    // Skeleton now; IO assigns src; decode/decode-failure reveals once.
+    cell.classList.add('thumb-loading');
+    const reveal = () => {
+      cell.classList.remove('thumb-loading');
+      cell.classList.add('thumb-loaded');
+      this.io.unobserve(cell);
+    };
+    img.addEventListener('load', () => { if (img.decode) img.decode().then(reveal).catch(reveal); else reveal(); });
+    img.addEventListener('error', reveal);
     const check = document.createElement('div');
     check.className = 'check';
     const name = document.createElement('div');
@@ -555,11 +590,12 @@ export class Gallery {
     cell.append(img, check, name, ret);
     cell.addEventListener('click', () => {
       if (this.deleteMode) {
+        // Deferred: visual flip only — no fetch, no re-render, no grid swap.
         const on = !cell.classList.contains('marked');
         cell.classList.toggle('marked', on);
         check.textContent = on ? '✕' : '';
+        this.markTouched.set(item.path, on);
         this.updateMarkCount();
-        this.markPending(item, on);
         return;
       }
       if (this.selectMode) {
