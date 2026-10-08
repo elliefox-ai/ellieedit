@@ -605,6 +605,7 @@ registerModule({
           else if (k === 't' || k === 'T') zoom.querySelector('#ss-zoom-twin')?.click();
           else if (k === 'p' || k === 'P') zoom.querySelector('#ss-zoom-pin')?.click();
           else if (k === ' ') zoom.querySelector('#ss-zoom-flip')?.click();
+          else if (k === 'c' || k === 'C') zoom.querySelector('#ss-zoom-commit')?.click();
           else return;
           e.preventDefault(); return;
         }
@@ -912,6 +913,17 @@ registerModule({
       const count = document.createElement('div');
       count.id = 'ss-zoom-count';
       count.style.cssText = 'text-align:center;padding:6px 0 10px;font-size:12px;color:#8a8aaa;flex-shrink:0;';
+      // Commit & next (step 4): C key + button — commit only queues to the
+      // reversible manifest (confirm dropped), then the next unresolved
+      // family opens. Esc still backs out without committing.
+      const commitNext = document.createElement('button');
+      commitNext.className = 'ee-btn primary';
+      commitNext.id = 'ss-zoom-commit';
+      commitNext.dataset.kbd = 'C';
+      commitNext.style.minHeight = '44px';
+      commitNext.title = 'commit the draft (reversible manifest — no confirm), then open the next family';
+      commitNext.textContent = 'Commit & next ›';
+      commitNext.addEventListener('click', () => { dismiss(); commitAndNext(); });
       const dots = document.createElement('div');
       dots.className = 'dots';
       // ── PIN + FLICKER-FREE FLIP (2026-10-08m step 3) ── two stacked
@@ -1166,9 +1178,13 @@ registerModule({
           ['P', 'pin / unpin'],
           ['Space', 'flip pinned ↔ current'],
           ['T', 'jump to the twin'],
+          ['C', 'commit & next family'],
           ['Esc', 'back'],
         ]));
-      ov.append(top, stage, count);
+      const countLine = document.createElement('div');
+      countLine.style.cssText = 'display:flex;gap:10px;align-items:center;justify-content:center;flex-shrink:0;';
+      countLine.append(commitNext, count);
+      ov.append(top, stage, countLine);
       el.detail.appendChild(ov);
       paint();
     }
@@ -1909,31 +1925,37 @@ registerModule({
 
     el.back.addEventListener('click', () => { familyDrafts.delete(current?.id); renderList(); });
 
-    el.commit.addEventListener('click', async () => {
-      if (!current || committed) return;
+    // ── COMMIT (shared path, 2026-10-08m step 4) ── toCommitPayload()
+    // builds the verdict POST body from the draft; commitFamily() sends it
+    // (verdict + send-pending) and renders the committed view. window.confirm
+    // is GONE: commit only queues to the reversible manifest — Esc/back
+    // still backs out without committing, and Pending confirm remains the
+    // only destructive endpoint.
+    function toCommitPayload() {
+      return {
+        members: draft.verdicts,
+        note: el.note.value.trim(),
+        // ADDITIVE rank payload (Sift, 2026-10-08c): 1-based order of the
+        // picks. Server tolerates its absence; old clients never send it.
+        ranks: Object.fromEntries(draft.picks.map((p, i) => [p, i + 1])),
+      };
+    }
+
+    async function commitFamily() {
+      if (!current || committed) return false;
       const handled = draft.verdicts;
       const rejects = Object.values(handled).filter(v => v === 'rejected').length;
       const keeps = draft.picks.length;
       const melds = draft.melded ? 2 : 0;
       if (!Object.keys(handled).length) {
         job('nothing to commit — pick or reject at least one member', 'err');
-        return;
+        return false;
       }
-      const msg = `Commit family?\n` +
-        `${keeps} pick(s) · ${melds} melded · ${rejects} rejected → Deletion queue.\n` +
-        `Rejects go to the pending manifest (still reversible there until confirm).`;
-      if (!window.confirm(msg)) return;
       try {
         await api(`/families/${current.id}/verdict`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            members: handled,
-            note: el.note.value.trim(),
-            // ADDITIVE rank payload (Sift, 2026-10-08c): 1-based order of the
-            // picks. Server tolerates its absence; old clients never send it.
-            ranks: Object.fromEntries(draft.picks.map((p, i) => [p, i + 1])),
-          }),
+          body: JSON.stringify(toCommitPayload()),
         });
         let pendingNote = 'no rejects — ledger only';
         if (rejects) {
@@ -1945,9 +1967,52 @@ registerModule({
         commitSummary = `${pendingNote} · ${keeps} picked · ${melds} melded · ${rejects} rejected`;
         renderCommitted(commitSummary);
         job(`committed — ${pendingNote}`, 'ok');
+        return true;
       } catch (e) {
         job(`commit failed: ${e.message}`, 'err');
+        return false;
       }
+    }
+
+    // Commit & next (twin-clearing loop, step 4): commit the current
+    // family, then open the next unresolved family — skipping families
+    // deferred this session (client-side session set). No next family →
+    // back to the browser grid.
+    async function commitAndNext() {
+      const fid = current && current.id;
+      if (!fid || committed) return;
+      const ok = await commitFamily();
+      if (!ok) return;
+      deferredFamilies.add(fid);
+      job('loading next family…');
+      try {
+        let cursor = '';
+        for (;;) {
+          const data = await api(`/families?state=unresolved&cursor=${encodeURIComponent(cursor)}`);
+          const next = data.items.find(it =>
+            it.id !== fid && !deferredFamilies.has(it.id));
+          if (next) { await renderDetail(next.id); return; }
+          if (!data.next_cursor) break;
+          cursor = data.next_cursor;
+        }
+        job('no more unresolved families', 'ok');
+        renderList();
+      } catch (e) {
+        job(`next family failed: ${e.message}`, 'err');
+        renderList();
+      }
+    }
+
+
+    el.commit.addEventListener('click', async () => {
+      if (!current || committed) return;
+      const rejects = Object.values(draft.verdicts)
+        .filter(v => v === 'rejected').length;
+      if (!Object.keys(draft.verdicts).length) {
+        job('nothing to commit — pick or reject at least one member', 'err');
+        return;
+      }
+      await commitFamily();
     });
 
     // Diagnostics: surface thrown errors and unhandled rejections into the

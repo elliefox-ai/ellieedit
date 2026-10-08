@@ -144,6 +144,21 @@ def test_family_list_bad_state(client):
     assert client.get("/api/dupe/families?state=nope").status_code == 400
 
 
+def test_family_list_offset_limit(client):
+    """Cheap offset/limit params (twin loop step 4, 2026-10-08m): a client
+    can walk the listing without holding cursors."""
+    lst = client.get("/api/dupe/families?limit=2").json()
+    assert len(lst["items"]) == 2 and lst["next_cursor"]
+    mid = client.get("/api/dupe/families?offset=1&limit=1").json()
+    assert len(mid["items"]) == 1
+    assert mid["items"][0]["id"] == lst["items"][1]["id"]
+    tail = client.get("/api/dupe/families?offset=2&limit=5").json()
+    assert len(tail["items"]) == 1 and tail["next_cursor"] is None
+    empty = client.get("/api/dupe/families?offset=99").json()
+    assert empty["items"] == [] and empty["next_cursor"] is None
+    assert client.get("/api/dupe/families?offset=-1").status_code == 400
+
+
 def test_family_detail(env, client):
     d = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
     assert d["state"] == "unresolved"

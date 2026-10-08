@@ -326,7 +326,8 @@ def _family_preview(fid: str) -> list[dict]:
 
 
 @router.get("/families")
-def families(state: str = "unresolved", cursor: str = ""):
+def families(state: str = "unresolved", cursor: str = "",
+             offset: int = 0, limit: int = 0):
     if state not in ("unresolved", "resolved", "all"):
         raise HTTPException(400, "state must be unresolved|resolved|all")
     idx = _index()
@@ -360,13 +361,20 @@ def families(state: str = "unresolved", cursor: str = ""):
             start = next(i + 1 for i, r in enumerate(rows) if r["id"] == cursor)
         except StopIteration:
             raise HTTPException(400, "bad cursor")
-    page = rows[start:start + PAGE_SIZE]
+    # Cheap offset/limit params (2026-10-08m, twin loop step 4): lets a
+    # client walk the listing without holding cursors. Non-negative ints;
+    # limit=0 keeps the default page size.
+    if offset < 0:
+        raise HTTPException(400, "offset must be >= 0")
+    start = max(start, offset)
+    size = limit if limit > 0 else PAGE_SIZE
+    page = rows[start:start + size]
     # Thumbnails for the first few members of each card (strip view), served
     # from the per-family preview cache — no family-file reads or /mnt stats
     # when nothing changed on disk.
     for r in page:
         r["members"] = _family_preview(r["id"])
-    next_cursor = page[-1]["id"] if page and start + PAGE_SIZE < len(rows) else None
+    next_cursor = page[-1]["id"] if page and start + size < len(rows) else None
     counts = {"unresolved": 0, "resolved": 0}
     for f in idx["families"]:
         counts[_family_state(f["id"], verdicts)] += 1
