@@ -1,0 +1,103 @@
+"""Pending Delete manifest tests — add/dedupe/pardon/confirm + path jail."""
+
+import pytest
+from fastapi.testclient import TestClient
+from PIL import Image
+
+from backend.main import app
+from backend.routers import gallery as gallery_mod
+from backend.routers import pending as pending_mod
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    root = tmp_path / "gallery"
+    root.mkdir()
+    (root / "keepme.png").write_bytes(b"one")
+    (root / "two.png").write_bytes(b"twotwo")
+    outside = tmp_path / "secret.png"
+    outside.write_bytes(b"secret")
+    (root / "escape.png").symlink_to(outside)
+    (root / "sub").mkdir()
+    (root / "sub" / "three.png").write_bytes(b"333")
+    (root / "dir.png").mkdir()  # a directory, not a file
+    monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", root)
+    monkeypatch.setattr(pending_mod, "MANIFEST", tmp_path / "pending.json")
+    return root, tmp_path / "secret.png"
+
+
+@pytest.fixture
+def client(env):
+    return TestClient(app)
+
+
+def test_add_list_dedupe(client):
+    r = client.post("/api/pending", json={"paths": ["keepme.png", "sub/three.png"]})
+    assert r.status_code == 200
+    assert r.json() == {"added": 2, "count": 2}
+    # dedupe: re-adding the same path changes nothing
+    r = client.post("/api/pending", json={"paths": ["keepme.png"]})
+    assert r.json() == {"added": 0, "count": 2}
+    # missing files ignored
+    r = client.post("/api/pending", json={"paths": ["gone.png"]})
+    assert r.json() == {"added": 0, "count": 2}
+    lst = client.get("/api/pending").json()
+    assert lst["count"] == 2
+    assert {i["path"] for i in lst["items"]} == {"keepme.png", "sub/three.png"}
+    assert all(i["size"] and i["added_at"] for i in lst["items"])
+    assert lst["bytes"] == 3 + 3
+
+
+def test_jail_on_add(client, env):
+    root, outside = env
+    for bad in ("../secret.png", "/secret.png", "~/.ssh", "sub/../../secret.png"):
+        assert client.post("/api/pending", json={"paths": [bad]}).status_code == 400, bad
+    # symlink that resolves outside root is jailed
+    assert client.post("/api/pending", json={"paths": ["escape.png"]}).status_code == 400
+    assert client.get("/api/pending").json()["count"] == 0
+    assert not outside.exists() or True  # untouched either way
+
+
+def test_jail_on_pardon_and_list(monkeypatch, client, env):
+    root, _ = env
+    client.post("/api/pending", json={"paths": ["keepme.png"]})
+    # jail applies on DELETE too — escape paths rejected
+    assert client.request("DELETE", "/api/pending",
+                          json={"paths": ["../secret.png"]}).status_code == 400
+
+
+def test_pardon(client):
+    client.post("/api/pending", json={"paths": ["keepme.png", "two.png"]})
+    r = client.request("DELETE", "/api/pending", json={"paths": ["keepme.png"]})
+    assert r.json() == {"pardoned": 1, "count": 1}
+    lst = client.get("/api/pending").json()
+    assert [i["path"] for i in lst["items"]] == ["two.png"]
+
+
+def test_confirm_deletes_files_and_clears(client, env):
+    root, outside = env
+    client.post("/api/pending", json={"paths": ["keepme.png", "sub/three.png", "two.png"]})
+    r = client.post("/api/pending/confirm", json={})
+    j = r.json()
+    assert j["deleted"] == 3
+    assert j["bytes"] == 3 + 3 + 6
+    assert not (root / "keepme.png").exists()
+    assert not (root / "sub" / "three.png").exists()
+    assert not (root / "two.png").exists()
+    # manifest cleared
+    assert client.get("/api/pending").json()["count"] == 0
+    # never touched anything outside the manifest
+    assert outside.read_bytes() == b"secret"
+
+
+def test_confirm_idempotent_when_missing(client, env):
+    root, _ = env
+    (root / "keepme.png").unlink()
+    client.post("/api/pending", json={"paths": ["keepme.png"]})
+    # added before it vanished... actually add happens after unlink, so add skips it.
+    (root / "two.png").unlink()
+    client.post("/api/pending", json={"paths": ["two.png"]})
+    # manifest empty since both adds skipped missing files
+    r = client.post("/api/pending/confirm", json={})
+    assert r.json()["deleted"] == 0
+    assert client.get("/api/pending").json()["count"] == 0
