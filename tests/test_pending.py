@@ -207,3 +207,26 @@ def test_dupe_pool_fallback_listing(monkeypatch, tmp_path):
     (groot / "escape.png").symlink_to(outside)
     assert client.get("/api/gallery/thumb",
                       params={"path": "escape.png"}).status_code == 400
+
+
+def test_add_and_confirm_expected_count_mismatch_409(client, env):
+    """Optimistic concurrency: optional expected_count mismatch -> 409 with
+    the current count; match or omission still works."""
+    r = client.post("/api/pending", json={"paths": ["keepme.png"]})
+    assert r.status_code == 200
+    # stale expectation -> 409
+    r = client.post("/api/pending", json={"paths": ["two.png"]},
+                    params={"expected_count": 99})
+    assert r.status_code == 409
+    assert "current count" in r.json()["detail"]
+    # correct expectation -> fine
+    r = client.post("/api/pending", json={"paths": ["two.png"]},
+                    params={"expected_count": 1})
+    assert r.status_code == 200
+    # confirm with a stale count -> 409, nothing deleted
+    r = client.post("/api/pending/confirm", json={"expected_count": 99})
+    assert r.status_code == 409
+    assert (env[0] / "keepme.png").exists()
+    # confirm with the seen count -> deletes
+    r = client.post("/api/pending/confirm", json={"expected_count": 2})
+    assert r.status_code == 200 and r.json()["deleted"] == 2

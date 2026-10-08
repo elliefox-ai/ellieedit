@@ -82,6 +82,29 @@ async def main():
                           sendBtn: document.querySelector('[data-act=res-send-pending]')?.textContent.trim()})""")
             await pg.screenshot(path=".probes/03-ladder-results.png")
 
+            # ── 2.5 (10-08l). Blend stage: mask box wired + UI renders ─────
+            # Regression: markup data-id="maskbox" vs query [data-id=mask-box]
+            # left maskBox null → renderBlend threw on .style.
+            blend_console_errors = []
+            pg.on('console', lambda m: blend_console_errors.append(m.text)
+                  if m.type == 'error' else None)
+            await pg.evaluate("() => document.querySelector('[data-act=res-blend]').click()")
+            await pg.wait_for_timeout(1500)  # images load over /mnt
+            report["blend"] = await pg.evaluate(
+                """() => ({maskBoxFound: !!document.querySelector('[data-id=maskbox]'),
+                          maskBoxVisible: (() => { const b = document.querySelector('[data-id=maskbox]'); return b && b.style.display !== 'none'; })(),
+                          saveBtn: !!document.querySelector('[data-act=save]'),
+                          useMask: !!document.querySelector('[data-id=use-mask]'),
+                          canvas: (() => { const c = document.querySelector('[data-id=canvas]'); return c && c.width > 0; })()})""")
+            assert report["blend"]["maskBoxFound"], "mask box element not found — selector regression"
+            assert report["blend"]["saveBtn"] and report["blend"]["useMask"] and report["blend"]["canvas"], \
+                f"blend UI did not render: {report['blend']}"
+            assert not blend_console_errors, f"console errors in blend stage: {blend_console_errors}"
+            await pg.screenshot(path=".probes/03b-blend-stage.png")
+            # Leave blend (do NOT save): exit back to the ladder results.
+            await pg.evaluate("() => { const b = document.querySelector('[data-act=exit]'); if (b) b.click(); }")
+            await pg.wait_for_timeout(600)
+
             # ── 3. Send M rejected → Pending Delete ────────────────────────
             await pg.evaluate("() => document.querySelector('[data-act=res-send-pending]').click()")
             await pg.wait_for_timeout(800)
