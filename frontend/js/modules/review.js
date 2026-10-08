@@ -77,6 +77,20 @@ function panelHTML() {
     .rv-rejected .rj-cell img { width: 100%; height: 100%; object-fit: contain; display: block; }
     .rv-rejected .rj-cell.runner { border-color: #5a5aff; }
     .rv-rejected .rj-label { font-size: 10px; color: #6c6c8e; flex: 0 0 auto; }
+    .rv-results { flex: 1; display: none; flex-direction: column; align-items: center;
+      justify-content: center; gap: 10px; padding: 14px; overflow-y: auto; }
+    .rv-results .rr-title { font-size: 15px; font-weight: 600; color: #e0e0f0; }
+    .rv-results .rr-summary { font-size: 12px; color: #6c6c8e; }
+    .rv-results .rr-pair { display: flex; gap: 18px; align-items: flex-end; flex-wrap: wrap;
+      justify-content: center; }
+    .rv-results .rr-fig { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+    .rv-results .rr-fig img { object-fit: contain; border-radius: 6px;
+      border: 2px solid #2a2a44; background: #1a1a2e; }
+    .rv-results .rr-fig.champ img { max-width: 46vw; max-height: 44vh; border-color: #e8b84d; }
+    .rv-results .rr-fig.runner img { max-width: 26vw; max-height: 26vh; }
+    .rv-results .rr-fig .rr-label { font-size: 12px; color: #b0b0d0; }
+    .rv-results .rr-fig.champ .rr-label { color: #e8b84d; font-weight: 600; }
+    .rv-results .rr-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
     input.rv-name-in {
       background: #22223a; color: #d4d4e0; border: 1px solid #4a4a6c;
       border-radius: 4px; padding: 4px 8px; font-size: 12px; width: 180px;
@@ -111,6 +125,25 @@ function panelHTML() {
           <span class="tag" data-id="challenger-tag">Challenger</span>
           <img data-id="img-b" alt="">
           <button class="ee-btn primary pick" data-act="keep-challenger">Keep Challenger</button>
+        </div>
+      </div>
+      <div class="rv-results" data-id="results">
+        <div class="rr-title">Round complete</div>
+        <div class="rr-pair">
+          <div class="rr-fig champ">
+            <img data-id="res-champ-img" alt="">
+            <div class="rr-label" data-id="res-champ-label"></div>
+          </div>
+          <div class="rr-fig runner">
+            <img data-id="res-runner-img" alt="">
+            <div class="rr-label" data-id="res-runner-label"></div>
+          </div>
+        </div>
+        <div class="rr-summary" data-id="res-summary"></div>
+        <div class="rr-actions">
+          <button class="ee-btn primary" data-act="res-blend">Blend these two</button>
+          <button class="ee-btn" data-act="res-keep-exit">Keep Champion &amp; exit</button>
+          <button class="ee-btn" data-act="res-redo">Redo round</button>
         </div>
       </div>
       <div class="rv-rejected" data-id="rejected">
@@ -157,6 +190,12 @@ export class Review {
       challengerTag: panel.querySelector('[data-id="challenger-tag"]'),
       rejected: panel.querySelector('[data-id="rejected"]'),
       rejectedLabel: panel.querySelector('[data-id="rejected-label"]'),
+      results: panel.querySelector('[data-id="results"]'),
+      resChampImg: panel.querySelector('[data-id="res-champ-img"]'),
+      resRunnerImg: panel.querySelector('[data-id="res-runner-img"]'),
+      resChampLabel: panel.querySelector('[data-id="res-champ-label"]'),
+      resRunnerLabel: panel.querySelector('[data-id="res-runner-label"]'),
+      resSummary: panel.querySelector('[data-id="res-summary"]'),
     };
     this.items = [];
     this.selected = new Map(); // path -> item
@@ -245,6 +284,7 @@ export class Review {
     const name = document.createElement('div');
     name.className = 'name'; name.textContent = item.name;
     cell.append(img, check, name);
+    cell.dataset.path = item.path;
     cell.addEventListener('click', () => {
       if (this.selected.has(item.path)) {
         this.selected.delete(item.path);
@@ -275,13 +315,23 @@ export class Review {
   async startReview() {
     this.ladderSel = [...this.selected.values()];
     this.ladder = new ChampionLadder(this.ladderSel);
+    this.ladderStartedAt = Date.now();
     this.showFull('Compare');
+    this.showPair();
+  }
+
+  // Restart the ladder over the same selection (results-view Redo round).
+  redoRound() {
+    if (!this.ladderSel || this.ladderSel.length < 2) return;
+    this.ladder = new ChampionLadder(this.ladderSel);
+    this.ladderStartedAt = Date.now();
     this.showPair();
   }
 
   async showPair() {
     const l = this.ladder;
     if (!l) return;
+    this.el.results.style.display = 'none';
     if (l.done) { this.finishReview(); return; }
     this.el.phaseLabel.textContent =
       `Challenger ${l.k} of ${l.total - 1} — ${l.challenger.name}`;
@@ -331,10 +381,40 @@ export class Review {
     const l = this.ladder;
     this.renderRejected();
     this.el.phaseLabel.textContent =
-      `Done — champion: ${l.champion.name}` +
-      (l.runnerUp ? ` · runner-up: ${l.runnerUp.name}` : '');
-    this.el.compare.style.display = 'none';
+      `Round complete — champion: ${l.champion.name}` +
+      (l.runnerUp ? ` · blend partner: ${l.runnerUp.name}` : '');
+    const secs = Math.round((Date.now() - (this.ladderStartedAt || Date.now())) / 1000);
+    this.el.resChampImg.src = this.fileUrl(l.champion.path);
+    this.el.resChampLabel.textContent = `Champion — ${l.champion.name}`;
+    this.el.resRunnerImg.src = l.runnerUp ? this.fileUrl(l.runnerUp.path) : '';
+    this.el.resRunnerLabel.textContent = l.runnerUp ? `Blend partner — ${l.runnerUp.name}` : 'No blend partner';
+    this.el.resSummary.textContent =
+      `${l.total} images compared · ${l.rejected.length} rejected · done in ${l.rejected.length} decisions`;
+    this.el.results.style.display = 'flex';
+    this.el.compare.style.display = 'flex';
     this.el.stage.style.display = 'none';
+  }
+
+  // Return to the grid with the champion highlighted so the operator sees
+  // what the round decided.
+  keepChampionExit() {
+    const champ = this.ladder && this.ladder.champion;
+    this.exitFull();
+    if (champ) this.highlightGrid(champ, `Champion kept: ${champ.name}`);
+  }
+
+  // Re-select/highlight a cell in the grid (champion or saved blend result).
+  highlightGrid(item, msg) {
+    if (!item) return;
+    for (const c of this.el.grid.children) {
+      const on = c.dataset.path === item.path;
+      c.classList.toggle('sel', on);
+      if (on) c.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+    this.selected.clear();
+    this.selected.set(item.path, item);
+    this.updateButtons();
+    if (msg) this.toast(msg);
   }
 
   // ---- blend -------------------------------------------------------------
@@ -528,7 +608,12 @@ export class Review {
         const j = await r.json();
         this.toast(`Saved ${j.saved} — refresh Gallery to see it`);
       }
+      this.el.full.style.display = 'none';
+      const savedName = name;
+      const champ = this.ladder && this.ladder.champion;
+      const msg = `Saved ${savedName}` + (champ ? ` — champion was ${champ.name}` : '');
       this.exitFull();
+      this.highlightGrid(champ, msg);
     } catch (err) {
       this.toast('Save failed: ' + err.message, true);
     }
@@ -547,6 +632,7 @@ export class Review {
   // ---- full-screen plumbing ----------------------------------------------
   showFull(mode) {
     this.el.full.style.display = 'flex';
+    this.el.results.style.display = 'none';
     this.el.compare.style.display = mode === 'Compare' ? 'flex' : 'none';
     this.el.stage.style.display = mode === 'Blend' ? 'flex' : 'none';
   }
@@ -561,6 +647,9 @@ export class Review {
     act('exit').addEventListener('click', () => this.exitFull());
     act('keep-champion').addEventListener('click', () => this.pick('a'));
     act('keep-challenger').addEventListener('click', () => this.pick('b'));
+    act('res-blend').addEventListener('click', () => this.startBlend());
+    act('res-keep-exit').addEventListener('click', () => this.keepChampionExit());
+    act('res-redo').addEventListener('click', () => this.redoRound());
     act('mode-compare').addEventListener('click', () => {
       if (this.ladder) { this.showPair(); return; }
       this.toast('Select images and start a Review first', true);

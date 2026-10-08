@@ -43,6 +43,21 @@ const imgs = (names) => names.map(n => ({ name: n, path: 'x/' + n }));
   assert.deepEqual(l.rejected.map(r => r.item.name), ['a', 'c']);
 }
 
+// End-of-round state is complete enough for the results view: champion,
+// runner-up, and rejected history are all populated.
+{
+  const l = new ChampionLadder(imgs(['a', 'b', 'c']));
+  l.keepChampion();
+  l.keepChallenger();
+  assert.ok(l.done);
+  assert.ok(l.champion);
+  assert.equal(l.champion.name, 'c');
+  assert.ok(l.runnerUp);
+  assert.equal(l.runnerUp.name, 'a'); // displaced champion becomes the partner
+  assert.equal(l.rejected.length, l.total - 1); // one decision per challenger
+  assert.equal(l.challenger, null);
+}
+
 // Operator can swap the runner-up to any rejected image for Blend.
 {
   const l = new ChampionLadder(imgs(['a', 'b', 'c']));
