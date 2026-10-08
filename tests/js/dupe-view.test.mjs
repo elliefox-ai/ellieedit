@@ -1,44 +1,40 @@
-// View-mode classification (2026-10-08j) — pure logic tests.
+// Zoom view-filter logic (2026-10-08j, re-scoped) — pure tests.
 // Run: node --test tests/js/*.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { familyVerdictState, inDeletionManifest } from
+import { zoomModeMatches, zoomMembers } from
   '../../frontend/js/modules/dupe-view.js';
 
-test('empty/missing verdict tally -> neither view', () => {
-  assert.deepEqual(familyVerdictState(null), { accepted: false, rejected: false });
-  assert.deepEqual(familyVerdictState({}), { accepted: false, rejected: false });
-  assert.deepEqual(familyVerdictState({ deferred: 3 }),
-    { accepted: false, rejected: false });
+const members = [{ path: 'a' }, { path: 'b' }, { path: 'c' }, { path: 'd' }];
+const verdicts = { a: 'kept', b: 'rejected', c: 'melded' }; // d undeclared
+
+test('all mode visits every member incl. undeclared', () => {
+  assert.deepEqual(zoomMembers(members, verdicts, 'all').map(m => m.path),
+    ['a', 'b', 'c', 'd']);
 });
 
-test('kept / melded -> accepted', () => {
-  assert.equal(familyVerdictState({ kept: 1 }).accepted, true);
-  assert.equal(familyVerdictState({ melded: 2 }).accepted, true);
-  assert.equal(familyVerdictState({ kept: 1 }).rejected, false);
+test('accepted mode = kept + melded only', () => {
+  assert.deepEqual(zoomMembers(members, verdicts, 'accepted').map(m => m.path),
+    ['a', 'c']);
 });
 
-test('rejected -> rejected view', () => {
-  const vs = familyVerdictState({ rejected: 2 });
-  assert.equal(vs.rejected, true);
-  assert.equal(vs.accepted, false);
+test('rejected mode = rejected only', () => {
+  assert.deepEqual(zoomMembers(members, verdicts, 'rejected').map(m => m.path),
+    ['b']);
 });
 
-test('split verdict (kept AND rejected) lands in BOTH views', () => {
-  const vs = familyVerdictState({ kept: 1, rejected: 3 });
-  assert.equal(vs.accepted, true);
-  assert.equal(vs.rejected, true);
+test('undeclared members never leak into accepted/rejected', () => {
+  assert.equal(zoomMembers(members, {}, 'accepted').length, 0);
+  assert.equal(zoomMembers(members, {}, 'rejected').length, 0);
 });
 
-test('deferred alone never counts as accepted', () => {
-  const vs = familyVerdictState({ deferred: 4, melded: 0 });
-  assert.equal(vs.accepted, false);
-  assert.equal(vs.rejected, false);
+test('null/undefined verdict treated as undeclared', () => {
+  assert.equal(zoomModeMatches('accepted', null), false);
+  assert.equal(zoomModeMatches('rejected', undefined), false);
+  assert.equal(zoomModeMatches('all', null), true);
 });
 
-test('inDeletionManifest: any pending reject > 0 dims', () => {
-  assert.equal(inDeletionManifest({ pending: 0 }), false);
-  assert.equal(inDeletionManifest({ pending: 2 }), true);
-  assert.equal(inDeletionManifest(undefined), false);
-  assert.equal(inDeletionManifest({}), false);
+test('empty members -> empty set in every mode (zoom empty hint)', () => {
+  for (const mode of ['all', 'accepted', 'rejected'])
+    assert.deepEqual(zoomMembers([], verdicts, mode), []);
 });

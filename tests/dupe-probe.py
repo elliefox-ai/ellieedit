@@ -62,6 +62,7 @@ async def main():
             ctx = await b.new_context(viewport=VIEWPORT, has_touch=True)
             pg = await ctx.new_page()
             await pg.goto(BASE + "/", wait_until="networkidle")
+            await pg.evaluate("() => { try { localStorage.eeDupeDebug = '1'; } catch (_) {} }")
             await pg.wait_for_timeout(1500)
             console_errors = []
             pg.on("console", lambda m: console_errors.append(m.text)
@@ -239,7 +240,7 @@ async def main():
                 f"zoom image failed to load: {zoom0}"
             assert "/api/dupe/file?" in zoom0["src"], \
                 f"zoom served {zoom0['src']} — must be full-size /api/dupe/file"
-            assert zoom0["pos"] and zoom0["pos"].startswith("1 / "), \
+            assert zoom0["pos"] and zoom0["pos"].startswith("All 1 / "), \
                 f"position label wrong: {zoom0}"
             assert zoom0["back"] and zoom0["pick"] and zoom0["rej"] and zoom0["nav"], \
                 f"zoom controls missing or under 44px: {zoom0}"
@@ -258,9 +259,9 @@ async def main():
               pos: document.querySelector('#ss-zoom-pos').textContent,
             })""")
             report["zoom_cycle"] = {"next": zoom1, "prev": zoom2}
-            assert zoom1["src"] != zoom0["src"] and zoom1["pos"].startswith("2 / "), \
+            assert zoom1["src"] != zoom0["src"] and zoom1["pos"].startswith("All 2 / "), \
                 f"zoom next-cycle broken: {zoom1}"
-            assert zoom2["src"] == zoom0["src"] and zoom2["pos"].startswith("1 / ") if cells > 1 else True, \
+            assert zoom2["src"] == zoom0["src"] and zoom2["pos"].startswith("All 1 / ") if cells > 1 else True, \
                 f"zoom prev-cycle broken: {zoom2}"
             # swipe-left gesture also cycles (pointer events, no scroll fight)
             await pg.evaluate("""() => {
@@ -277,7 +278,7 @@ async def main():
             swipe_pos = await pg.evaluate(
                 "() => document.querySelector('#ss-zoom-pos').textContent")
             report["zoom_swipe"] = swipe_pos
-            assert swipe_pos.startswith("2 / "), f"swipe cycle broken: {swipe_pos}"
+            assert swipe_pos.startswith("All 2 / "), f"swipe cycle broken: {swipe_pos}"
             # pick IN zoom — advance to an unhandled member, then pick in place
             for _ in range(list_len_placeholder := cells):
                 btn_txt = await pg.evaluate(
@@ -644,12 +645,12 @@ async def main():
                     await pg.keyboard.press("Enter")
                     await pg.wait_for_timeout(2000)
                     zpos = await pg.inner_text("#ss-zoom-pos")
-                    assert zpos.startswith("2 / "), \
+                    assert zpos.startswith("All 2 / "), \
                         f"Enter did not zoom into focused cell: {zpos}"
                     await pg.keyboard.press("ArrowRight")
                     await pg.wait_for_timeout(500)
                     zpos2 = await pg.inner_text("#ss-zoom-pos")
-                    assert zpos2.startswith("3 / "), \
+                    assert zpos2.startswith("All 3 / "), \
                         f"arrow did not cycle zoom: {zpos2}"
                     await pg.keyboard.press("f")
                     await pg.wait_for_timeout(400)
@@ -845,114 +846,160 @@ async def main():
 
             print(json.dumps(report, indent=1))
 
-            # ── 11. VIEW MODES: All / Accepted / Rejected (2026-10-08j) ──
-            # Seeds three families via the verdict API (restored byte-for-byte
-            # in the finally): split (kept+rejected), accepted-only (kept),
-            # and rejected-only. C goes onto the pending manifest via
-            # send-pending so the DELETION dim renders. Asserts: filtered
-            # counts per view, Ladder (stack-spread detail) entry from the
-            # Accepted view, dimmed DELETION card visible in Rejected.
-            seed_ids = [f["id"] for f in await pg.evaluate("""async () => {
-              const d = await fetch('/api/dupe/families?state=unresolved')
-                .then(r => r.json());
-              return d.items.slice(0, 3).map(it => ({id: it.id}));
-            }""")]
-            assert len(seed_ids) == 3, "need 3 unresolved families to seed views"
-            seeds = []
-            for sid in seed_ids:
-                det = await pg.evaluate(
-                    f"""async () => fetch('/api/dupe/families/{sid}')
-                         .then(r => r.json())""")
-                mems = [m["path"] for m in det["members"]]
-                assert len(mems) >= 2, f"{sid}: need >=2 members"
-                seeds.append({"id": sid, "mems": mems})
-            a, bb, c = seeds
-            await pg.evaluate(f"""async () => {{
-              const post = (fid, body) => fetch(`/api/dupe/families/${{fid}}/verdict`,
-                {{method:'POST', headers:{{'Content-Type':'application/json'}},
-                  body: JSON.stringify(body)}}).then(r => r.json());
-              await post('{a["id"]}', {{members: {{'{a["mems"][0]}': 'kept',
-                '{a["mems"][1]}': 'rejected'}}, note: 'probe view-mode seed'}});
-              await post('{bb["id"]}', {{members: {{'{bb["mems"][0]}': 'kept'}},
-                note: 'probe view-mode seed'}});
-              await post('{c["id"]}', {{members: Object.fromEntries(
-                {json.dumps(c["mems"])}.map(p => [p, 'rejected'])),
-                note: 'probe view-mode seed'}});
-              await fetch('/api/dupe/families/{c["id"]}/send-pending',
-                {{method:'POST'}});
-            }}""")
+            # ── 11. ZOOM VIEW FILTER: All / Accepted / Rejected (2026-10-08j,
+            # re-scoped to the zoom chrome) ─────────────────────────────
+            # The filter is a DRAFT-time tool: zoom lives in the spread
+            # (uncommitted) view, so the probe builds a draft — pick the
+            # champion, reject the next — and asserts the visited member
+            # set per mode. No ledger writes: teardown never touches them.
+            seed = None
+            items = json.loads(urllib.request.urlopen(
+                BASE + "/api/dupe/families?state=unresolved").read())["items"]
+            for it in items:
+                if it["size"] < 3:
+                    continue
+                det = json.loads(urllib.request.urlopen(
+                    BASE + f"/api/dupe/families/{it['id']}").read())
+                # need a family with NO verdict history at all: an
+                # all-deferred entry would pre-fill every member's verdict
+                # and silently no-op the draft pick/reject below
+                if not (det.get("verdict") or {}):
+                    seed = {"id": it["id"], "n": it["size"]}
+                    break
+            assert seed, "no verdict-free unresolved family with >=3 members"
+            sid, nmems = seed["id"], seed["n"]
+            # open the family detail from the browser grid
+            await pg.keyboard.press("Escape")
+            await pg.wait_for_timeout(1200)
+            await pg.evaluate("""() => {
+              const list = document.querySelector('#fam-list');
+              if (getComputedStyle(list).display === 'none')
+                document.querySelector('#dupe-back').click();
+            }""")
+            await pg.wait_for_timeout(1500)
+            await pg.evaluate("""() => [...document.querySelectorAll('.dupe-top .pill')]
+              .find(p => p.dataset.f === 'all').click()""")
+            await pg.wait_for_timeout(3000)
+            await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
+              .find(c => c.textContent.includes('{sid}')).click()""")
+            await pg.wait_for_timeout(3000)
+            detail_open = await pg.evaluate(
+                "() => document.querySelector('#dupe-detail').classList.contains('open')")
+            assert detail_open, "seeded family detail did not open"
+            rep = {}
 
-            async def view_cards(v):
+            async def zoom_state():
+                return await pg.evaluate("""() => {
+                  const z = document.querySelector('#ss-zoom');
+                  if (!z) return {zoom: false};
+                  return {
+                    zoom: true,
+                    label: document.querySelector('#ss-zoom-pos').textContent,
+                    dots: [...z.querySelectorAll('.dots .ss-dot')].length,
+                    empty: (z.querySelector('.zoom-empty-hint')||{}).textContent || null,
+                    pick_disabled: document.querySelector('#ss-zoom-pick').disabled,
+                  };
+                }""")
+
+            async def zoom_set_mode(mode):
                 await pg.evaluate(
                     f"""() => document.querySelector(
-                      '#dupe-viewseg .pill[data-v="{v}"]').click()""")
-                await pg.wait_for_timeout(4000)  # /mnt thumbs are slow
-                return await pg.evaluate("""() => ({
-                  cards: [...document.querySelectorAll('.fam-card:not(.skel)')]
-                    .filter(c => c.getBoundingClientRect().height > 0),
-                  hint: (document.querySelector('.dupe-empty')||{}).textContent || null,
-                })""")
+                      '#ss-zoom .zoom-mode-btn[data-zm="{mode}"]').click()""")
+                await pg.wait_for_timeout(500)
+                return await zoom_state()
 
-            # Rejected view: split A + rejected-only C visible, B absent;
-            # C dimmed with the DELETION badge (still rendered — reversible).
-            rej = await view_cards("rejected")
-            ids_r = [c_.textContent for c_ in rej["cards"]]
-            assert a["id"] in ids_r and c["id"] in ids_r \
-                and bb["id"] not in ids_r, f"rejected view wrong: {ids_r}"
-            dim = await pg.evaluate("""() => {{
-              const card = [...document.querySelectorAll('.fam-card:not(.skel)')]
-                .find(x => x.textContent.includes('{c["id"]}'));
-              return {{
-                dim: card.classList.contains('in-manifest'),
-                badge: !!card.querySelector('.verdict-tag.deletion'),
-                opacity: getComputedStyle(card).opacity,
-              }};
-            }}""")
-            assert dim["dim"] and dim["badge"] and float(dim["opacity"]) < 0.9, \
-                f"DELETION dim missing on {c['id']}: {dim}"
-            report["rejected_view"] = {"ids": ids_r, "dim": dim}
-            await pg.screenshot(path=".probes/ss-20-rejected-dimmed.png")
+            # EMPTY-STATE first: enter zoom BEFORE any draft verdict — the
+            # Accepted set is empty and must show the inline hint.
+            await pg.evaluate("() => document.querySelector('#ss-survey-btn').click()")
+            await pg.wait_for_timeout(2500)
+            await pg.evaluate(
+                "() => document.querySelector('#ss-survey .ss-cell').click()")
+            await pg.wait_for_timeout(1500)
+            z0 = await zoom_state()
+            assert z0["zoom"], "zoom did not open from survey"
+            empty = await zoom_set_mode("accepted")
+            assert empty["dots"] == 0 and empty["empty"] \
+                and "No accepted members" in empty["empty"] \
+                and empty["pick_disabled"], \
+                f"zoom Accepted empty state broken: {empty}"
+            rep["zoom_empty_accepted"] = empty
+            await pg.screenshot(path=".probes/ss-21-zoom-empty-accepted.png")
 
-            # Accepted view: A + B, C absent; DELETION-empty here.
-            acc = await view_cards("accepted")
-            ids_a = [c_.textContent for c_ in acc["cards"]]
-            assert a["id"] in ids_a and bb["id"] in ids_a \
-                and c["id"] not in ids_a, f"accepted view wrong: {ids_a}"
-            report["accepted_view"] = ids_a
-            await pg.screenshot(path=".probes/ss-19-accepted-view.png")
-
-            # Ladder entry works from Accepted view: open the accepted
-            # family's stack-spread (champion + picks ladder), assert it,
-            # then step back to families.
-            await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card:not(.skel)')]
-              .find(x => x.textContent.includes('{a["id"]}')).click()""")
-            await pg.wait_for_timeout(3000)
-            spread_ok = await pg.evaluate("""() => ({
-              open: document.querySelector('#dupe-detail').classList.contains('open'),
-              champion: !!document.querySelector('.ss-champ img'),
-              draft: !!document.querySelector('.ss-badge.draft'),
-            })""")
-            assert spread_ok["open"] and spread_ok["champion"] and spread_ok["draft"], \
-                f"ladder entry from Accepted view broken: {spread_ok}"
-            report["ladder_from_accepted"] = spread_ok
-            await pg.evaluate("() => document.querySelector('#dupe-back').click()")
+            # build the draft: back to spread (Esc zoom→survey, Esc
+            # survey→spread), pick the champion, reject the next champion.
+            # Nothing persists (no Commit).
+            await pg.keyboard.press("Escape")
+            await pg.wait_for_timeout(1200)
+            await pg.keyboard.press("Escape")
+            await pg.wait_for_timeout(1500)
+            spread_back = await pg.evaluate(
+                "() => ({spread: !!document.querySelector('.ss-champ'),"
+                " survey: !!document.querySelector('#ss-survey'),"
+                " zoom: !!document.querySelector('#ss-zoom')})")
+            assert spread_back["spread"] and not spread_back["zoom"] \
+                and not spread_back["survey"], \
+                f"Esc did not step back to the spread: {spread_back}"
+            # keyboard path (proven at spread level in section 6c):
+            # 'a' picks the champion, 'f' rejects the next one. Blur first —
+            # a focused #dupe-note (section 7) makes onDupeKey early-return.
+            await pg.evaluate("() => document.activeElement && document.activeElement.blur()")
+            await pg.wait_for_timeout(200)
+            await pg.keyboard.press("a")
+            await pg.wait_for_timeout(600)
+            await pg.keyboard.press("f")
+            await pg.wait_for_timeout(600)
+            draft_n = await pg.evaluate(
+                "() => ({kept: !!document.querySelector('.ss-pick-chip'),"
+                " dead: document.querySelectorAll('.ss-dead').length,"
+                " detail_open: document.querySelector('#dupe-detail').classList.contains('open'),"
+                " active_panel: document.querySelector('.module-panel.active')?.dataset?.name,"
+                " detail_children: [...document.querySelector('#dupe-detail').children].map(x => x.id || x.className),"
+                " panel_active: [...document.querySelectorAll('.module-panel')].filter(x => x.classList.contains('active')).map(x => (x.querySelector('.dupe-wrap') ? 'dupe' : 'other')),"
+                " champ: (document.querySelector('.ss-champ')||{}).outerHTML?.slice(0,120),"
+                " trace: document.querySelector('#dupe-status').textContent})")
+            assert draft_n["kept"] and draft_n["dead"] >= 1, \
+                f"draft pick+reject failed: {draft_n}"
+            # re-enter zoom via survey with the draft live
+            await pg.evaluate("() => document.querySelector('#ss-survey-btn').click()")
+            await pg.wait_for_timeout(2500)
+            await pg.evaluate(
+                "() => document.querySelector('#ss-survey .ss-cell').click()")
             await pg.wait_for_timeout(1500)
 
-            # All view: every family back; badge counts render on the pills.
-            allv = await view_cards("all")
-            ids_all = [c_.textContent for c_ in allv["cards"]]
-            assert all(s["id"] in ids_all for s in seeds), \
-                f"all view missing seeded families: {ids_all}"
-            seg_txt = await pg.evaluate(
-                "() => document.querySelector('#dupe-viewseg').textContent")
-            assert "Accepted (" in seg_txt and "Rejected (" in seg_txt, \
-                f"badge counts missing on view pills: {seg_txt}"
-            report["all_view"] = {"has_seeds": True, "seg": seg_txt}
-            await pg.screenshot(path=".probes/ss-18-view-toggle.png")
-            # restore the default lens for later sections/readers
-            await pg.evaluate(
-                "() => document.querySelector('#dupe-viewseg .pill[data-v=\"all\"]').click()")
+            # All (default on a fresh open): every member of the family
+            allv = await zoom_set_mode("all")
+            assert allv["dots"] == nmems and allv["empty"] is None \
+                and allv["label"].startswith("All 1 / "), \
+                f"zoom All wrong: {allv} vs {nmems} members"
+            rep["zoom_all"] = allv
+            await pg.screenshot(path=".probes/ss-18-zoom-all.png")
+
+            # Accepted: exactly the draft pick
+            acc = await zoom_set_mode("accepted")
+            assert acc["dots"] == 1 and acc["label"].startswith("Accepted 1 / 1") \
+                and acc["empty"] is None and not acc["pick_disabled"], \
+                f"zoom Accepted wrong: {acc}"
+            rep["zoom_accepted"] = acc
+            await pg.screenshot(path=".probes/ss-19-zoom-accepted.png")
+
+            # Rejected: exactly the draft reject
+            rej = await zoom_set_mode("rejected")
+            assert rej["dots"] == 1 and rej["label"].startswith("Rejected 1 / 1"), \
+                f"zoom Rejected wrong: {rej}"
+            rep["zoom_rejected"] = rej
+            await pg.screenshot(path=".probes/ss-20-zoom-rejected.png")
+
+            # Arrow cycling stays inside the filtered set: next wraps on the
+            # single-member set (position label unchanged).
+            await pg.evaluate("() => document.querySelector('#ss-zoom .ss-nav.next').click()")
+            await pg.wait_for_timeout(400)
+            wrap = (await zoom_state())["label"]
+            assert wrap.startswith("Rejected 1 / 1"), \
+                f"cycle left the filtered set: {wrap}"
+            rep["zoom_cycle_within_set"] = wrap
+            report["zoom_filter"] = rep
             assert not console_errors, f"console errors: {console_errors}"
+            print(json.dumps(report, indent=1))
 
             await b.close()
     finally:
