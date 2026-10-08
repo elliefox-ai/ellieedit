@@ -189,7 +189,7 @@ export class Review {
       duel: panel.querySelector('.rv-duel'),
       canvas: panel.querySelector('[data-id="canvas"]'),
       split: panel.querySelector('[data-id="split"]'),
-      maskBox: panel.querySelector('[data-id="mask-box"]'),
+      maskBox: panel.querySelector('[data-id="maskbox"]'),
       useMask: panel.querySelector('[data-id="use-mask"]'),
       saveName: panel.querySelector('[data-id="save-name"]'),
       blendHint: panel.querySelector('[data-id="blend-hint"]'),
@@ -560,7 +560,8 @@ export class Review {
           body: JSON.stringify({ filename: name, data: dataUrl, overwrite: true }),
         });
         if (!r2.ok) throw new Error((await r2.json()).detail || r2.status);
-        this.toast(`Saved ${r2.json().saved} (overwritten) — refresh Gallery to see it`);
+        const j2 = await r2.json();
+        this.toast(`Saved ${j2.saved} (overwritten) — refresh Gallery to see it`);
       } else if (!r.ok) {
         throw new Error((await r.json()).detail || r.status);
       } else {
