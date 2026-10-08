@@ -5,7 +5,7 @@
 
 // Bump on every deploy — shown in the job bar so a stale-cache client is
 // instantly visible.
-const BUILD = '2026-10-07r';
+const BUILD = '2026-10-07s';
 
 const registry = [];
 const mounted = new Map(); // name -> { panelEl }
@@ -59,6 +59,11 @@ function mountAll() {
   }
   if (registry.length) activate(registry[0].name);
 }
+
+// Cross-module tab activation (Gallery → Ladder handoff).
+window.addEventListener('ellieedit:activate', e => {
+  if (registry.some(d => d.name === e.detail?.name)) activate(e.detail.name);
+});
 
 // Import modules (self-registering) then build.
 // ?v=${BUILD} stamps every module import so served code can never be a

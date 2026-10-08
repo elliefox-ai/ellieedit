@@ -1,6 +1,9 @@
-// Review module — compare near-twin renders and merge the best of each.
-// Backend: reuses /api/gallery/list|thumb|file for browsing; POST /api/review/save
-// writes a blended PNG into the gallery root under "reviewed/".
+// Ladder module — the Champion Ladder over a Gallery selection, plus the
+// blend stage. The Ladder tab has NO browsing grid (§9): Gallery multi-select
+// → [Ladder N] launches a round here via 'ellieedit:ladder-launch'; with no
+// active round this tab shows a quiet hint. [Blend pair] in Gallery arrives
+// via 'ellieedit:blend-launch'. Blend saves are the only writes
+// (POST /api/review/save); ladder verdicts are decisions, never saves.
 // Blend is 100% client-side canvas (no server deps): either a draggable split
 // wipe (all of B right of the slider) or a rectangle mask (only that rect of B).
 
@@ -97,16 +100,20 @@ function panelHTML() {
       border-radius: 4px; padding: 4px 8px; font-size: 12px; width: 180px;
     }
     .rv-hint { font-size: 11px; color: #6c6c8e; }
+    .rv-idle {
+      flex: 1; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 8px; color: #6c6c8e;
+    }
+    .rv-idle .big { font-size: 15px; color: #8a8aaa; }
   </style>
   <div class="rv-header">
-    <h1>Review <span class="subtitle">— pick &amp; merge the best twin</span></h1>
-    <select data-id="dir-select"></select>
+    <h1>Ladder <span class="subtitle">— keep the best of N</span></h1>
     <span class="rv-status" data-id="status"></span>
-    <button class="ee-btn primary" data-act="start-review" disabled>Review <span data-id="count">0</span></button>
-    <button class="ee-btn" data-act="blend" disabled>Blend</button>
-    <button class="ee-btn" data-act="clear-sel">Clear</button>
   </div>
-  <div class="rv-grid" data-id="grid"></div>
+  <div class="rv-idle" data-id="idle">
+    <div class="big">Select images in Gallery, then Ladder N</div>
+    <div>Multi-select thumbs, tap <b>Ladder N</b>. First pick becomes Champion; every challenger gets one duel.</div>
+  </div>
 
   <div class="rv-full" data-id="full">
     <div class="bar">
@@ -145,6 +152,7 @@ function panelHTML() {
           <button class="ee-btn primary" data-act="res-blend">Blend these two</button>
           <button class="ee-btn" data-act="res-keep-exit">Keep Champion &amp; exit</button>
           <button class="ee-btn" data-act="res-redo">Redo round</button>
+          <button class="ee-btn" data-act="res-send-pending">Send rejected → Pending Delete</button>
         </div>
       </div>
       <div class="rv-rejected" data-id="rejected">
@@ -170,12 +178,8 @@ export class Review {
     panel.innerHTML = panelHTML();
     this.panel = panel;
     this.el = {
-      grid: panel.querySelector('[data-id="grid"]'),
-      dirSelect: panel.querySelector('[data-id="dir-select"]'),
       status: panel.querySelector('[data-id="status"]'),
-      count: panel.querySelector('[data-id="count"]'),
-      startBtn: panel.querySelector('[data-act="start-review"]'),
-      blendBtn: panel.querySelector('[data-act="blend"]'),
+      idle: panel.querySelector('[data-id="idle"]'),
       full: panel.querySelector('[data-id="full"]'),
       phaseLabel: panel.querySelector('[data-id="phase-label"]'),
       compare: panel.querySelector('[data-id="compare"]'),
@@ -214,98 +218,27 @@ export class Review {
         this.io.unobserve(e.target);
       }
     }, { rootMargin: '300px' });
-    this.bindBrowse();
     this.bindFull();
-    this.refreshDirs();
+    this.bindLaunchEvents();
   }
 
   fileUrl(path) { return `/api/gallery/file?path=${encodeURIComponent(path)}`; }
 
-  // ---- browse / multi-select -------------------------------------------
-  bindBrowse() {
-    this.el.startBtn.addEventListener('click', () => this.startReview());
-    this.el.blendBtn.addEventListener('click', () => this.startBlend());
-    this.panel.querySelector('[data-act="clear-sel"]').addEventListener('click', () => {
+  // ---- launch handoff from Gallery ---------------------------------------
+  bindLaunchEvents() {
+    window.addEventListener('ellieedit:ladder-launch', e => {
+      const items = e.detail.items || [];
+      if (items.length < 2) return;
+      this.startReview(items);
+    });
+    window.addEventListener('ellieedit:blend-launch', e => {
+      const items = e.detail.items || [];
+      if (items.length !== 2) return;
       this.selected.clear();
-      for (const c of this.el.grid.children) c.classList.remove('sel');
-      this.updateButtons();
+      this.selected.set(items[0].path, items[0]);
+      this.selected.set(items[1].path, items[1]);
+      this.startBlend();
     });
-  }
-
-  async refreshDirs() {
-    try {
-      const r = await fetch('/api/gallery/list');
-      const data = await r.json();
-      const sel = this.el.dirSelect;
-      sel.innerHTML = '<option value="">/ (root)</option>';
-      for (const d of data.subdirs) {
-        const o = document.createElement('option');
-        o.value = d; o.textContent = d + '/';
-        sel.appendChild(o);
-      }
-      sel.addEventListener('change', () => this.reload(sel.value));
-      this.reload('');
-    } catch (err) {
-      this.el.status.textContent = 'Backend error: ' + err.message;
-    }
-  }
-
-  async reload(dir) {
-    this.el.grid.innerHTML = '';
-    this.items = [];
-    this.selected.clear();
-    try {
-      const r = await fetch('/api/gallery/list?dir=' + encodeURIComponent(dir));
-      if (!r.ok) throw new Error(r.status);
-      const data = await r.json();
-      let cursor = data.next_cursor;
-      this.items.push(...data.items);
-      while (cursor) {
-        const r2 = await fetch(`/api/gallery/list?dir=${encodeURIComponent(dir)}&cursor=${encodeURIComponent(cursor)}`);
-        if (!r2.ok) break;
-        const d2 = await r2.json();
-        this.items.push(...d2.items);
-        cursor = d2.next_cursor;
-      }
-      for (let i = 0; i < this.items.length; i++) this.addCell(this.items[i], i);
-      this.el.status.textContent = `${this.items.length} images`;
-    } catch (err) {
-      this.el.status.textContent = 'Load failed: ' + err.message;
-    }
-    this.updateButtons();
-  }
-
-  addCell(item, idx) {
-    const cell = document.createElement('div');
-    cell.className = 'rv-cell';
-    const img = document.createElement('img');
-    img.dataset.src = `/api/gallery/thumb?path=${encodeURIComponent(item.path)}`;
-    img.alt = item.name; img.loading = 'lazy';
-    const check = document.createElement('div');
-    check.className = 'check'; check.textContent = '✓';
-    const name = document.createElement('div');
-    name.className = 'name'; name.textContent = item.name;
-    cell.append(img, check, name);
-    cell.dataset.path = item.path;
-    cell.addEventListener('click', () => {
-      if (this.selected.has(item.path)) {
-        this.selected.delete(item.path);
-        cell.classList.remove('sel');
-      } else {
-        this.selected.set(item.path, item);
-        cell.classList.add('sel');
-      }
-      this.updateButtons();
-    });
-    this.el.grid.appendChild(cell);
-    this.io.observe(cell);
-  }
-
-  updateButtons() {
-    const n = this.selected.size;
-    this.el.count.textContent = n;
-    this.el.startBtn.disabled = n < 2;
-    this.el.blendBtn.disabled = n !== 2;
   }
 
   // ---- compare loop: champion ladder -----------------------------------
@@ -314,12 +247,32 @@ export class Review {
   // Keep Challenger promotes it and discards the old champion. The last image
   // that lost to the champion stays as runner-up so Blend always has two
   // images; tapping a rejected-strip thumb swaps the Blend partner.
-  async startReview() {
-    this.ladderSel = [...this.selected.values()];
+  startReview(items) {
+    this.ladderSel = items || [...this.selected.values()];
+    this.el.idle.style.display = 'none';
     this.ladder = new ChampionLadder(this.ladderSel);
     this.ladderStartedAt = Date.now();
     this.showFull('Compare');
     this.showPair();
+  }
+
+  // Feed the rejected pile into the server-side pending-delete manifest.
+  async sendRejectedToPending() {
+    const l = this.ladder;
+    if (!l || !l.rejected.length) return;
+    const paths = l.rejected.map(r => r.item.path);
+    try {
+      await fetch('/api/pending', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths }),
+      });
+      const btn = this.panel.querySelector('[data-act="res-send-pending"]');
+      if (btn) btn.disabled = true;
+      this.toast(`${paths.length} marked for delete`);
+    } catch (err) {
+      this.toast('Send to Pending failed: ' + err.message, true);
+    }
   }
 
   // Restart the ladder over the same selection (results-view Redo round).
@@ -327,6 +280,8 @@ export class Review {
     if (!this.ladderSel || this.ladderSel.length < 2) return;
     this.ladder = new ChampionLadder(this.ladderSel);
     this.ladderStartedAt = Date.now();
+    const btn = this.panel.querySelector('[data-act="res-send-pending"]');
+    if (btn) btn.disabled = false;
     this.showPair();
   }
 
@@ -393,6 +348,11 @@ export class Review {
     this.el.resRunnerLabel.textContent = l.runnerUp ? `Blend partner — ${l.runnerUp.name}` : 'No blend partner';
     this.el.resSummary.textContent =
       `${l.total} images compared · ${l.rejected.length} rejected · done in ${l.rejected.length} decisions`;
+    const sendBtn = this.panel.querySelector('[data-act="res-send-pending"]');
+    if (sendBtn) {
+      sendBtn.disabled = !l.rejected.length;
+      sendBtn.textContent = `Send ${l.rejected.length} rejected → Pending Delete`;
+    }
     this.el.results.style.display = 'flex';
     this.el.duel.classList.add('hidden');
     this.el.compare.style.display = 'flex';
@@ -404,22 +364,11 @@ export class Review {
   keepChampionExit() {
     const champ = this.ladder && this.ladder.champion;
     this.exitFull();
-    if (champ) this.highlightGrid(champ, `Champion kept: ${champ.name}`);
+    if (champ) this.toast(`Champion: ${champ.name}`);
   }
 
-  // Re-select/highlight a cell in the grid (champion or saved blend result).
-  highlightGrid(item, msg) {
-    if (!item) return;
-    for (const c of this.el.grid.children) {
-      const on = c.dataset.path === item.path;
-      c.classList.toggle('sel', on);
-      if (on) c.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
-    this.selected.clear();
-    this.selected.set(item.path, item);
-    this.updateButtons();
-    if (msg) this.toast(msg);
-  }
+  // Verdict-only exit: no grid here to highlight — the decision is the result.
+  highlightGrid() { /* dissolved with the Ladder's browsing grid */ }
 
   // ---- blend -------------------------------------------------------------
   // Blend the ladder's champion vs runner-up (or the two grid selections if
@@ -612,12 +561,11 @@ export class Review {
         const j = await r.json();
         this.toast(`Saved ${j.saved} — refresh Gallery to see it`);
       }
-      this.el.full.style.display = 'none';
       const savedName = name;
       const champ = this.ladder && this.ladder.champion;
-      const msg = `Saved ${savedName}` + (champ ? ` — champion was ${champ.name}` : '');
+      const msg = `Saved ${savedName}` + (champ ? ` — champion: ${champ.name}` : '');
       this.exitFull();
-      this.highlightGrid(champ, msg);
+      this.toast(msg);
     } catch (err) {
       this.toast('Save failed: ' + err.message, true);
     }
@@ -644,6 +592,7 @@ export class Review {
   exitFull() {
     this.el.full.style.display = 'none';
     this.el.imgA.src = ''; this.el.imgB.src = '';
+    this.el.idle.style.display = this.ladder && this.ladder.done ? 'none' : 'flex';
   }
 
   bindFull() {
@@ -654,9 +603,10 @@ export class Review {
     act('res-blend').addEventListener('click', () => this.startBlend());
     act('res-keep-exit').addEventListener('click', () => this.keepChampionExit());
     act('res-redo').addEventListener('click', () => this.redoRound());
+    act('res-send-pending').addEventListener('click', () => this.sendRejectedToPending());
     act('mode-compare').addEventListener('click', () => {
       if (this.ladder) { this.showPair(); return; }
-      this.toast('Select images and start a Review first', true);
+      this.toast('Select images in Gallery, then Ladder N', true);
     });
     act('mode-blend').addEventListener('click', () => {
       if (this.ladder && this.ladder.done) {
@@ -681,8 +631,8 @@ export class Review {
 }
 
 registerModule({
-  name: 'review',
-  label: 'Review',
+  name: 'ladder',  // internal name stays 'review' in backend routes/files
+  label: 'Ladder',
   icon: '⚖️',
   order: 1,
   mount: (panel) => new Review(panel),
