@@ -1,13 +1,41 @@
-// Dupe module — system-found near-dupe families (plan §9.1).
+// Dupe module — system-found near-dupe families (plan §9.1) with the
+// STACK-SPREAD family-detail view (2026-10-07y).
+//
 // Verdicts, never writes: nothing here deletes. "Send rejected → Pending
 // Delete" feeds the existing Pending queue; /api/pending/confirm stays the
 // only destructive endpoint. Bottom-bar rule: destructive low, navigation top.
+//
+// STACK-SPREAD layout (touch-first, iPad PWA, no keyboard):
+//   status header  — family id, N/M, picked/rejected/unhandled, verdict dots,
+//                    DRAFT vs COMMITTED badge
+//   fan band       — small overlapping challenger cards; TAP = duel champion
+//   champion card  — BIG card, center. TAP = pick (→ strip, ordinal #N).
+//                    SWIPE DOWN (or Reject button ≥44pt) = reject → discard
+//                    row face-down. LONG-PRESS = menu (Meld / Defer remainder
+//                    / Reject remainder / full-size). ⤢ = full-size image.
+//   discard row    — face-down rejected cards; TAP = un-reject (reversible)
+//   picks strip    — bottom edge, ordered chips with ordinals; drag reorder,
+//                    TAP chip = un-pick
+//   survey / focus — pinch-out on the fan (or Survey button) → grid; tap a
+//                    grid cell → focus deck: one full-size image, swipe
+//                    prev/next, tap = pick, verdict dots.
+// NOTHING persists before Commit; commit = verdict POST + send-pending.
 import { registerModule } from '../shell.js';
 
 const api = (p, opts) => fetch(`/api/dupe${p}`, opts).then(r => {
   if (!r.ok) return r.json().then(e => Promise.reject(new Error(e.detail || r.status)));
   return r.json();
 });
+
+const fileUrl = (path) => `/api/dupe/file?path=${encodeURIComponent(path)}`;
+const thumbUrl = (path) => `/api/dupe/thumb?path=${encodeURIComponent(path)}`;
+// Only the server knows which members are jailed/missing (thumb=null there) —
+// building thumb URLs client-side produced 400 console noise on bad members.
+const setImg = (img, m) => {
+  if (m && m.thumb) { img.src = m.thumb; }
+  else { img.removeAttribute('src'); img.alt = 'unavailable';
+         img.style.background = '#191926'; }
+};
 
 registerModule({
   name: 'dupe',
@@ -39,33 +67,128 @@ registerModule({
       .verdict-tag.kept { background:#1d3a25; color:#7de08a; }
       .verdict-tag.rejected { background:#3a1d1d; color:#e87a7a; }
       .verdict-tag.melded { background:#1d2a3a; color:#7ab8e8; }
-      /* Detail */
-      .dupe-detail { display:none; flex-direction:column; height:100%; }
-      .dupe-detail.open { display:flex; }
-      .fam-list.open { display:none; }
-      .mem-row { display:flex; gap:12px; padding:10px; background:#161628;
-                 border:1px solid #2a2a44; border-radius:8px; margin-bottom:10px;
-                 align-items:center; }
-      .mem-row img { width:180px; height:180px; object-fit:contain; background:#0f0f1a;
-                     border-radius:6px; cursor:zoom-in; }
-      .mem-info { flex:1; min-width:0; font-size:12px; color:#8a8aaa; }
-      .mem-info .nm { color:#d4d4e0; word-break:break-all; }
-      .mem-actions { display:flex; flex-direction:column; gap:6px; }
-      .vbtn { min-width:84px; }
-      .vbtn.kept.on { background:#1d3a25; border-color:#2f6a42; color:#7de08a; }
-      .vbtn.rejected.on { background:#3a1d1d; border-color:#6a2f2f; color:#e87a7a; }
-      .vbtn.melded.on { background:#1d2a3a; border-color:#2f4a6a; color:#7ab8e8; }
-      .dupe-bottom { display:flex; gap:8px; padding:8px 12px; border-top:1px solid #2a2a44;
-                     background:#12121f; flex-shrink:0; flex-wrap:wrap; align-items:center; }
-      .dupe-bottom .danger { background:#3a1d1d; border-color:#6a2f2f; color:#e87a7a; }
-      .dupe-bottom .danger:hover:not(:disabled) { background:#5a2a2a; }
-      .rel-links a { color:#7ab8e8; cursor:pointer; text-decoration:underline; font-size:11px; }
-      .dupe-note { flex:1; min-width:160px; background:#0f0f1a; color:#d4d4e0;
-                   border:1px solid #2a2a44; border-radius:4px; padding:5px 8px; font-size:12px; }
-      .back { margin-right:auto; }
       .dupe-more { display:flex; justify-content:center; padding:12px; }
       .fam-card.skel { opacity:0.5; pointer-events:none; }
       .skel .fam-strip img { background:#22223a; }
+      .rel-links a { color:#7ab8e8; cursor:pointer; text-decoration:underline; font-size:11px; }
+
+      /* ── STACK-SPREAD detail ─────────────────────────────────────── */
+      .dupe-detail { display:none; flex-direction:column; height:100%;
+                     min-height:0; overflow:hidden; position:relative; }
+      .dupe-detail.open { display:flex; }
+      .ss-header { display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+                   padding:8px 12px; border-bottom:1px solid #2a2a44; flex-shrink:0;
+                   font-size:12px; color:#8a8aaa; }
+      .ss-header .fam-id { color:#d4d4e0; }
+      .ss-dots { display:flex; gap:3px; align-items:center; flex-wrap:wrap; }
+      .ss-dot { width:11px; height:11px; border-radius:50%; background:#33334d;
+                border:1px solid #44445f; }
+      .ss-dot.pick { background:#2f8a4f; border-color:#4fbf74; }
+      .ss-dot.reject { background:#8a2f2f; border-color:#bf4f4f; }
+      .ss-dot.meld { background:#2f5a8a; border-color:#4f8abf; }
+      .ss-dot.defer { background:#8a7a2f; border-color:#bfa84f; }
+      .ss-badge { border-radius:8px; padding:2px 9px; font-size:10px; font-weight:600; }
+      .ss-badge.draft { background:#3a2f1d; color:#e8c37a; }
+      .ss-badge.committed { background:#1d3a25; color:#7de08a; }
+      .ss-fan { flex:0 0 130px; min-height:0; display:flex; gap:6px; padding:8px 12px;
+                overflow-x:auto; overflow-y:auto; touch-action:pan-x pan-y; }
+      .ss-fan-card { flex:0 0 92px; width:92px; height:112px; background:#161628;
+                     border:1px solid #3a3a55; border-radius:8px; overflow:hidden;
+                     cursor:pointer; position:relative; }
+      .ss-fan-card img { width:100%; height:86px; object-fit:cover; background:#0f0f1a;
+                         display:block; pointer-events:none; }
+      .ss-fan-card .nm { font-size:9px; color:#8a8aaa; padding:2px 4px;
+                         white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .ss-fan-card.champion-shadow { display:none; } /* champion never in fan */
+      .ss-stage { flex:1; min-height:0; display:flex; align-items:center;
+                  justify-content:center; gap:16px; padding:8px 12px; }
+      .ss-champ { position:relative; height:100%; max-height:52vh; aspect-ratio:1;
+                  max-width:min(52vh, 100%); background:#0f0f1a; border:2px solid #5b4a8a;
+                  border-radius:12px; overflow:hidden; touch-action:none;
+                  cursor:grab; user-select:none; -webkit-user-select:none; }
+      .ss-champ img { width:100%; height:100%; object-fit:contain; display:block;
+                      pointer-events:none; }
+      .ss-champ .nm { position:absolute; left:0; right:0; bottom:0; font-size:10px;
+                      color:#d4d4e0; background:rgba(15,15,26,0.85); padding:4px 8px;
+                      pointer-events:none; white-space:nowrap; overflow:hidden;
+                      text-overflow:ellipsis; }
+      .ss-champ-tools { position:absolute; top:6px; right:6px; display:flex; gap:6px; }
+      .ss-tool { min-width:44px; min-height:44px; border-radius:10px; border:1px solid #4a4a6c;
+                 background:rgba(29,29,51,0.92); color:#d4d4e0; font-size:18px;
+                 cursor:pointer; touch-action:manipulation; }
+      .ss-side { display:flex; flex-direction:column; gap:10px; flex-shrink:0; }
+      .ss-side .ee-btn { min-height:44px; min-width:44px; }
+      .ss-reject { background:#3a1d1d; border-color:#6a2f2f; color:#e87a7a; font-size:15px; }
+      .ss-reject:hover:not(:disabled) { background:#5a2a2a; }
+      .ss-gesture-hint { font-size:10px; color:#5a5a7a; text-align:center; max-width:150px; }
+      .ss-discard { flex:0 0 78px; display:flex; gap:6px; padding:6px 12px;
+                    overflow-x:auto; align-items:center; flex-shrink:0;
+                    border-top:1px solid #22223a; }
+      .ss-discard .lbl { font-size:10px; color:#5a5a7a; flex-shrink:0; }
+      .ss-dead { flex:0 0 60px; width:60px; height:60px; border-radius:8px; background:#191926;
+                 border:1px solid #4a2f2f; cursor:pointer; position:relative;
+                 background-image:repeating-linear-gradient(45deg,transparent,transparent 6px,rgba(138,47,47,0.12) 6px,rgba(138,47,47,0.12) 12px); }
+      .ss-dead img { width:100%; height:100%; object-fit:cover; opacity:0.18; filter:grayscale(1); }
+      .ss-strip { flex:0 0 84px; display:flex; gap:6px; padding:8px 12px; overflow-x:auto;
+                  align-items:center; flex-shrink:0; border-top:1px solid #2a2a44;
+                  background:#12121f; touch-action:pan-x; }
+      .ss-strip .lbl { font-size:10px; color:#5a5a7a; flex-shrink:0; }
+      .ss-pick-chip { flex:0 0 64px; width:64px; height:64px; border-radius:8px; overflow:hidden;
+                      position:relative; cursor:grab; border:2px solid #2f8a4f;
+                      touch-action:none; background:#0f0f1a; }
+      .ss-pick-chip img { width:100%; height:100%; object-fit:cover; pointer-events:none; }
+      .ss-pick-chip .ord { position:absolute; top:2px; left:2px; background:#2f8a4f;
+                           color:#fff; font-size:10px; font-weight:700; border-radius:6px;
+                           padding:0 5px; pointer-events:none; }
+      .ss-meld-chip { flex:0 0 auto; height:64px; display:flex; align-items:center; gap:4px;
+                      border:2px solid #2f5a8a; border-radius:8px; padding:4px 8px;
+                      background:#101a26; cursor:pointer; }
+      .ss-meld-chip img { width:48px; height:48px; object-fit:cover; border-radius:4px; }
+      .ss-empty-note { font-size:11px; color:#5a5a7a; }
+      .ss-bottom { display:flex; gap:8px; padding:8px 12px; border-top:1px solid #2a2a44;
+                   background:#12121f; flex-shrink:0; flex-wrap:wrap; align-items:center; }
+      .ss-bottom .danger { background:#3a1d1d; border-color:#6a2f2f; color:#e87a7a; }
+      .ss-bottom .danger:hover:not(:disabled) { background:#5a2a2a; }
+      .dupe-note { flex:1; min-width:160px; background:#0f0f1a; color:#d4d4e0;
+                   border:1px solid #2a2a44; border-radius:4px; padding:5px 8px; font-size:12px; }
+      .back { margin-right:auto; }
+      .ss-menu { position:absolute; z-index:30; background:#1d1d33; border:1px solid #4a4a6c;
+                 border-radius:10px; padding:6px; display:flex; flex-direction:column;
+                 gap:4px; min-width:230px; box-shadow:0 8px 30px rgba(0,0,0,0.6); }
+      .ss-menu .ee-btn { min-height:44px; text-align:left; }
+      .ss-overlay { position:absolute; inset:0; z-index:40; background:#0c0c16;
+                    display:flex; flex-direction:column; }
+      .ss-ov-top { display:flex; gap:8px; align-items:center; padding:8px 12px;
+                   border-bottom:1px solid #2a2a44; flex-shrink:0; font-size:12px;
+                   color:#8a8aaa; flex-wrap:wrap; }
+      .ss-survey-grid { flex:1; overflow:auto; padding:10px; display:grid;
+                        grid-template-columns:repeat(auto-fill,minmax(120px,1fr));
+                        gap:8px; align-content:start; }
+      .ss-cell { background:#161628; border:2px solid #2a2a44; border-radius:8px;
+                 overflow:hidden; cursor:pointer; position:relative; }
+      .ss-cell.pick { border-color:#2f8a4f; }
+      .ss-cell.reject { border-color:#8a2f2f; }
+      .ss-cell.meld { border-color:#2f5a8a; }
+      .ss-cell img { width:100%; height:110px; object-fit:cover; background:#0f0f1a; display:block; }
+      .ss-cell .tools { position:absolute; top:4px; right:4px; }
+      .ss-cell .nm { font-size:9px; color:#8a8aaa; padding:2px 4px; white-space:nowrap;
+                     overflow:hidden; text-overflow:ellipsis; }
+      .ss-focus { flex:1; min-height:0; display:flex; align-items:center;
+                  justify-content:center; position:relative; touch-action:none; }
+      .ss-focus img { max-width:100%; max-height:100%; object-fit:contain; pointer-events:none; }
+      .ss-focus .dots { position:absolute; bottom:10px; left:50%; transform:translateX(-50%);
+                        display:flex; gap:4px; }
+      .ss-focus .dots .ss-dot { width:14px; height:14px; }
+      .ss-focus-tools { position:absolute; top:8px; right:8px; display:flex; gap:6px; }
+      .ss-nav { position:absolute; top:0; bottom:0; width:64px; display:flex; align-items:center;
+                justify-content:center; font-size:26px; color:#8a8aaa; cursor:pointer;
+                background:transparent; border:none; min-width:44px; min-height:44px; }
+      .ss-nav.prev { left:0; } .ss-nav.next { right:0; }
+      .ss-committed { flex:1; display:flex; flex-direction:column; align-items:center;
+                      justify-content:center; gap:12px; padding:20px; }
+      .ss-committed .big { font-size:16px; color:#7de08a; }
+      .ss-committed .sum { font-size:12px; color:#8a8aaa; }
+      .dupe-detail .err { color:#e87a7a; }
     </style>
     <div class="dupe-wrap">
       <div class="dupe-top">
@@ -84,8 +207,7 @@ registerModule({
       <div class="dupe-bottom" id="dupe-bottom" style="display:none">
         <button class="ee-btn back" id="dupe-back">← Back to families</button>
         <input class="dupe-note" id="dupe-note" placeholder="note (optional)">
-        <button class="ee-btn primary" id="dupe-send">Send rejected → Pending Delete</button>
-        <button class="ee-btn" id="dupe-defer">Defer family</button>
+        <button class="ee-btn danger" id="dupe-commit">Commit family</button>
       </div>
     </div>`;
 
@@ -100,14 +222,17 @@ registerModule({
       bottom: panel.querySelector('#dupe-bottom'),
       back: panel.querySelector('#dupe-back'),
       note: panel.querySelector('#dupe-note'),
-      send: panel.querySelector('#dupe-send'),
-      defer: panel.querySelector('#dupe-defer'),
+      commit: panel.querySelector('#dupe-commit'),
     };
     let filter = 'unresolved';
-    let cursor = '';        // next families page cursor
-    let exhausted = false;  // no more pages
-    let current = null;      // detail family
-    let picks = {};          // path -> verdict (draft in detail view)
+    let cursor = '';
+    let exhausted = false;
+    let current = null;        // detail family (API shape)
+    // ── draft state (nothing persists before commit) ──
+    let draft = null;          // { verdicts:{path:v}, picks:[path], melded:[a,b]|null }
+    let championIdx = 0;       // index into current.members
+    let committed = false;
+    let commitSummary = null;
 
     function job(text, cls = '') {
       jobbar.querySelectorAll('.badge.dupe').forEach(b => b.remove());
@@ -119,11 +244,11 @@ registerModule({
       }
     }
 
+    // ─────────────────────────────── family browser (unchanged, praised) ──
     el.pills.forEach(p => p.addEventListener('click', () => {
       filter = p.dataset.f;
       renderList();
     }));
-
     el.loadmore.addEventListener('click', () => renderList(cursor));
 
     function skeletons(n = 6) {
@@ -165,7 +290,7 @@ registerModule({
       for (const m of (f.members || [])) {
         if (m.thumb) {
           const img = document.createElement('img');
-          img.loading = 'lazy';   // per-card async — never blocks the grid
+          img.loading = 'lazy';
           img.src = m.thumb;
           strip.appendChild(img);
         }
@@ -192,11 +317,10 @@ registerModule({
         cursor = '';
         exhausted = false;
         el.list.innerHTML = '';
-        el.list.appendChild(skeletons());   // cards-shaped progress immediately
+        el.list.appendChild(skeletons());
       }
       // '.fam-list.open' means HIDDEN (see <style> above) — list mode shows the
-      // grid, so 'open' must be removed, never added. (2026-10-07x bugfix:
-      // inverted toggle left the card grid display:none on every browser.)
+      // grid, so 'open' must be removed, never added. (2026-10-07x bugfix.)
       el.list.classList.remove('open');
       el.more.style.display = 'none';
       job(firstPage ? 'loading families…' : 'loading more…');
@@ -216,7 +340,6 @@ registerModule({
           try {
             grid.appendChild(cardFor(f));
           } catch (cardErr) {
-            // never drop a whole batch on one bad card — render the error
             const ec = document.createElement('div');
             ec.className = 'fam-card';
             ec.style.color = '#e87a7a';
@@ -232,141 +355,652 @@ registerModule({
       } catch (e) { job(`dupe: ${e.message}`, 'err'); }
     }
 
+    // ───────────────────────────────────────── STACK-SPREAD detail view ──
+    const DRAFT_CLASSES = { pick: 'pick', rejected: 'reject', melded: 'meld', deferred: 'defer' };
+
+    function verdictOf(m) { return draft.verdicts[m.path] || null; }
+
+    function unhandled() {
+      return current.members.filter(m => !verdictOf(m));
+    }
+    function picks() { return draft.picks.map(p => current.members.find(m => m.path === p)).filter(Boolean); }
+    function rejectedMembers() { return current.members.filter(m => verdictOf(m) === 'rejected'); }
+
+    function championMember() {
+      const m = current.members[championIdx];
+      if (m && !verdictOf(m)) return m;
+      // champion handled → promote next unhandled; fall back to first member
+      const u = unhandled();
+      return u[0] || m || current.members[0];
+    }
+    function fanMembers() {
+      const champ = championMember();
+      return current.members.filter(m => m !== champ && !verdictOf(m));
+    }
+
+    function openMenu(anchorX, anchorY) {
+      closeMenu();
+      const menu = document.createElement('div');
+      menu.className = 'ss-menu';
+      menu.id = 'ss-menu';
+      const mk = (label, fn, disabled) => {
+        const b = document.createElement('button');
+        b.className = 'ee-btn';
+        b.textContent = label;
+        if (disabled) b.disabled = true;
+        b.addEventListener('click', () => { closeMenu(); fn(); });
+        return b;
+      };
+      const picksN = draft.picks.length;
+      menu.append(
+        mk(picksN === 2 ? 'Meld the 2 picks (blend entry)'
+                         : `Meld (needs exactly 2 picks — have ${picksN})`,
+           doMeld, picksN !== 2),
+        mk('Defer family (mark unhandled → deferred)', doDeferFamily, false),
+        mk('Reject family remainder', doRejectRemainder, false),
+        mk('Cancel', () => {}, false),
+      );
+      el.detail.appendChild(menu);
+      const mw = 240, mh = 220;
+      menu.style.left = Math.max(4, Math.min(anchorX - mw / 2, el.detail.clientWidth - mw - 4)) + 'px';
+      menu.style.top = Math.max(4, Math.min(anchorY - 10, el.detail.clientHeight - mh - 4)) + 'px';
+      setTimeout(() => document.addEventListener('pointerdown', menuOutside), 0);
+    }
+    function menuOutside(e) { if (!e.target.closest('#ss-menu')) closeMenu(); }
+    function closeMenu() {
+      el.detail.querySelector('#ss-menu')?.remove();
+      document.removeEventListener('pointerdown', menuOutside);
+    }
+
+    function doMeld() {
+      if (draft.picks.length !== 2) return;
+      draft.melded = [...draft.picks];
+      draft.melded.forEach(p => { draft.verdicts[p] = 'melded'; });
+      draft.picks = [];
+      renderSpread();
+    }
+    function doDeferFamily() {
+      for (const m of unhandled()) draft.verdicts[m.path] = 'deferred';
+      draft.picks = [];
+      renderSpread();
+    }
+    function doRejectRemainder() {
+      for (const m of unhandled()) draft.verdicts[m.path] = 'rejected';
+      draft.picks = [];
+      renderSpread();
+    }
+
+    function doPick(m) {
+      if (verdictOf(m)) return;
+      draft.verdicts[m.path] = 'kept';
+      draft.picks.push(m.path);
+      renderSpread();
+    }
+    function unPick(m) {
+      delete draft.verdicts[m.path];
+      draft.picks = draft.picks.filter(p => p !== m.path);
+      renderSpread();
+    }
+    function doReject(m) {
+      if (verdictOf(m)) return;
+      draft.verdicts[m.path] = 'rejected';
+      renderSpread();
+    }
+    function unReject(m) {
+      delete draft.verdicts[m.path];
+      renderSpread();
+    }
+    function duel(m) {
+      const i = current.members.indexOf(m);
+      if (i >= 0) { championIdx = i; renderSpread(); }
+    }
+
+    function openFullSize(m) {
+      const ov = document.createElement('div');
+      ov.className = 'ss-overlay';
+      ov.id = 'ss-fullview';
+      const top = document.createElement('div');
+      top.className = 'ss-ov-top';
+      const nm = document.createElement('span');
+      nm.textContent = `${m.name} — full size (${m.path})`;
+      const close = document.createElement('button');
+      close.className = 'ee-btn';
+      close.textContent = '✕ Close';
+      close.addEventListener('click', () => ov.remove());
+      const frame = document.createElement('div');
+      frame.style.cssText = 'flex:1;min-height:0;display:flex;align-items:center;justify-content:center;';
+      const img = document.createElement('img');
+      img.src = fileUrl(m.path);
+      img.alt = m.name;
+      frame.appendChild(img);
+      top.append(nm, close);
+      ov.append(top, frame);
+      el.detail.appendChild(ov);
+    }
+
+    function focusDeck(startIdx) {
+      const list = current.members;
+      let idx = Math.max(0, Math.min(startIdx, list.length - 1));
+      const ov = document.createElement('div');
+      ov.className = 'ss-overlay';
+      ov.id = 'ss-focusview';
+      const top = document.createElement('div');
+      top.className = 'ss-ov-top';
+      const info = document.createElement('span');
+      const back = document.createElement('button');
+      back.className = 'ee-btn';
+      back.textContent = '← Back to survey';
+      back.addEventListener('click', () => { ov.remove(); openSurvey(); });
+      const close = document.createElement('button');
+      close.className = 'ee-btn';
+      close.textContent = '✕ Close';
+      close.addEventListener('click', () => { ov.remove(); renderSpread(); });
+      const stage = document.createElement('div');
+      stage.className = 'ss-focus';
+      const dots = document.createElement('div');
+      dots.className = 'dots';
+      const img = document.createElement('img');
+      img.alt = 'focus';
+      const prev = document.createElement('button');
+      prev.className = 'ss-nav prev'; prev.textContent = '‹';
+      const next = document.createElement('button');
+      next.className = 'ss-nav next'; next.textContent = '›';
+      const tools = document.createElement('div');
+      tools.className = 'ss-focus-tools';
+      const pickBtn = document.createElement('button');
+      pickBtn.className = 'ee-btn';
+      pickBtn.style.minHeight = '44px';
+      function paint() {
+        const m = list[idx];
+        img.src = fileUrl(m.path);
+        info.textContent = `Focus ${idx + 1}/${list.length} · ${m.name}`;
+        const v = verdictOf(m);
+        pickBtn.textContent = v === 'kept' ? `Un-pick #${draft.picks.indexOf(m.path) + 1 || ''} ✓`
+                            : v ? `verdict: ${v} (tap deck to undo)` : 'Tap image = pick';
+        pickBtn.disabled = !!v && v !== 'kept';
+        pickBtn.onclick = () => { if (v === 'kept') unPick(m); };
+        dots.innerHTML = '';
+        list.forEach((mm, i) => {
+          const d = document.createElement('span');
+          const vv = verdictOf(mm);
+          d.className = 'ss-dot' + (vv ? ` ${DRAFT_CLASSES[vv]}` : '');
+          if (i === idx) d.style.outline = '2px solid #d4d4e0';
+          d.title = mm.name;
+          dots.appendChild(d);
+        });
+      }
+      prev.addEventListener('click', () => { idx = (idx - 1 + list.length) % list.length; paint(); });
+      next.addEventListener('click', () => { idx = (idx + 1) % list.length; paint(); });
+      // swipe prev/next, tap = pick — pointer based, no scroll fight (pan off)
+      let down = null;
+      stage.addEventListener('pointerdown', e => {
+        down = { x: e.clientX, y: e.clientY, t: Date.now(), moved: false };
+        stage.setPointerCapture(e.pointerId);
+      });
+      stage.addEventListener('pointermove', e => {
+        if (down && Math.abs(e.clientX - down.x) > 12) down.moved = true;
+      });
+      stage.addEventListener('pointerup', e => {
+        if (!down) return;
+        const dx = e.clientX - down.x, dy = e.clientY - down.y;
+        const tap = !down.moved && Date.now() - down.t < 500;
+        down = null;
+        if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+          dx < 0 ? next.click() : prev.click();
+        } else if (tap && !e.target.closest('button')) {
+          const m = list[idx];
+          verdictOf(m) ? (verdictOf(m) === 'kept' && unPick(m)) : doPick(m);
+          paint();
+        }
+      });
+      stage.append(img, prev, next, dots, tools);
+      tools.append(pickBtn);
+      top.append(info, back, close);
+      ov.append(top, stage);
+      el.detail.appendChild(ov);
+      paint();
+    }
+
+    function openSurvey() {
+      closeSurvey();
+      const ov = document.createElement('div');
+      ov.className = 'ss-overlay';
+      ov.id = 'ss-survey';
+      const top = document.createElement('div');
+      top.className = 'ss-ov-top';
+      const info = document.createElement('span');
+      info.textContent = `Survey — all ${current.members.length} members · tap a card for focus deck · ⤢ = full size`;
+      const close = document.createElement('button');
+      close.className = 'ee-btn';
+      close.textContent = '✕ Back to stack';
+      close.addEventListener('click', closeSurvey);
+      const grid = document.createElement('div');
+      grid.className = 'ss-survey-grid';
+      current.members.forEach((m, i) => {
+        const cell = document.createElement('div');
+        const v = verdictOf(m);
+        cell.className = 'ss-cell' + (v ? ` ${DRAFT_CLASSES[v]}` : '');
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        setImg(img, m);
+        const nm = document.createElement('div');
+        nm.className = 'nm';
+        nm.textContent = m.name;
+        const tools = document.createElement('div');
+        tools.className = 'tools';
+        const fs = document.createElement('button');
+        fs.className = 'ss-tool';
+        fs.textContent = '⤢';
+        fs.title = 'full size';
+        fs.addEventListener('click', e => { e.stopPropagation(); openFullSize(m); });
+        tools.appendChild(fs);
+        cell.addEventListener('click', () => focusDeck(i));
+        cell.append(img, nm, tools);
+        grid.appendChild(cell);
+      });
+      top.append(info, close);
+      ov.append(top, grid);
+      el.detail.appendChild(ov);
+    }
+    function closeSurvey() { el.detail.querySelector('#ss-survey')?.remove(); }
+
+    function toolBtn(txt, title, fn) {
+      const b = document.createElement('button');
+      b.className = 'ss-tool';
+      b.textContent = txt;
+      b.title = title;
+      b.addEventListener('click', e => { e.stopPropagation(); fn(); });
+      return b;
+    }
+
+    // Champion gestures: tap=pick, swipe-down=reject, long-press=menu,
+    // buttons for reject + full-size (pilot both reject controls).
+    function bindChampionGestures(champ, m) {
+      let press = null, lpTimer = null;
+      const clear = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+      champ.addEventListener('pointerdown', e => {
+        if (e.target.closest('button')) return;
+        press = { x: e.clientX, y: e.clientY, dy: 0, moved: false, menuFired: false };
+        try { champ.setPointerCapture(e.pointerId); } catch (_) {}
+        clear();
+        lpTimer = setTimeout(() => {
+          if (press && !press.moved) {
+            press.menuFired = true;
+            const r = champ.getBoundingClientRect();
+            openMenu(r.left + r.width / 2, r.top + 20);
+          }
+        }, 500);
+      });
+      champ.addEventListener('pointermove', e => {
+        if (!press) return;
+        const dy = e.clientY - press.y;
+        const dx = e.clientX - press.x;
+        if (Math.hypot(dx, dy) > 10) {
+          press.moved = true;
+          clear();
+        }
+        if (dy > 0) {
+          press.dy = dy;
+          champ.style.transform = `translateY(${Math.min(dy, 200)}px) rotate(${dy / 40}deg)`;
+          champ.style.opacity = String(Math.max(0.3, 1 - dy / 260));
+        }
+      });
+      const finish = (e, cancelled) => {
+        if (!press) return;
+        const { dy, moved, menuFired } = press;
+        press = null;
+        clear();
+        champ.style.transform = '';
+        champ.style.opacity = '';
+        if (cancelled || menuFired) return;
+        if (dy > 80 && moved) { doReject(m); return; }
+        if (!moved) doPick(m);
+      };
+      champ.addEventListener('pointerup', e => finish(e, false));
+      champ.addEventListener('pointercancel', e => finish(e, true));
+    }
+
+    // Picks-strip drag reorder: pointerdown on a chip → track x → live swap.
+    function bindChipDrag(chip, path) {
+      let drag = null;
+      chip.addEventListener('pointerdown', e => {
+        drag = { startX: e.clientX, dx: 0, moved: false };
+        try { chip.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+      });
+      chip.addEventListener('pointermove', e => {
+        if (!drag) return;
+        drag.dx = e.clientX - drag.startX;
+        if (Math.abs(drag.dx) > 6) drag.moved = true;
+        if (drag.moved) {
+          chip.style.transform = `translateX(${drag.dx}px)`;
+          chip.style.zIndex = '5';
+          const strip = chip.parentElement;
+          const chips = [...strip.querySelectorAll('.ss-pick-chip')]
+            .filter(c => c !== chip);
+          const target = chips.find(c => {
+            const r = c.getBoundingClientRect();
+            return e.clientX >= r.left && e.clientX <= r.right;
+          });
+          if (target) {
+            const from = draft.picks.indexOf(path);
+            const to = draft.picks.indexOf(target.dataset.path);
+            draft.picks.splice(from, 1);
+            draft.picks.splice(to, 0, path);
+            renderStripOnly();
+            // keep dragging the same chip (it was re-rendered)
+            const nue = strip.querySelector(`.ss-pick-chip[data-path="${CSS.escape(path)}"]`);
+            if (nue) { drag.startX = e.clientX; drag.dx = 0; }
+          }
+        }
+      });
+      const end = (cancelled) => {
+        if (!drag) return;
+        const tap = !drag.moved && !cancelled;
+        drag = null;
+        renderStripOnly();
+        if (tap) unPick(current.members.find(m => m.path === path));
+      };
+      chip.addEventListener('pointerup', () => end(false));
+      chip.addEventListener('pointercancel', () => end(true));
+    }
+
+    function renderStripOnly() {
+      const strip = el.detail.querySelector('#ss-strip');
+      if (!strip) return renderSpread();
+      const lbl = strip.querySelector('.lbl');
+      strip.innerHTML = '';
+      strip.appendChild(lbl);
+      const ps = picks();
+      if (draft.melded) {
+        const a = current.members.find(m => m.path === draft.melded[0]);
+        const b = current.members.find(m => m.path === draft.melded[1]);
+        if (a && b) {
+          const chip = document.createElement('div');
+          chip.className = 'ss-meld-chip';
+          chip.title = 'Melded pair — tap to undo';
+          const ia = document.createElement('img'); setImg(ia, a);
+          const ib = document.createElement('img'); setImg(ib, b);
+          const t = document.createElement('span');
+          t.textContent = 'meld';
+          t.style.cssText = 'font-size:11px;color:#7ab8e8;';
+          chip.append(ia, ib, t);
+          chip.addEventListener('click', () => {
+            draft.melded.forEach(p => delete draft.verdicts[p]);
+            draft.melded = null;
+            renderSpread();
+          });
+          strip.appendChild(chip);
+        }
+      }
+      if (!ps.length && !draft.melded) {
+        const n = document.createElement('span');
+        n.className = 'ss-empty-note';
+        n.textContent = 'tap the big card to pick it';
+        strip.appendChild(n);
+      }
+      ps.forEach((m, i) => {
+        const chip = document.createElement('div');
+        chip.className = 'ss-pick-chip';
+        chip.dataset.path = m.path;
+        chip.title = `pick #${i + 1} — drag to reorder, tap to un-pick`;
+        const img = document.createElement('img');
+        setImg(img, m);
+        const ord = document.createElement('span');
+        ord.className = 'ord';
+        ord.textContent = `#${i + 1}`;
+        chip.append(img, ord);
+        bindChipDrag(chip, m.path);
+        strip.appendChild(chip);
+      });
+    }
+
+    function renderSpread() {
+      if (!current || committed) return;
+      closeMenu();
+      const champ = championMember();
+      if (!champ) return;
+      el.detail.innerHTML = '';
+
+      // header
+      const head = document.createElement('div');
+      head.className = 'ss-header';
+      const pk = picks().length, rj = rejectedMembers().length, uh = unhandled().length;
+      const dots = current.members.map(m => {
+        const v = verdictOf(m);
+        return `<span class="ss-dot ${v ? DRAFT_CLASSES[v] : ''}" title="${m.name}${v ? ' · ' + v : ''}"></span>`;
+      }).join('');
+      head.innerHTML =
+        `<span class="fam-id">${current.id}</span>` +
+        `<span>${current.members.length} members</span>` +
+        `<span class="verdict-tag kept">${pk} picked</span>` +
+        `<span class="verdict-tag rejected">${rj} rejected</span>` +
+        `<span>${uh} unhandled</span>` +
+        `<span class="ss-dots">${dots}</span>` +
+        `<span class="ss-badge draft">DRAFT — nothing saved until Commit</span>`;
+      el.detail.appendChild(head);
+
+      // fan band
+      const fan = document.createElement('div');
+      fan.className = 'ss-fan';
+      const fm = fanMembers();
+      if (!fm.length) {
+        const n = document.createElement('span');
+        n.className = 'ss-empty-note';
+        n.textContent = current.members.length === 1
+          ? 'single member — pick or reject it below'
+          : 'no challengers left — pick or reject the champion';
+        fan.appendChild(n);
+      }
+      for (const m of fm) {
+        const c = document.createElement('div');
+        c.className = 'ss-fan-card';
+        c.title = `tap to duel the champion — ${m.name}`;
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        setImg(img, m);
+        const nm = document.createElement('div');
+        nm.className = 'nm';
+        nm.textContent = m.name;
+        c.append(img, nm);
+        c.addEventListener('click', () => duel(m));
+        fan.appendChild(c);
+      }
+      el.detail.appendChild(fan);
+
+      // stage: champion + side controls
+      const stage = document.createElement('div');
+      stage.className = 'ss-stage';
+      const big = document.createElement('div');
+      big.className = 'ss-champ';
+      const bigImg = document.createElement('img');
+      bigImg.src = thumbUrl(champ.path);
+      bigImg.alt = champ.name;
+      const tools = document.createElement('div');
+      tools.className = 'ss-champ-tools';
+      tools.append(
+        toolBtn('⤢', 'open full-size image', () => openFullSize(champ)),
+        toolBtn('☰', 'actions: meld / defer / reject remainder', (e) => {
+          const r = e.target.getBoundingClientRect();
+          openMenu(r.left, r.bottom + 6);
+        }),
+      );
+      const nmBar = document.createElement('div');
+      nmBar.className = 'nm';
+      nmBar.textContent = `${champ.name}${verdictOf(champ) ? ' · ' + verdictOf(champ) : ''}`;
+      big.append(bigImg, tools, nmBar);
+      bindChampionGestures(big, champ);
+
+      const side = document.createElement('div');
+      side.className = 'ss-side';
+      const rejBtn = document.createElement('button');
+      rejBtn.id = 'ss-reject';
+      rejBtn.className = 'ee-btn ss-reject';
+      rejBtn.textContent = '✕ Reject';
+      rejBtn.title = 'reject — or swipe the big card down';
+      rejBtn.addEventListener('click', () => doReject(champ));
+      const survBtn = document.createElement('button');
+      survBtn.id = 'ss-survey-btn';
+      survBtn.className = 'ee-btn';
+      survBtn.textContent = '▦ Survey';
+      survBtn.title = 'spread all members into a grid (or pinch out)';
+      survBtn.addEventListener('click', openSurvey);
+      const hint = document.createElement('div');
+      hint.className = 'ss-gesture-hint';
+      hint.textContent = 'tap = pick · swipe down = reject · hold = menu · pinch out = survey';
+      side.append(rejBtn, survBtn, hint);
+      stage.append(big, side);
+      el.detail.appendChild(stage);
+
+      // discard row (face-down, tap to un-reject)
+      const discard = document.createElement('div');
+      discard.className = 'ss-discard';
+      const dl = document.createElement('span');
+      dl.className = 'lbl';
+      dl.textContent = `rejected (${rejectedMembers().length}) — tap to undo`;
+      discard.appendChild(dl);
+      for (const m of rejectedMembers()) {
+        const d = document.createElement('div');
+        d.className = 'ss-dead';
+        d.title = `rejected — tap to restore: ${m.name}`;
+        const img = document.createElement('img');
+        setImg(img, m);
+        d.appendChild(img);
+        d.addEventListener('click', () => unReject(m));
+        discard.appendChild(d);
+      }
+      if (!rejectedMembers().length) {
+        const n = document.createElement('span');
+        n.className = 'ss-empty-note';
+        n.textContent = 'none yet';
+        discard.appendChild(n);
+      }
+      el.detail.appendChild(discard);
+
+      // picks strip
+      const strip = document.createElement('div');
+      strip.className = 'ss-strip';
+      strip.id = 'ss-strip';
+      const sl = document.createElement('span');
+      sl.className = 'lbl';
+      sl.textContent = `picks (${pk}) — drag to reorder · tap to un-pick`;
+      strip.appendChild(sl);
+      el.detail.appendChild(strip);
+      renderStripOnly();
+
+      // pinch-out on the fan band opens survey
+      let pinch = null;
+      fan.addEventListener('touchstart', e => {
+        if (e.touches.length === 2) {
+          const [a, b] = e.touches;
+          pinch = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+        }
+      }, { passive: true });
+      fan.addEventListener('touchmove', e => {
+        if (pinch && e.touches.length === 2) {
+          const [a, b] = e.touches;
+          const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+          if (d / pinch > 1.4) { pinch = null; openSurvey(); }
+        }
+      }, { passive: true });
+      fan.addEventListener('touchend', () => { pinch = null; }, { passive: true });
+    }
+
+    function renderCommitted(summary) {
+      el.detail.innerHTML = '';
+      const box = document.createElement('div');
+      box.className = 'ss-committed';
+      const big = document.createElement('div');
+      big.className = 'big';
+      big.textContent = '✓ Family committed';
+      const sum = document.createElement('div');
+      sum.className = 'sum';
+      sum.textContent = summary;
+      const dots = current.members.map(m => {
+        const v = draft.verdicts[m.path];
+        return `<span class="ss-dot ${v ? DRAFT_CLASSES[v] : ''}" title="${m.name}"></span>`;
+      }).join('');
+      const row = document.createElement('div');
+      row.className = 'ss-dots';
+      row.innerHTML = dots;
+      const backBtn = document.createElement('button');
+      backBtn.className = 'ee-btn primary';
+      backBtn.textContent = '← Back to families';
+      backBtn.addEventListener('click', () => renderList());
+      box.append(big, sum, row, backBtn);
+      el.detail.appendChild(box);
+    }
+
     async function renderDetail(fid) {
       job('loading family…');
       try {
         const f = await api(`/families/${fid}`);
         current = f;
-        picks = {};
-        for (const [p, v] of Object.entries(f.verdicts || {})) if (v) picks[p] = v;
+        committed = false;
+        commitSummary = null;
+        draft = { verdicts: {}, picks: [], melded: null };
+        // resolved families: pre-load existing verdicts as the committed truth
+        for (const [p, v] of Object.entries(f.verdicts || {})) {
+          if (v) draft.verdicts[p] = v;
+          if (v === 'kept') draft.picks.push(p);
+        }
         el.note.value = f.note || '';
-        const list = el.detail;
-        list.innerHTML = '';
-        const head = document.createElement('div');
-        head.className = 'fam-meta';
-        head.style.margin = '4px 0 10px';
-        head.innerHTML = `<span>${f.id}</span>` +
-          `<span>${f.members.length} members</span>` +
-          (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>'
-                                  : '<span class="tier-badge">unresolved</span>');
-        list.appendChild(head);
-
-        for (const m of f.members) {
-          const row = document.createElement('div');
-          row.className = 'mem-row';
-          const info = document.createElement('div');
-          info.className = 'mem-info';
-          info.innerHTML =
-            `<div class="nm">${m.name}</div>` +
-            `<div>${m.path}</div>` +
-            `<div>${m.size ? (m.size / 1024).toFixed(0) + ' KB' : '?'}` +
-            `${m.jailed ? ' · <b style="color:#e87a7a">jailed</b>' : ''}` +
-            `${m.exists ? '' : ' · <b style="color:#e87a7a">missing</b>'}` +
-            ` · dhash ${m.dhash || '?'}</div>`;
-          const actions = document.createElement('div');
-          actions.className = 'mem-actions';
-          for (const v of ['kept', 'rejected', 'melded']) {
-            const b = document.createElement('button');
-            b.className = `ee-btn vbtn ${v}`;
-            b.textContent = v[0].toUpperCase() + v.slice(1);
-            b.addEventListener('click', () => {
-              picks[m.path] = (picks[m.path] === v) ? undefined : v;
-              if (!picks[m.path]) delete picks[m.path];
-              syncButtons();
-            });
-            actions.appendChild(b);
-          }
-          if (m.thumb) {
-            const img = document.createElement('img');
-            img.src = m.thumb;
-            img.addEventListener('click', () => window.open(m.thumb, '_blank'));
-            row.append(img);
-          } else {
-            const ph = document.createElement('div');
-            ph.style.cssText = 'width:180px;height:180px;background:#0f0f1a;border-radius:6px;display:flex;align-items:center;justify-content:center;color:#5a5a7a;font-size:11px';
-            ph.textContent = m.jailed ? 'jailed' : 'no image';
-            row.append(ph);
-          }
-          row.append(info, actions);
-          list.appendChild(row);
+        championIdx = 0;
+        if (f.state === 'resolved') {
+          committed = true;
+          const vs = draft.verdicts;
+          const c = Object.values(vs).filter(x => x === 'kept').length;
+          const r = Object.values(vs).filter(x => x === 'rejected').length;
+          const mm = Object.values(vs).filter(x => x === 'melded').length;
+          const df = Object.values(vs).filter(x => x === 'deferred').length;
+          commitSummary =
+            `saved verdict: ${c} kept · ${r} rejected · ${mm} melded · ${df} deferred`;
         }
-
-        if ((f.related || []).length) {
-          const rel = document.createElement('div');
-          rel.className = 'rel-links';
-          rel.style.marginBottom = '10px';
-          rel.innerHTML = 'Related families: ';
-          for (const r of f.related) {
-            const a = document.createElement('a');
-            a.textContent = `${r.family} (${r.tier})`;
-            a.addEventListener('click', () => renderDetail(r.family));
-            rel.appendChild(a);
-            rel.appendChild(document.createTextNode(' '));
-          }
-          list.appendChild(rel);
-        }
-
-        function syncButtons() {
-          [...list.querySelectorAll('.mem-row')].forEach((row, i) => {
-            const m = f.members[i];
-            row.querySelectorAll('.vbtn').forEach(b => {
-              b.classList.toggle('on', picks[m.path] === b.className.match(/vbtn (kept|rejected|melded)/)[1]);
-            });
-          });
-          const n = Object.values(picks).filter(v => v === 'rejected').length;
-          el.send.textContent = n ? `Send ${n} rejected → Pending Delete` : 'Send rejected → Pending Delete';
-        }
-        syncButtons();
         el.list.classList.add('open');     // hide list (open = hidden)
         el.detail.classList.add('open');   // show detail
         el.bottom.style.display = 'flex';
         el.scroll.scrollTop = 0;
+        if (committed) renderCommitted(commitSummary);
+        else renderSpread();
         job('');
       } catch (e) { job(`dupe: ${e.message}`, 'err'); }
     }
 
-    el.back.addEventListener('click', renderList);
+    el.back.addEventListener('click', () => renderList());
 
-    async function saveVerdict(members, note) {
-      if (!current) return;
-      const r = await api(`/families/${current.id}/verdict`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ members, note }),
-      });
-      job(`verdict saved (${r.state})`, 'ok');
-      return r;
-    }
-
-    el.send.addEventListener('click', async () => {
-      if (!current) return;
-      try {
-        const picksNow = { ...picks };
-        if (Object.keys(picksNow).length) {
-          // the send only makes sense against a saved verdict — persist picks
-          await saveVerdict(picksNow, el.note.value.trim());
-        }
-        const r = await api(`/families/${current.id}/send-pending`, { method: 'POST' });
-        job(`pending: +${r.added} (${r.already_pending} already queued, ${r.missing} missing)`, 'ok');
-        window.dispatchEvent(new CustomEvent('ellieedit:pending-changed'));
-        renderList();
-      } catch (e) {
-        if (String(e.message).includes('no verdict')) {
-          job('mark at least one member Rejected first', 'err');
-        } else {
-          job(`dupe: ${e.message}`, 'err');
-        }
+    el.commit.addEventListener('click', async () => {
+      if (!current || committed) return;
+      const handled = draft.verdicts;
+      const rejects = Object.values(handled).filter(v => v === 'rejected').length;
+      const keeps = draft.picks.length;
+      const melds = draft.melded ? 2 : 0;
+      if (!Object.keys(handled).length) {
+        job('nothing to commit — pick or reject at least one member', 'err');
+        return;
       }
-    });
-
-    el.defer.addEventListener('click', async () => {
-      if (!current) return;
+      const msg = `Commit family?\n` +
+        `${keeps} pick(s) · ${melds} melded · ${rejects} rejected → Pending Delete.\n` +
+        `Rejects go to the pending manifest (still reversible there until confirm).`;
+      if (!window.confirm(msg)) return;
       try {
-        const members = Object.keys(picks).length ? picks
-          : Object.fromEntries(current.members.map(m => [m.path, 'deferred']));
-        await saveVerdict(members, el.note.value.trim());
-        renderList();
-      } catch (e) { job(`dupe: ${e.message}`, 'err'); }
+        await api(`/families/${current.id}/verdict`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ members: handled, note: el.note.value.trim() }),
+        });
+        let pendingNote = 'no rejects — ledger only';
+        if (rejects) {
+          const r = await api(`/families/${current.id}/send-pending`, { method: 'POST' });
+          pendingNote = `pending: +${r.added} (${r.already_pending} already queued, ${r.missing} missing)`;
+          window.dispatchEvent(new CustomEvent('ellieedit:pending-changed'));
+        }
+        committed = true;
+        commitSummary = `${pendingNote} · ${keeps} picked · ${melds} melded · ${rejects} rejected`;
+        renderCommitted(commitSummary);
+        job(`committed — ${pendingNote}`, 'ok');
+      } catch (e) {
+        job(`commit failed: ${e.message}`, 'err');
+      }
     });
 
     // Diagnostics: surface thrown errors and unhandled rejections into the
@@ -383,7 +1017,7 @@ registerModule({
         show('rejection', e.reason && e.reason.message || String(e.reason)));
     }
 
-    panel.addEventListener('ellieedit:dupe-sync', renderList);
+    panel.addEventListener('ellieedit:dupe-sync', () => renderList());
     window.addEventListener('ellieedit:tab-activated', e => {
       if (e.detail?.name === 'dupe') renderList();
     });
