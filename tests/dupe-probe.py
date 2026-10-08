@@ -21,6 +21,10 @@ VIEWPORT = {"width": 1024, "height": 768}
 async def main():
     manifest_backup = MANIFEST.read_bytes() if MANIFEST.exists() else None
     ledger_backup = LEDGER.read_bytes() if LEDGER.exists() else None
+    SIGNALS_LOG = Path(__file__).resolve().parents[1] / ".dupe-signals.jsonl"
+    signals_backup = SIGNALS_LOG.read_bytes() if SIGNALS_LOG.exists() else None
+    fam_file = None          # seeded family file (section 10), restored exactly
+    fam_backup = None
     probe_paths = []
     try:
         async with async_playwright() as p:
@@ -632,6 +636,186 @@ async def main():
             else:
                 report["large_family"] = "no large unresolved family in first page"
 
+            # ── 10. SIGNAL-CONFLICT SURFACING (2026-10-08d) ───────────
+            # Seed verdict history that CONTRADICTS the hash tiers (direct
+            # append-only ledger write; ledger pardoned byte-for-byte in the
+            # finally). Assert: ⚡ badge on the family card, conflict chips in
+            # the detail signals bar, suggestion ONLY on strong agreement —
+            # Apply fills the DRAFT (ledger untouched), Dismiss removes it.
+            sig_data = Path(os.environ.get(
+                "ELLIEEDIT_DUPE_DATA",
+                str(Path(os.environ.get("ELLIEEDIT_DUPE_ROOT",
+                    "/mnt/shared/_Incoming/DupeReview")) / ".dupes")))
+            fam_dir = sig_data / "families"
+            import urllib.request
+            items = json.loads(urllib.request.urlopen(
+                BASE + "/api/dupe/families?state=unresolved").read())["items"]
+            seed = None
+            for it in items:
+                if it["size"] < 2:
+                    continue
+                fp = fam_dir / f"{it['id']}.json"
+                try:
+                    fj = json.loads(fp.read_text())
+                except OSError:
+                    continue
+                strict = [e for e in fj.get("edges", [])
+                          if e.get("tier") in ("exact", "pixel-identical",
+                                               "near-identical")]
+                members = [m["path"].replace("\\", "/")
+                           for m in fj.get("members", [])]
+                em = []
+                for e in strict:
+                    for k in ("a", "b"):
+                        v = e.get(k)
+                        em.append(members[v] if isinstance(v, int)
+                                  and 0 <= v < len(members)
+                                  else v if isinstance(v, str) else None)
+                if len(em) >= 2 and None not in em[:2]:
+                    seed = {"id": it["id"], "file": fp, "json": fj,
+                            "keep": em[0]}
+                    break
+            report["signal_seed"] = seed["id"] if seed else "none found"
+            assert seed, "no unresolved family with an addressable strict edge"
+            fam_file = seed["file"]
+            fam_backup = fam_file.read_bytes()
+            entry_members = {m: "rejected" for m in
+                             [mm["path"].replace("\\", "/")
+                              for mm in seed["json"]["members"]]}
+            # PARTIAL split on purpose: keep one, reject one, leave the rest
+            # unjudged — the family stays UNRESOLVED (a full verdict would
+            # flip it to committed mode, where the signals bar is suppressed
+            # by design) while the kept↔rejected strict edge still conflicts.
+            entry_members = {seed["keep"]: "kept", em_disagree: "rejected"} \
+                if (em_disagree := next(p for p in entry_members
+                                        if p != seed["keep"])) else entry_members
+            with LEDGER.open("a") as fh:
+                fh.write(json.dumps({"ts": "2026-10-08T09:00:00-07:00",
+                                     "family": seed["id"],
+                                     "members": entry_members,
+                                     "note": "probe signal-conflict seed",
+                                     "probe": True}, ensure_ascii=False) + "\n")
+            # back to the browser grid; the seed resolves the family (any
+            # non-deferred verdict does), so switch the grid to ALL to find it
+            await pg.keyboard.press("Escape")
+            await pg.wait_for_timeout(1200)
+            await pg.evaluate("""() => {
+              const list = document.querySelector('#fam-list');
+              if (getComputedStyle(list).display === 'none')
+                document.querySelector('#dupe-back').click();
+            }""")
+            await pg.wait_for_timeout(1500)
+            await pg.evaluate("""() => [...document.querySelectorAll('.dupe-top .pill')]
+              .find(p => p.dataset.f === 'all').click()""")
+            await pg.wait_for_timeout(3000)
+            flag = await pg.evaluate("""(fid) => {
+              const card = [...document.querySelectorAll('.fam-card')]
+                .find(c => c.textContent.includes(fid));
+              if (!card) return {card: false};
+              const f = card.querySelector('.sig-flag');
+              const r = f && f.getBoundingClientRect();
+              return {card: true, flag: !!f, glyph: f && f.textContent,
+                      h: r && Math.round(r.height)};
+            }""", seed["id"])
+            report["card_conflict_flag"] = flag
+            assert flag["card"] and flag["flag"] and flag["glyph"] == "⚡" \
+                and flag["h"] > 0, f"card ⚡ badge missing/invisible: {flag}"
+            await pg.screenshot(path=".probes/ss-15-card-conflict-flag.png")
+            # detail: signals bar with history chips + explicit conflict line
+            await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
+              .find(c => c.textContent.includes('{seed['id']}')).click()""")
+            await pg.wait_for_selector("#ss-signals", timeout=20000)
+            bar = await pg.evaluate("""() => {
+              const b = document.querySelector('#ss-signals');
+              const r = b && b.getBoundingClientRect();
+              return {present: !!b, h: r && Math.round(r.height),
+                      chips: [...document.querySelectorAll('#ss-signals .sig-chip')]
+                        .map(c => c.textContent),
+                      conflicts: [...document.querySelectorAll('#ss-signals .sig-conflict')]
+                        .map(c => c.textContent)};
+            }""")
+            report["detail_signals_bar"] = bar
+            assert bar["present"] and bar["h"] > 0, f"signals bar invisible: {bar}"
+            assert len(bar["chips"]) >= 2, f"history chips missing: {bar}"
+            assert any("⚡" in c for c in bar["conflicts"]), \
+                f"conflict line missing from the signals bar: {bar}"
+            await pg.screenshot(path=".probes/ss-16-detail-conflict-chips.png")
+            # suggestion on strong agreement: strict edges only among NON-keep
+            # members, and the family back in REVIEW — an all-deferred latest
+            # entry reopens it; the suggestion comes from the decided entry.
+            all_paths = [mm["path"].replace("\\", "/")
+                         for mm in seed["json"]["members"]]
+            non_keep = [p for p in all_paths if p != seed["keep"]]
+            seed["json"]["edges"] = [{"a": non_keep[0], "b": non_keep[1],
+                                      "tier": "exact", "distance": 0}] \
+                if len(non_keep) >= 2 else []
+            with LEDGER.open("a") as fh:
+                fh.write(json.dumps({"ts": "2026-10-08T09:30:00-07:00",
+                                     "family": seed["id"],
+                                     "members": {p: "deferred"
+                                                 for p in all_paths},
+                                     "note": "probe deferral reopen",
+                                     "probe": True}, ensure_ascii=False) + "\n")
+            fam_file.write_text(json.dumps(seed["json"]))
+            await pg.evaluate("() => document.querySelector('#dupe-back').click()")
+            await pg.wait_for_timeout(1500)
+            await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
+              .find(c => c.textContent.includes('{seed['id']}')).click()""")
+            await pg.wait_for_selector("#ss-suggest", timeout=20000)
+            sug = await pg.evaluate("""() => {
+              const row = document.querySelector('#ss-suggest');
+              const r = row && row.getBoundingClientRect();
+              const ap = document.querySelector('#ss-suggest-apply');
+              const ar = ap && ap.getBoundingClientRect();
+              return {present: !!row, h: r && Math.round(r.height),
+                      label: row && row.querySelector('.lbl')?.textContent || null,
+                      apply_ok: ar && ar.height >= 40 && ar.width >= 40};
+            }""")
+            report["suggestion_row"] = sug
+            assert sug["present"] and sug["h"] > 0 \
+                and sug["label"].startswith("Signals suggest:") and sug["apply_ok"], \
+                f"suggestion row missing/invisible: {sug}"
+            ledger_before = LEDGER.read_bytes()
+            await pg.evaluate("() => document.querySelector('#ss-suggest-apply').click()")
+            await pg.wait_for_timeout(800)
+            applied = await pg.evaluate("""() => ({
+              chips: document.querySelectorAll('.ss-pick-chip').length,
+              banner: document.querySelector('.ss-committed') !== null,
+            })""")
+            ledger_after = LEDGER.read_bytes()
+            report["suggestion_applied"] = {**applied,
+                                            "ledger_untouched":
+                                                ledger_before == ledger_after}
+            assert applied["chips"] >= 1 and not applied["banner"], \
+                f"apply did not fill the draft: {applied}"
+            assert ledger_before == ledger_after, \
+                "Apply wrote to the verdict ledger — draft-only violation"
+            await pg.screenshot(path=".probes/ss-17-suggestion-applied-draft.png")
+            # Apply consumed the row (draft now carries the verdict). Re-open
+            # the detail — the suggestion re-shows for the fresh visit — and
+            # DISMISS it there.
+            await pg.evaluate("() => document.querySelector('#dupe-back').click()")
+            await pg.wait_for_timeout(1500)
+            await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
+              .find(c => c.textContent.includes('{seed['id']}')).click()""")
+            await pg.wait_for_selector("#ss-suggest", timeout=20000)
+            await pg.evaluate("() => document.querySelector('#ss-suggest-dismiss').click()")
+            await pg.wait_for_timeout(400)
+            dismissed = await pg.evaluate(
+                "() => document.querySelector('#ss-suggest') === null")
+            report["suggestion_dismissed"] = dismissed
+            assert dismissed, "dismiss did not remove the suggestion row"
+            sig_events = (SIGNALS_LOG.read_text().strip().splitlines()
+                          if SIGNALS_LOG.exists() else [])
+            kinds = [json.loads(l)["event"] for l in sig_events
+                     if json.loads(l).get("family") == seed["id"]]
+            report["signal_events"] = kinds
+            # shown re-logs per detail visit; applied and dismissed follow
+            assert kinds[-1] == "dismissed" and set(kinds) == \
+                {"shown", "applied", "dismissed"} and "applied" in kinds, \
+                f"signal event log wrong: {kinds}"
+            assert not console_errors, f"console errors: {console_errors}"
+
             print(json.dumps(report, indent=1))
             await b.close()
     finally:
@@ -651,6 +835,12 @@ async def main():
             LEDGER.unlink(missing_ok=True)
         else:
             LEDGER.write_bytes(ledger_backup)
+        if signals_backup is None:
+            SIGNALS_LOG.unlink(missing_ok=True)
+        else:
+            SIGNALS_LOG.write_bytes(signals_backup)
+        if fam_file is not None and fam_backup is not None:
+            fam_file.write_bytes(fam_backup)
 
 
 asyncio.run(main())
