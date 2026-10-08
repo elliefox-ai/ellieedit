@@ -446,6 +446,21 @@ def send_pending(fid: str):
             "count": len(m)}
 
 
+@router.get("/file")
+def file(path: str):
+    """FULL-SIZE image, same jail rules as thumb. Stack-spread thumbnails and
+    the focus deck must serve real pixels, never the thumbnail file
+    (thumb-click-to-thumbnail bug dies here)."""
+    EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+    src = jailed(path)
+    if not src.is_file() or src.suffix.lower() not in EXTS:
+        raise HTTPException(404, "not an image")
+    media = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+             "png": "image/png", "webp": "image/webp"}[src.suffix.lower()[1:]]
+    return FileResponse(src, media_type=media,
+                        headers={"Cache-Control": "public, max-age=3600"})
+
+
 @router.get("/thumb")
 def thumb(path: str):
     EXTS = {".jpg", ".jpeg", ".png", ".webp"}

@@ -183,6 +183,25 @@ def test_thumb_missing_file(env, client):
     assert client.get("/api/dupe/thumb?path=ghost.png").status_code == 404
 
 
+def test_file_serves_full_size_bytes(env, client):
+    """Stack-spread full-size viewer must serve real pixels, never the thumb."""
+    r = client.get("/api/dupe/file?path=a.png")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("image/png")
+    img = Image.open(__import__("io").BytesIO(r.content))
+    assert img.size == (32, 32)  # full size, not a thumbnail
+
+
+def test_file_jail_and_types(env, client):
+    root, secret, _ = env
+    bad = str(secret)
+    assert client.get(f"/api/dupe/file?path={bad.replace('/', '%2F')}").status_code == 400
+    assert client.get("/api/dupe/file?path=escape.png").status_code == 400
+    assert client.get("/api/dupe/file?path=ghost.png").status_code == 404
+    (root / "note.txt").write_text("nope")
+    assert client.get("/api/dupe/file?path=note.txt").status_code == 404
+
+
 # ------------------------------------------------------------------ verdicts
 
 def test_verdict_append_only_and_state_flow(env, client):
