@@ -71,7 +71,49 @@ async def main():
             report["spread"] = ss
             assert ss["header"] and ss["champion"] > 100, f"champion card broken: {ss}"
             assert ss["reject_btn"], "reject control under 40px"
+            # iPad flicker regression (2026-10-07z): the family grid MUST be
+            # display:none once the detail is open — the missing .fam-list.open
+            # rule left it visible, pushing the detail below the fold.
+            vis = await pg.evaluate("""() => {
+              const list = document.querySelector('#fam-list');
+              const detail = document.querySelector('#dupe-detail');
+              const lr = list.getBoundingClientRect();
+              const dr = detail.getBoundingClientRect();
+              return {
+                list_display: getComputedStyle(list).display,
+                list_h: Math.round(lr.height),
+                detail_top: Math.round(dr.top),
+                detail_bottom_in: dr.bottom <= innerHeight + 1,
+                back_visible: (() => { const b = document.querySelector('#dupe-back');
+                  const r = b.getBoundingClientRect(); return r.height > 0; })(),
+              };
+            }""")
+            report["detail_visibility"] = vis
+            assert vis["list_display"] == "none" and vis["list_h"] == 0, \
+                f"family grid still occupies space over the detail: {vis}"
+            assert vis["detail_bottom_in"] and vis["detail_top"] < VIEWPORT["height"], \
+                f"detail pushed out of the iPad viewport: {vis}"
+            assert vis["back_visible"], "back button missing with detail open"
+            await pg.screenshot(path=".probes/ss-02b-detail-open-viewport.png")
             await pg.screenshot(path=".probes/ss-02-champion-fan.png")
+
+            # ── 2b. Binding growth: re-open browser→detail twice; card click
+            # handlers are re-created per render, but a double-mount would
+            # double-fire renderDetail — detect via viewSeq trace deltas and
+            # by asserting only ONE detail load per tap (status not erroring).
+            for _ in range(2):
+                await pg.evaluate("() => document.querySelector('#dupe-back').click()")
+                await pg.wait_for_timeout(1200)
+                await pg.evaluate("() => document.querySelector('.fam-card').click()")
+                await pg.wait_for_timeout(2000)
+                reopen = await pg.evaluate("""() => ({
+                  detail_open: document.querySelector('#dupe-detail').classList.contains('open'),
+                  header: !!document.querySelector('.ss-header'),
+                  list_display: getComputedStyle(document.querySelector('#fam-list')).display,
+                })""")
+                assert reopen["detail_open"] and reopen["header"] and \
+                    reopen["list_display"] == "none", f"re-open broken: {reopen}"
+            report["reopen_x2"] = "ok"
 
             # ── 3. Duel: tap a fan card → becomes champion ────────────
             champ_before = await pg.evaluate(
