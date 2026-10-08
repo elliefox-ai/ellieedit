@@ -44,6 +44,13 @@ LEDGER = Path(os.environ.get(
 DUPELIB_PATH = os.environ.get(
     "ELLIEEDIT_DUPELIB_PATH", str(Path.home() / "workspace/dupe-review-v2"))
 
+# Suggestion/conflict telemetry (2026-10-08d): append-only JSONL like the
+# verdict ledger, gitignored. kind:override-style manual overrides included.
+SIGNALS_LOG = Path(os.environ.get(
+    "ELLIEEDIT_DUPE_SIGNALS_LOG",
+    str(Path(__file__).resolve().parents[2] / ".dupe-signals.jsonl")))
+SIGNAL_EVENTS = {"shown", "applied", "dismissed", "override"}
+
 VERDICTS = {"kept", "rejected", "melded", "deferred"}
 FAMILY_ID_RE = re.compile(r"^fam-[0-9a-f]{12}$")
 PAGE_SIZE = 40
@@ -104,6 +111,29 @@ def _load_family(fid: str) -> dict:
         return json.loads(_family_path(fid).read_text())
     except (OSError, json.JSONDecodeError) as e:
         raise HTTPException(500, f"family unreadable: {e}")
+
+
+def _history() -> dict[str, list[dict]]:
+    """family_id -> ALL ledger entries, oldest first (append-only history).
+    Torn/invalid lines are skipped; last entry per family wins elsewhere."""
+    out: dict[str, list[dict]] = {}
+    try:
+        with LEDGER.open() as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(e, dict) and e.get("family"):
+                    out.setdefault(e["family"], []).append(e)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log.warning("dupe ledger unreadable: %s", e)
+    return out
 
 
 def _verdicts() -> dict:
@@ -295,6 +325,17 @@ def families(state: str = "unresolved", cursor: str = ""):
             "tiers": f.get("tiers", []),
             "first_member": f.get("first_member", ""),
             "state": st,
+            # Signal-conflict flag (2026-10-08d): the latest verdict SPLITS
+            # members (kept AND rejected) while the index tier list claims a
+            # strict near-identity tier exists in the family. O(1) per card
+            # — verdicts dict + index rows only, no family-file reads, so the
+            # listing stays as cheap as before. Precise per-pair conflicts
+            # are computed lazily per-detail in /families/{id}/signals.
+            "conflict": (
+                bool((verdicts.get(f["id"], {}).get("members") or {}))
+                and "kept" in (verdicts[f["id"]].get("members") or {}).values()
+                and "rejected" in (verdicts[f["id"]].get("members") or {}).values()
+                and bool(STRICT_TIERS & set(f.get("tiers", [])))),
         })
     start = 0
     if cursor:
@@ -361,6 +402,154 @@ def family_detail(fid: str):
         "verdicts": {m["path"]: fam_verdict.get("members", {}).get(m["path"])
                      for m in members},
     }
+
+
+STRICT_TIERS = {"exact", "pixel-identical", "near-identical"}
+
+
+def _edge_members(ed: dict, members: list[str]) -> tuple[str, str] | None:
+    """Edge -> (path_a, path_b) against a normalized member list. Real family
+    files index members by position; the test fixtures (and possibly older
+    trees) use paths. Accept both; anything unresolvable -> None."""
+    out = []
+    for k in ("a", "b"):
+        v = ed.get(k)
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, int) and 0 <= v < len(members):
+            out.append(members[v])
+        elif isinstance(v, str):
+            n = v.replace("\\", "/")
+            if n not in members:
+                return None
+            out.append(n)
+        else:
+            return None
+    return (out[0], out[1]) if len(out) == 2 and out[0] != out[1] else None
+
+
+def _signals(fam: dict, history: list[dict]) -> dict:
+    """Verdict-history signals for one family. READ-ONLY: nothing here
+    touches files or the ledger. Duel history is NOT part of this — the
+    duel-curator's .duel-curator/state.json does not exist on this host and
+    its per-ROOT rel paths are not path-addressable to dupe members, so the
+    second curation signal here is the operator's prior verdict history."""
+    members = [m["path"].replace("\\", "/") for m in fam.get("members", [])]
+    # Per-member aggregate over the whole append-only history.
+    per = {p: {"kept": 0, "rejected": 0, "last": None, "entries": 0}
+           for p in members}
+    for e in history:
+        touched = set()
+        for p, v in (e.get("members") or {}).items():
+            p = p.replace("\\", "/")
+            if p in per and v in ("kept", "rejected"):
+                per[p][v] += 1
+                per[p]["last"] = v
+                touched.add(p)
+        for p in touched:
+            per[p]["entries"] += 1
+    latest = history[-1] if history else None
+
+    # Pair conflicts: a strict hash edge (pixel-identical/exact/near-identical)
+    # whose endpoints carry DISAGREEING last verdicts — the human split what
+    # the hashes call the same picture.
+    conflicts = []
+    conflict_members: set[str] = set()
+    for ed in fam.get("edges", []):
+        if ed.get("tier") not in STRICT_TIERS:
+            continue
+        pair = _edge_members(ed, members)
+        if not pair:
+            continue
+        a, b = pair
+        la, lb = per[a]["last"], per[b]["last"]
+        if la and lb and la != lb:
+            conflicts.append({
+                "a": a, "b": b, "tier": ed.get("tier"),
+                "detail": f"verdict history favors {a} ({la}) over {b} ({lb}) "
+                          f"but hashes call them {ed.get('tier')}",
+            })
+            conflict_members.update(pair)
+
+    # Suggestion — ONLY on strong agreement, never applied automatically:
+    # the last DECIDED entry kept exactly one member and rejected the rest,
+    # every kept↔rejected pair the family has an edge for is a strict tier,
+    # AND the family is back in review (latest entry missing or all-deferred).
+    # A decided latest entry means the family is resolved/committed, where
+    # Apply has no draft to fill — the suggestion belongs to the re-review.
+    suggestion = None
+    latest_decided = None
+    for e in reversed(history):
+        if any(v in ("kept", "rejected")
+               for v in (e.get("members") or {}).values()):
+            latest_decided = e
+            break
+    latest_all_deferred = (
+        latest is not None and bool(latest.get("members"))
+        and all(v == "deferred" for v in latest["members"].values()))
+    in_review = history and (latest is None or latest_all_deferred)
+    if latest_decided and in_review and not conflicts:
+        lm = {p.replace("\\", "/"): v
+              for p, v in (latest_decided.get("members") or {}).items()
+              if v in ("kept", "rejected")}
+        keeps = [p for p in members if lm.get(p) == "kept"]
+        rejects = [p for p in members if lm.get(p) == "rejected"]
+        if len(keeps) == 1 and rejects:
+            k = keeps[0]
+            # Suppressed above when any strict kept↔rejected edge contradicts
+            # the split — strong disagreement shows the disagreement instead
+            # of a suggestion (design rule: never fuse, never auto-apply).
+            # Apply only fills the DRAFT; nothing persists until Commit.
+            suggestion = {
+                "keep": k,
+                "reject": rejects,
+                "label": f"keep {Path(k).name}, reject rest",
+                "history_entries": len(history),
+            }
+
+    return {
+        "members": per,
+        "conflicts": conflicts,
+        "conflict": bool(conflicts),
+        "conflict_members": sorted(conflict_members),
+        "suggestion": suggestion,
+        "history_entries": len(history),
+        "duel_history": "unavailable — no path-addressable duel record exists",
+    }
+
+
+@router.get("/families/{fid}/signals")
+def family_signals(fid: str):
+    """Lazy per-detail signal computation — never on the listing path."""
+    fam = _load_family(fid)
+    return _signals(fam, _history().get(fid, []))
+
+
+class SignalEventBody(BaseModel):
+    family: str
+    event: str
+    detail: str = ""
+
+
+@router.post("/signals/event")
+def signal_event(body: SignalEventBody):
+    """Suggestion/conflict telemetry: shown / applied / dismissed / override.
+    Append-only JSONL, gitignored — manual overrides are calibration data
+    (spec: 'every manual override of a signal's suggestion is data')."""
+    if not FAMILY_ID_RE.match(body.family):
+        raise HTTPException(400, "bad family id")
+    if body.event not in SIGNAL_EVENTS:
+        raise HTTPException(400, f"event must be one of {sorted(SIGNAL_EVENTS)}")
+    entry = {
+        "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "family": body.family,
+        "event": body.event,
+        "detail": body.detail[:500],
+    }
+    SIGNALS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with SIGNALS_LOG.open("a") as fh:      # append-only by design
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return {"ok": True}
 
 
 class VerdictBody(BaseModel):

@@ -6,3 +6,4 @@ __pycache__/
 .pending-delete.json
 .probes/
 .dupe-verdicts.jsonl
+.dupe-signals.jsonl

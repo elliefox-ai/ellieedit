@@ -511,3 +511,124 @@ def test_send_to_pending_stores_gallery_relative_paths(tmp_path, monkeypatch):
     assert r["added"] == 1
     m = json.loads((tmp_path / "pending.json").read_text())
     assert set(m) == {"dupe-pool/y.png"}  # gallery-relative, not "y.png"
+
+
+# ------------------------------------------------------- signal conflicts (d)
+
+def _seed_conflict(tmp):
+    """One verdict entry that splits fam-aaaaaaaaaaaa: keep a, reject the rest.
+    The FAM fixture has an 'exact' edge a<->b, so this contradicts the tiers."""
+    entry = {"ts": "2026-10-07T23:00:00-07:00", "family": "fam-aaaaaaaaaaaa",
+             "members": {"a.png": "kept", "b.png": "rejected",
+                         "sub/c.png": "rejected"},
+             "note": "split against the hashes"}
+    (tmp / "verdicts.jsonl").write_text(json.dumps(entry) + "\n")
+
+
+def test_card_conflict_flag_on_split_verdict(env, client):
+    """Per-card glyph flag: O(1), verdicts+index only, no family-file reads."""
+    root, _, tmp = env
+    assert client.get("/api/dupe/families").json()["items"][0]["conflict"] is False
+    _seed_conflict(tmp)
+    # seeding a verdict resolves fam-aaaaaaaaaaaa — list all states
+    items = {i["id"]: i for i in client.get(
+        "/api/dupe/families", params={"state": "all"}).json()["items"]}
+    assert items["fam-aaaaaaaaaaaa"]["conflict"] is True     # exact tier + split
+    assert items["fam-cccccccccccc"]["conflict"] is False    # no verdict
+    assert items["fam-bbbbbbbbbbbb"]["conflict"] is False    # tiers [] (no strict tier)
+
+
+def test_signals_conflict_and_suggestion(env, client):
+    """Detail-only lazy endpoint: pair conflicts + suggestion payload."""
+    root, _, tmp = env
+    _seed_conflict(tmp)
+    s = client.get("/api/dupe/families/fam-aaaaaaaaaaaa/signals").json()
+    assert s["conflict"] is True and len(s["conflicts"]) == 1
+    c = s["conflicts"][0]
+    assert {c["a"], c["b"]} == {"a.png", "b.png"} and c["tier"] == "exact"
+    assert set(s["conflict_members"]) == {"a.png", "b.png"}
+    # strong disagreement suppresses the suggestion — the disagreement IS the
+    # answer (design rule: show disagreement, never fuse)
+    assert s["suggestion"] is None
+    assert "duel" in s["duel_history"]
+    # per-member aggregates
+    assert s["members"]["a.png"] == {"kept": 1, "rejected": 0,
+                                     "last": "kept", "entries": 1}
+    assert s["members"]["sub/c.png"]["last"] == "rejected"
+    # backslashes normalize against member paths
+    assert s["members"]["a.png"]["kept"] == 1
+
+
+def test_signals_suggestion_on_agreement(env, client):
+    """Strong agreement (no contradicting strict kept↔rejected edge) yields
+    a suggestion payload — but only in REVIEW state: a decided latest entry
+    means the family is committed, so the seed is followed by an all-deferred
+    entry (the reopen). Still never applied automatically."""
+    root, _, tmp = env
+    fam_file = root / ".dupes" / "families" / "fam-aaaaaaaaaaaa.json"
+    fam = json.loads(fam_file.read_text())
+    # strict edges only AMONG the rejects — keep/reject split contradicts none
+    fam["edges"] = [{"a": "b.png", "b": "sub/c.png", "tier": "exact"}]
+    fam_file.write_text(json.dumps(fam))
+    _seed_conflict(tmp)
+    # decided latest entry = committed family → NO suggestion yet
+    s = client.get("/api/dupe/families/fam-aaaaaaaaaaaa/signals").json()
+    assert s["suggestion"] is None
+    # operator defers everything → family back in review → suggestion fires
+    # from the last decided entry
+    (tmp / "verdicts.jsonl").open("a").write(json.dumps({
+        "ts": "2026-10-08T10:00:00-07:00", "family": "fam-aaaaaaaaaaaa",
+        "members": {"a.png": "deferred", "b.png": "deferred",
+                    "sub/c.png": "deferred"}, "note": "re-review"}) + "\n")
+    s = client.get("/api/dupe/families/fam-aaaaaaaaaaaa/signals").json()
+    assert s["conflict"] is False and s["conflicts"] == []
+    assert s["suggestion"] == {
+        "keep": "a.png", "reject": ["b.png", "sub/c.png"],
+        "label": "keep a.png, reject rest", "history_entries": 2}
+
+
+def test_signals_no_history_clean(env, client):
+    root, _, tmp = env
+    s = client.get("/api/dupe/families/fam-aaaaaaaaaaaa/signals").json()
+    assert s["conflict"] is False and s["conflicts"] == []
+    assert s["suggestion"] is None and s["history_entries"] == 0
+    assert all(v["last"] is None for v in s["members"].values())
+
+
+def test_signals_edges_by_index_and_path(env, client):
+    """Real family files index members by position; fixtures use paths.
+    Both must resolve; unresolvable edges are skipped, never crash."""
+    root, _, tmp = env
+    fam_file = root / ".dupes" / "families" / "fam-aaaaaaaaaaaa.json"
+    fam = json.loads(fam_file.read_text())
+    fam["edges"] = [{"a": 0, "b": 1, "tier": "near-identical", "distance": 1},
+                    {"a": "a.png", "b": "sub/c.png", "tier": "exact", "distance": 0},
+                    {"a": "ghost.png", "b": 0, "tier": "exact"}]
+    fam_file.write_text(json.dumps(fam))
+    _seed_conflict(tmp)
+    s = client.get("/api/dupe/families/fam-aaaaaaaaaaaa/signals").json()
+    pairs = {tuple(sorted((c["a"], c["b"]))) for c in s["conflicts"]}
+    assert pairs == {("a.png", "b.png"), ("a.png", "sub/c.png")}
+
+
+def test_signal_events_append_only(env, client):
+    root, _, tmp = env
+    log = tmp / "signals.jsonl"
+    import backend.routers.dupe as d
+    orig = d.SIGNALS_LOG
+    d.SIGNALS_LOG = log
+    try:
+        for ev in ("shown", "applied", "dismissed", "override"):
+            r = client.post("/api/dupe/signals/event", json={
+                "family": "fam-aaaaaaaaaaaa", "event": ev, "detail": "x"})
+            assert r.status_code == 200 and r.json()["ok"] is True
+        lines = log.read_text().strip().split("\n")
+        assert [json.loads(l)["event"] for l in lines] == \
+            ["shown", "applied", "dismissed", "override"]
+        # validation
+        assert client.post("/api/dupe/signals/event", json={
+            "family": "fam-aaaaaaaaaaaa", "event": "bogus"}).status_code == 400
+        assert client.post("/api/dupe/signals/event", json={
+            "family": "nope", "event": "shown"}).status_code == 400
+    finally:
+        d.SIGNALS_LOG = orig
