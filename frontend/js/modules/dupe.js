@@ -920,15 +920,25 @@ registerModule({
           rej.title = `reject ${m.name}`;
           rej.addEventListener('click', e => {
             e.stopPropagation();
-            try { doReject(m); trace(`sift reject ${m.name}`); renderSiftBody(); }
+            try {
+              draft.verdicts[m.path] = 'rejected';   // draft only — no spread render
+              trace(`sift reject ${m.name}`);
+              renderSiftBody();
+            }
             catch (err) { job(`sift reject: ${err.message}`, 'err'); console.error('sift reject failed', err); }
           });
           cell.appendChild(rej);
         }
         cell.addEventListener('click', () => {
           try {
-            if (v === 'kept') unPick(m);
-            else if (!v) doPick(m);
+            // draft mutation ONLY — renderSpread would wipe this overlay.
+            if (v === 'kept') {
+              delete draft.verdicts[m.path];
+              draft.picks = draft.picks.filter(p => p !== m.path);
+            } else if (!v) {
+              draft.verdicts[m.path] = 'kept';
+              draft.picks.push(m.path);
+            }
             trace(`sift toggle ${m.name} → ${verdictOf(m) || 'unhandled'}`);
             renderSiftBody();
           } catch (err) {
@@ -960,14 +970,22 @@ registerModule({
       const m = siftMembers()[siftFocus];
       if (!m) return;
       const v = verdictOf(m);
-      if (v === 'kept') unPick(m); else if (!v) doPick(m);
+      // draft mutation ONLY — doPick/doReject re-render the spread, which
+      // wipes this overlay; sift re-renders its own body instead.
+      if (v === 'kept') {
+        delete draft.verdicts[m.path];
+        draft.picks = draft.picks.filter(p => p !== m.path);
+      } else if (!v) {
+        draft.verdicts[m.path] = 'kept';
+        draft.picks.push(m.path);
+      }
       trace(`sift kbd toggle ${m.name} → ${verdictOf(m) || 'unhandled'}`);
       renderSiftBody();
     }
     function siftRejectFocused() {
       const m = siftMembers()[siftFocus];
       if (!m || verdictOf(m)) return;
-      doReject(m);
+      draft.verdicts[m.path] = 'rejected';   // draft only — see siftToggleFocused
       trace(`sift kbd reject ${m.name}`);
       renderSiftBody();
     }
