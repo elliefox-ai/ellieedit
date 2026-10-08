@@ -242,7 +242,7 @@ def status():
     if freshness is None or now - ts >= _FRESHNESS_TTL:
         freshness = _freshness_walk(idx_mtime)
         _freshness_cache = (key, now, freshness)
-    return {
+    payload = {
         "indexed": True,
         "root": str(DUPE_ROOT),
         "families": len(fams),
@@ -257,7 +257,7 @@ def status():
             f"cd {DUPELIB_PATH} && PYTHONPATH=. python3 -m dupelib.cli analyze "
             f"\"{DUPE_ROOT}\"  # full scans are fastest from the Windows side"),
     }
-    _status_cache = (key, now, payload)
+    _status_cache = (key, now, freshness, payload)
     return payload
 
 
@@ -629,7 +629,7 @@ def send_pending(fid: str, request: Request = None):
     the Pending Delete manifest. Dedupes against already-pending; silently
     skips missing/vanished files. Nothing is deleted here — the pending
     confirm endpoint remains the only destructive action."""
-    from .pending import _audit, _load, _save
+    from .pending import _audit, _load, _save, manifest_lock
     from .gallery import GALLERY_ROOT
     fam_verdict = _verdicts().get(fid)
     if not fam_verdict:
@@ -638,37 +638,38 @@ def send_pending(fid: str, request: Request = None):
                 if v == "rejected"]
     if not rejected:
         raise HTTPException(409, "no rejected members in the latest verdict")
-    m = _load()
-    now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-    added = skipped = missing = 0
-    added_keys: list[str] = []
-    for rel in rejected:
-        try:
-            src = jailed(rel)
-            if not src.is_file():
+    with manifest_lock:
+        m = _load()
+        now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        added = skipped = missing = 0
+        added_keys: list[str] = []
+        for rel in rejected:
+            try:
+                src = jailed(rel)
+                if not src.is_file():
+                    missing += 1
+                    continue
+            except HTTPException:
                 missing += 1
                 continue
-        except HTTPException:
-            missing += 1
-            continue
-        # The manifest is gallery-root-relative by contract. When the member
-        # also lives under GALLERY_ROOT (dupe pool inside the gallery tree),
-        # store that form so Gallery badges/confirm work unchanged; members
-        # only reachable via the dupe pool keep dupe-relative paths, which
-        # pending.confirm resolves through the dupe jail as a fallback.
-        key = rel
-        try:
-            key = src.resolve().relative_to(
-                GALLERY_ROOT.resolve()).as_posix()
-        except (OSError, ValueError):
-            pass  # dupe pool outside the gallery tree: keep dupe-relative
-        if key not in m:
-            m[key] = now
-            added += 1
-            added_keys.append(key)
-        else:
-            skipped += 1
-    _save(m)
+            # The manifest is gallery-root-relative by contract. When the member
+            # also lives under GALLERY_ROOT (dupe pool inside the gallery tree),
+            # store that form so Gallery badges/confirm work unchanged; members
+            # only reachable via the dupe pool keep dupe-relative paths, which
+            # pending.confirm resolves through the dupe jail as a fallback.
+            key = rel
+            try:
+                key = src.resolve().relative_to(
+                    GALLERY_ROOT.resolve()).as_posix()
+            except (OSError, ValueError):
+                pass  # dupe pool outside the gallery tree: keep dupe-relative
+            if key not in m:
+                m[key] = now
+                added += 1
+                added_keys.append(key)
+            else:
+                skipped += 1
+        _save(m)
     _audit("family_commit_write", added_keys, request)
     return {"added": added, "already_pending": skipped, "missing": missing,
             "count": len(m)}
@@ -776,23 +777,24 @@ def meld_save(fid: str, body: MeldSaveBody, request: Request = None):
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     # On-the-spot collapse: every component goes to the deletion queue NOW.
-    from .pending import _audit, _load, _save
-    m = _load()
-    now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-    added = 0
-    added_keys: list[str] = []
-    for p in comps:
-        key = p
-        try:
-            key = jailed(p).resolve().relative_to(
-                _gallery_mod.GALLERY_ROOT.resolve()).as_posix()
-        except (HTTPException, OSError, ValueError):
-            pass  # dupe-pool-only member: keep dupe-relative manifest key
-        if key not in m:
-            m[key] = now
-            added += 1
-            added_keys.append(key)
-    _save(m)
+    from .pending import _audit, _load, _save, manifest_lock
+    with manifest_lock:
+        m = _load()
+        now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        added = 0
+        added_keys: list[str] = []
+        for p in comps:
+            key = p
+            try:
+                key = jailed(p).resolve().relative_to(
+                    _gallery_mod.GALLERY_ROOT.resolve()).as_posix()
+            except (HTTPException, OSError, ValueError):
+                pass  # dupe-pool-only member: keep dupe-relative manifest key
+            if key not in m:
+                m[key] = now
+                added += 1
+                added_keys.append(key)
+        _save(m)
     _audit("family_commit_write", added_keys, request)
     return {"saved_as": name, "pending_added": added, "pending_count": len(m),
             "members": comps}

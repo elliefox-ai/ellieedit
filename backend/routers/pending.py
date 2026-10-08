@@ -12,6 +12,7 @@ directories).
 
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,9 +35,20 @@ AUDIT = Path(os.environ.get(
 
 router = APIRouter(prefix="/api/pending", tags=["pending"])
 
+# One lock guarding every read-modify-write on the manifest. FastAPI runs
+# sync endpoints in a threadpool, so unlocked _load/…/_save sequences can
+# lose updates across pending, send-pending and meld-save writers.
+manifest_lock = threading.Lock()
+
 
 class PathsBody(BaseModel):
     paths: list[str]
+
+
+class ConfirmBody(BaseModel):
+    # Optimistic-concurrency guard: the count the client saw when listing.
+    # Optional so existing callers and tests keep working.
+    expected_count: int | None = None
 
 
 def _load() -> dict:
@@ -108,37 +120,45 @@ def list_pending():
 
 
 @router.post("")
-def add_pending(body: PathsBody, request: Request = None):
-    m = _load()
-    added = 0
-    now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-    touched: list[str] = []
-    for rel in body.paths:
-        src = jailed(rel)  # raises 400 on any jail violation
-        if not src.is_file() or src.suffix.lower() not in EXTS:
-            continue  # missing (or not an image): ignore per spec
-        if rel not in m:
-            m[rel] = now
-            added += 1
-            touched.append(rel)
-    _save(m)
+def add_pending(body: PathsBody, request: Request = None,
+                expected_count: int | None = None):
+    with manifest_lock:
+        m = _load()
+        if expected_count is not None and len(m) != expected_count:
+            raise HTTPException(409, f"queue changed — current count is {len(m)}")
+        added = 0
+        now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        touched: list[str] = []
+        for rel in body.paths:
+            src = jailed(rel)  # raises 400 on any jail violation
+            if not src.is_file() or src.suffix.lower() not in EXTS:
+                continue  # missing (or not an image): ignore per spec
+            if rel not in m:
+                m[rel] = now
+                added += 1
+                touched.append(rel)
+        _save(m)
     _audit("add", touched, request)
     return {"added": added, "count": len(m)}
 
 
 @router.delete("")
-def pardon_pending(body: PathsBody, request: Request = None):
+def pardon_pending(body: PathsBody, request: Request = None,
+                   expected_count: int | None = None):
     """Clemency: remove from the manifest; no disk change."""
-    m = _load()
-    removed = 0
-    touched: list[str] = []
-    for rel in body.paths:
-        jailed(rel)  # jail applies on pardon too
-        if rel in m:
-            del m[rel]
-            removed += 1
-            touched.append(rel)
-    _save(m)
+    with manifest_lock:
+        m = _load()
+        if expected_count is not None and len(m) != expected_count:
+            raise HTTPException(409, f"queue changed — current count is {len(m)}")
+        removed = 0
+        touched: list[str] = []
+        for rel in body.paths:
+            jailed(rel)  # jail applies on pardon too
+            if rel in m:
+                del m[rel]
+                removed += 1
+                touched.append(rel)
+        _save(m)
     _audit("unmark", touched, request)
     return {"pardoned": removed, "count": len(m)}
 
@@ -168,45 +188,49 @@ def read_audit(limit: int = 100):
 
 
 @router.post("/confirm")
-def confirm_pending(request: Request = None):
+def confirm_pending(body: ConfirmBody | None = None, request: Request = None):
     """The ONLY destructive endpoint: delete every manifest file, then clear."""
-    m = _load()
-    deleted = 0
-    bytes_freed = 0
-    gone: list[str] = []
-    for rel in list(m):
-        try:
-            src = jailed(rel)
-        except HTTPException:
-            # Entries can also come from the Dupe view, whose pool root is a
-            # different tree than GALLERY_ROOT. Confirm remains the ONLY
-            # destructive endpoint — it just resolves through the dupe jail
-            # too, so those members are actually deletable.
+    expected = body.expected_count if body is not None else None
+    with manifest_lock:
+        m = _load()
+        if expected is not None and len(m) != expected:
+            raise HTTPException(409, f"queue changed — current count is {len(m)}")
+        deleted = 0
+        bytes_freed = 0
+        gone: list[str] = []
+        for rel in list(m):
             try:
-                from .dupe import jailed as dupe_jailed
-                src = dupe_jailed(rel)
-            except Exception:
-                continue  # resolves under neither root: skip
-        try:
-            size = src.stat().st_size
-            src.unlink()
-            deleted += 1
-            bytes_freed += size
-            gone.append(rel)
-        except FileNotFoundError:
-            # Passes the gallery jail but lives in the dupe pool instead.
+                src = jailed(rel)
+            except HTTPException:
+                # Entries can also come from the Dupe view, whose pool root is a
+                # different tree than GALLERY_ROOT. Confirm remains the ONLY
+                # destructive endpoint — it just resolves through the dupe jail
+                # too, so those members are actually deletable.
+                try:
+                    from .dupe import jailed as dupe_jailed
+                    src = dupe_jailed(rel)
+                except Exception:
+                    continue  # resolves under neither root: skip
             try:
-                from .dupe import jailed as dupe_jailed
-                dsrc = dupe_jailed(rel)
-                size = dsrc.stat().st_size
-                dsrc.unlink()
+                size = src.stat().st_size
+                src.unlink()
                 deleted += 1
                 bytes_freed += size
                 gone.append(rel)
-            except Exception:
-                continue
-        except OSError as e:
-            log.warning("pending confirm: could not unlink %s: %s", rel, e)
-    _save({})
+            except FileNotFoundError:
+                # Passes the gallery jail but lives in the dupe pool instead.
+                try:
+                    from .dupe import jailed as dupe_jailed
+                    dsrc = dupe_jailed(rel)
+                    size = dsrc.stat().st_size
+                    dsrc.unlink()
+                    deleted += 1
+                    bytes_freed += size
+                    gone.append(rel)
+                except Exception:
+                    continue
+            except OSError as e:
+                log.warning("pending confirm: could not unlink %s: %s", rel, e)
+        _save({})
     _audit("confirm", gone, request)
     return {"deleted": deleted, "bytes": bytes_freed}
