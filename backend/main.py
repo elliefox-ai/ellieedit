@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .routers import facecycle, gallery, pending, review
+from .routers import dupe, facecycle, gallery, pending, review
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -21,6 +21,7 @@ STATIC_DIR = HERE.parent / "frontend"
 
 app = FastAPI(title="EllieEdit", version="0.1.0")
 
+app.include_router(dupe.router)
 app.include_router(facecycle.router)
 app.include_router(gallery.router)
 app.include_router(pending.router)
