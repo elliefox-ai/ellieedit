@@ -1597,6 +1597,239 @@ async def main():
             await pg.evaluate("() => document.querySelector('#dupe-back').click()")
             await wait_grid_ready(pg)
 
+            # ── 14. DEATH-ROW REHYDRATION (2026-10-09b) ───────────────
+            # A majority-rejected resolved family re-enters the unresolved
+            # queue as a PRE-MARKED UNCOMMITTED draft: normal zoom/flip/Enter
+            # commit loop; the mass action covers still-uncommitted ones only.
+            await pg.evaluate("() => { try { localStorage.eeAutoAdvance = '0'; } catch (_) {} }")
+            dr_seed = await pg.evaluate("""async () => {
+              let cursor = '';
+              for (;;) {
+                const d = await fetch('/api/dupe/families?state=unresolved&cursor='
+                  + encodeURIComponent(cursor)).then(r => r.json());
+                for (const it of d.items) {
+                  if ((it.size || 0) < 3) continue;
+                  const det = await fetch('/api/dupe/families/' + it.id)
+                    .then(r => r.json());
+                  if (det.state === 'unresolved' &&
+                      !Object.values(det.verdict || {}).filter(Boolean).length)
+                    return det;
+                }
+                if (!d.next_cursor) return null;
+                cursor = d.next_cursor;
+              }
+            }""")
+            assert dr_seed, "no 3+ member unresolved family for the death-row section"
+            dr_paths = [m["path"] for m in dr_seed["members"]]
+            dr_members = {dr_paths[0]: "kept"}
+            for p in dr_paths[1:]:
+                dr_members[p] = "rejected"
+            await pg.evaluate("""async (m) => {
+              await fetch('/api/dupe/families/' + m.fid + '/verdict', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({members: m.members,
+                                      note: 'probe death-row seed'}),
+              });
+            }""", {"fid": dr_seed["id"], "members": dr_members})
+            dr_rej = len(dr_paths) - 1
+            # listing rehydrates: the family rides unresolved, flagged
+            dr_item = await pg.evaluate("""async (fid) => {
+              let cursor = '';
+              for (;;) {
+                const d = await fetch('/api/dupe/families?state=unresolved&cursor='
+                  + encodeURIComponent(cursor)).then(r => r.json());
+                const it = d.items.find(x => x.id === fid);
+                if (it) return it;
+                if (!d.next_cursor) return null;
+                cursor = d.next_cursor;
+              }
+            }""", dr_seed["id"])
+            report["dr_listing_item"] = dr_item
+            assert dr_item and dr_item.get("rehydrated") is True, \
+                f"rehydrated flag missing on the unresolved queue: {dr_item}"
+            assert dr_item["rejected"] == dr_rej, \
+                f"rejected count wrong: {dr_item} vs {dr_rej}"
+            # detail: opens as a DRAFT (not committed view), pre-marked
+            dr_opened = False
+            for _ in range(60):
+                dr_opened = await pg.evaluate("""(fid) => {
+                  const card = [...document.querySelectorAll('.fam-card')]
+                    .find(c => c.textContent.includes(fid));
+                  if (card) { card.click(); return true; }
+                  const more = document.querySelector('#dupe-more');
+                  if (more && more.style.display !== 'none') {
+                    document.querySelector('#dupe-loadmore').click();
+                    return false;
+                  }
+                  return false;
+                }""", dr_seed["id"])
+                if dr_opened:
+                    break
+                await pg.wait_for_timeout(1200)
+            assert dr_opened, f"rehydrated card {dr_seed['id']} never rendered"
+            await pg.wait_for_timeout(3000)
+            dr_detail = await pg.evaluate("""() => ({
+              draft: !!document.querySelector('.ss-header .ss-badge.draft'),
+              committed: document.querySelectorAll('.ss-committed').length,
+              rej_dots: document.querySelectorAll('.ss-header .ss-dot.reject').length,
+              pick_dots: document.querySelectorAll('.ss-header .ss-dot.pick').length,
+              zoom: !!document.querySelector('#ss-zoom'),
+            })""")
+            report["dr_detail"] = dr_detail
+            assert dr_detail["draft"] and not dr_detail["committed"], \
+                f"rehydrated family opened committed instead of draft: {dr_detail}"
+            assert dr_detail["zoom"], "rehydrated detail skipped zoom-first entry"
+            assert dr_detail["rej_dots"] == dr_rej and dr_detail["pick_dots"] == 1, \
+                f"pre-marked dots wrong: {dr_detail} (want {dr_rej} rej / 1 pick)"
+            await pg.screenshot(path=".probes/ss-27-deathrow-draft.png")
+            # flip inside the zoom (pardon path): filter to REJECTED members,
+            # un-reject the current one (f), pick it (a) → kept, Enter commits
+            await pg.evaluate("""() => {
+              const btn = [...document.querySelectorAll('#ss-zoom .zoom-mode-btn')]
+                .find(b => b.dataset.zm === 'rejected');
+              if (btn) btn.click();
+            }""")
+            await pg.wait_for_timeout(600)
+            await pg.keyboard.press("f")     # Un-reject the current member
+            await pg.wait_for_timeout(500)
+            await pg.keyboard.press("a")     # pick it → kept
+            await pg.wait_for_timeout(500)
+            await pg.keyboard.press("Enter")  # commit & next — writes the ledger
+            await pg.wait_for_timeout(3000)
+            dr_committed = await pg.evaluate("""(fid) =>
+              fetch('/api/dupe/families/' + fid).then(r => r.json())""",
+              dr_seed["id"])
+            dr_vals = list((dr_committed.get("verdict") or {}).values())
+            report["dr_enter_commit"] = {
+                "state": dr_committed.get("state"),
+                "kept": dr_vals.count("kept"),
+                "rejected": dr_vals.count("rejected"),
+            }
+            assert dr_committed.get("state") == "resolved", \
+                f"Enter commit did not land: {dr_committed.get('state')}"
+            assert dr_vals.count("kept") == 2 and dr_vals.count("rejected") == dr_rej - 1, \
+                f"flip did not persist through Enter commit: {report['dr_enter_commit']}"
+            # back to the grid before hunting the mass seed
+            await pg.evaluate("() => document.querySelector('#dupe-back').click()")
+            await wait_grid_ready(pg)
+
+            # ── 15. DEATH-ROW MASS ACTION (2026-10-09b) ──────────────
+            # Second seed stays UNCOMMITTED: back on the grid the mass bar
+            # appears with exact counts; clicking confirms once and POSTs
+            # EXACTLY the uncommitted rehydrated families (route-intercepted
+            # here — the real enqueue is proven server-side in pytest; the
+            # probe must never queue ~11k real files). NOTHING unlinks.
+            dr2 = await pg.evaluate("""async () => {
+              let cursor = '';
+              for (;;) {
+                const d = await fetch('/api/dupe/families?state=unresolved&cursor='
+                  + encodeURIComponent(cursor)).then(r => r.json());
+                for (const it of d.items) {
+                  if ((it.size || 0) < 2) continue;
+                  const det = await fetch('/api/dupe/families/' + it.id)
+                    .then(r => r.json());
+                  if (det.state === 'unresolved' &&
+                      !Object.values(det.verdict || {}).filter(Boolean).length)
+                    return det;
+                }
+                if (!d.next_cursor) return null;
+                cursor = d.next_cursor;
+              }
+            }""")
+            assert dr2, "no second unresolved family for the mass-action section"
+            dr2_paths = [m["path"] for m in dr2["members"]]
+            dr2_members = {dr2_paths[0]: "kept"}
+            for p in dr2_paths[1:]:
+                dr2_members[p] = "rejected"
+            await pg.evaluate("""async (m) => {
+              await fetch('/api/dupe/families/' + m.fid + '/verdict', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({members: m.members,
+                                      note: 'probe death-row mass seed'}),
+              });
+            }""", {"fid": dr2["id"], "members": dr2_members})
+            # open + close its detail: registers it in the session mass set
+            dr2_opened = False
+            for _ in range(60):
+                dr2_opened = await pg.evaluate("""(fid) => {
+                  const card = [...document.querySelectorAll('.fam-card')]
+                    .find(c => c.textContent.includes(fid));
+                  if (card) { card.click(); return true; }
+                  const more = document.querySelector('#dupe-more');
+                  if (more && more.style.display !== 'none') {
+                    document.querySelector('#dupe-loadmore').click();
+                    return false;
+                  }
+                  return false;
+                }""", dr2["id"])
+                if dr2_opened:
+                    break
+                await pg.wait_for_timeout(1200)
+            assert dr2_opened, f"mass seed {dr2['id']} never rendered"
+            await pg.wait_for_timeout(3000)
+            dr2_draft = await pg.evaluate(
+                "() => !!document.querySelector('.ss-header .ss-badge.draft')")
+            assert dr2_draft, "mass seed did not open as a pre-marked draft"
+            await pg.screenshot(path=".probes/ss-28-deathrow-mass-draft.png")
+            await pg.evaluate("() => document.querySelector('#dupe-back').click()")
+            await wait_grid_ready(pg)
+            # mass bar appears; wait out the /death-row summary stat walk
+            bar_label = None
+            for _ in range(120):
+                bar_label = await pg.evaluate("""() => {
+                  const b = document.querySelector('#dupe-deathbar');
+                  if (!b || b.style.display === 'none') return null;
+                  const btn = document.querySelector('#dupe-death-commit');
+                  return btn && !btn.disabled ? btn.textContent : null;
+                }""")
+                if bar_label and "files" in bar_label:
+                    break
+                await pg.wait_for_timeout(1000)
+            report["dr_mass_label"] = bar_label
+            assert bar_label and "files" in bar_label, \
+                f"mass bar never showed a count: {bar_label}"
+            dr2_rej_files = await pg.evaluate("""async (fid) => {
+              const d = await fetch('/api/dupe/death-row').then(r => r.json());
+              const row = d.items.find(x => x.id === fid);
+              return row ? row.rejected_files : -1;
+            }""", dr2["id"])
+            import re as _re
+            m_label = _re.search(r"\((\d+) files", bar_label)
+            assert m_label, f"label missing file count: {bar_label}"
+            # the mass set is EXACTLY the still-uncommitted seed (the first
+            # seed was Enter-committed; real families were never opened)
+            captured = {}
+            async def _capture(route):
+                import json as _json
+                captured["body"] = _json.loads(route.request.post_data or "{}")
+                await route.fulfill(status=200, content_type="application/json",
+                    body='{"added":1,"already_pending":0,"missing":0,"count":1,"families":1,"bytes":0}')
+            await pg.route("**/api/dupe/death-row/commit", _capture)
+            await pg.evaluate(
+                "() => document.querySelector('#dupe-death-commit').click()")
+            await pg.wait_for_timeout(2000)
+            report["dr_mass_request"] = captured.get("body")
+            assert captured.get("body", {}).get("families") == [dr2["id"]], \
+                f"mass POST families wrong: {captured.get('body')}"
+            assert captured["body"].get("expected_files") == int(m_label.group(1)), \
+                f"mass POST count != label: {captured['body']} vs {bar_label}"
+            assert int(m_label.group(1)) == dr2_rej_files, \
+                f"label count != family rejected files: {bar_label} vs {dr2_rej_files}"
+            bar_gone = await pg.evaluate("""() => {
+              const b = document.querySelector('#dupe-deathbar');
+              return !b || b.style.display === 'none';
+            }""")
+            assert bar_gone, "mass bar still visible after the send"
+            await pg.screenshot(path=".probes/ss-29-deathrow-mass-sent.png")
+            # NOTHING unlinks: every seeded rejected file is still on disk
+            import os as _os
+            dr_root = _os.environ.get("ELLIEEDIT_DUPE_ROOT",
+                                      "/mnt/shared/_Incoming/DupeReview")
+            still = {p: (Path(dr_root) / p).is_file() for p in dr2_paths}
+            report["dr_files_still_on_disk"] = still
+            assert all(still.values()), \
+                f"mass action unlinked files (route-intercepted run!): {still}"
+
             assert not console_errors, f"console errors: {console_errors}"
             print(json.dumps(report, indent=1))
 
