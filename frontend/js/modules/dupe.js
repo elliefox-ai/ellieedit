@@ -184,6 +184,8 @@ registerModule({
       .ss-bottom .danger:hover:not(:disabled) { background:#5a2a2a; }
       .dupe-note { flex:1; min-width:160px; background:#0f0f1a; color:#d4d4e0;
                    border:1px solid #2a2a44; border-radius:4px; padding:5px 8px; font-size:12px; }
+      /* iPad thumb-reach (2026-10-08p): bottom-bar controls ≥44px tall */
+      .dupe-bottom .ee-btn { min-height:44px; }
       .back { margin-right:auto; }
       .ss-menu { position:absolute; z-index:30; background:#1d1d33; border:1px solid #4a4a6c;
                  border-radius:10px; padding:6px; display:flex; flex-direction:column;
