@@ -4,7 +4,7 @@
 // online load — a cache-first policy here poisoned clients with intermediate
 // builds once already (blank-canvas incident 2026-10-07). Only heavy binary
 // assets (icons, manifest) are cache-first.
-const CACHE = 'ellieedit-v3-20261009c';
+const CACHE = 'ellieedit-v3-20261009d';
 const SHELL = [
   '/',
   '/index.html',
@@ -13,6 +13,8 @@ const SHELL = [
   '/js/components/jobpanel.js',
   '/js/modules/gallery.js',
   '/js/modules/library.js',
+  '/js/modules/update.js',
+  '/js/modules/update-stack.js',
   '/js/modules/facecycle.js',
   '/js/modules/review.js',
   '/js/champion-ladder.js',

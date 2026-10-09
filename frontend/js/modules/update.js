@@ -1,0 +1,354 @@
+// Update module — workflow runner + version stack (2026-10-09d).
+// Dropdown-driven preset runner: workflows are JSON templates served by the
+// backend (workflows/ dir); the page injects source image, prompt, seed.
+// Renders stay in-session (stack); only an explicit Save writes to the
+// Library via the save-family machinery. No delete here by design.
+import { registerModule } from '../shell.js';
+import {
+  createStack, current, source, isOriginal, canRevert, compareEntry,
+  pushRender, swap, revert, revertToOriginal, saveable,
+} from './update-stack.js';
+
+function panelHTML() {
+  return `
+  <style>
+    .upd-bar { padding: 8px 16px; background: #161628; border-bottom: 1px solid #2a2a44;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .upd-bar label { font-size: 12px; color: #8a8aaa; }
+    .upd-bar select, .upd-bar input[type=number] {
+      background: #1d1d33; color: #e0e0f0; border: 1px solid #4a4a6c;
+      border-radius: 4px; padding: 7px 8px; font-size: 12px; min-height: 34px; }
+    #upd-preset { max-width: 280px; }
+    #upd-seed { width: 150px; }
+    .upd-seedbox { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #8a8aaa; }
+    .upd-status { font-size: 11px; color: #6c6c8e; flex: 1; min-width: 120px; }
+    .upd-prompt-wrap { padding: 8px 16px; background: #12121f; border-bottom: 1px solid #2a2a44;
+      display: flex; gap: 8px; align-items: flex-start; }
+    #upd-prompt { flex: 1; min-height: 64px; max-height: 140px; resize: vertical;
+      background: #1d1d33; color: #e0e0f0; border: 1px solid #4a4a6c;
+      border-radius: 4px; padding: 8px; font-size: 12px; font-family: inherit; }
+    .upd-prompt-side { display: flex; flex-direction: column; gap: 6px; }
+    .upd-prompt-side select { background: #1d1d33; color: #e0e0f0; border: 1px solid #4a4a6c;
+      border-radius: 4px; padding: 6px; font-size: 11px; max-width: 180px; min-height: 34px; }
+    .upd-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+      padding: 12px; position: relative; overflow: hidden; }
+    .cmp { position: relative; max-width: 100%; max-height: 100%;
+      display: none; touch-action: none; user-select: none; -webkit-user-select: none; }
+    .cmp img { display: block; max-width: 100%; max-height: 76vh; width: auto; height: auto; }
+    .cmp .cmp-b { position: absolute; inset: 0; overflow: hidden; }
+    .cmp .cmp-b img { max-height: 100%; height: 100%; width: auto; }
+    .cmp .cmp-div { position: absolute; top: 0; bottom: 0; width: 3px; background: #7a6aaa;
+      cursor: ew-resize; }
+    .cmp .cmp-div::after { content: '⇔'; position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%,-50%); background: #7a6aaa; color: #fff; border-radius: 50%;
+      width: 34px; height: 34px; line-height: 34px; text-align: center; font-size: 15px; }
+    .cmp .cmp-tag { position: absolute; top: 6px; font-size: 10px; background: rgba(0,0,0,0.6);
+      padding: 2px 8px; border-radius: 8px; color: #b0b0d0; }
+    .cmp .cmp-tag.a { left: 6px; } .cmp .cmp-tag.b { right: 6px; }
+    .upd-empty { color: #6c6c8e; font-size: 13px; text-align: center; max-width: 480px; }
+    .upd-actions { padding: 10px 16px; background: #12121f; border-top: 1px solid #2a2a44;
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .upd-actions .ee-btn { min-height: 44px; }
+    .upd-actions .stackpos { font-size: 11px; color: #8a8aaa; flex: 1; text-align: center; }
+  </style>
+  <div style="display:flex;flex-direction:column;height:100%">
+    <div class="upd-bar">
+      <label>Preset</label>
+      <select id="upd-preset"><option value="">loading…</option></select>
+      <label>Seed</label>
+      <input type="number" id="upd-seed" value="0">
+      <span class="upd-seedbox"><input type="checkbox" id="upd-random" checked> random</span>
+      <button class="ee-btn primary" data-act="upd-run" id="upd-run" disabled>▶ Run</button>
+      <span class="upd-status" id="upd-status">send an image from the Gallery lightbox (✎ Update)</span>
+    </div>
+    <div class="upd-prompt-wrap">
+      <textarea id="upd-prompt" placeholder="prompt for the transform…"></textarea>
+      <div class="upd-prompt-side">
+        <select id="upd-saved"><option value="">saved prompts…</option></select>
+        <button class="ee-btn" data-act="upd-save-prompt" title="Save current prompt">💾 Save</button>
+        <button class="ee-btn" data-act="upd-del-prompt" title="Delete selected saved prompt">🗑</button>
+      </div>
+    </div>
+    <div class="upd-stage" id="upd-stage">
+      <div class="upd-empty" id="upd-empty">
+        No image loaded.<br>Open the Gallery, tap an image, then <b>✎ Update</b>
+        to start a version stack here.</div>
+      <div class="cmp" id="upd-cmp">
+        <img id="upd-img-a" alt="previous">
+        <div class="cmp-b" id="upd-wrap-b"><img id="upd-img-b" alt="current"></div>
+        <div class="cmp-div" id="upd-div"></div>
+        <span class="cmp-tag a" id="upd-tag-a">before</span>
+        <span class="cmp-tag b" id="upd-tag-b">after</span>
+      </div>
+    </div>
+    <div class="upd-actions">
+      <button class="ee-btn" data-act="upd-swap" title="Accept current render as the next edit's source">Swap</button>
+      <button class="ee-btn" data-act="upd-revert">Revert</button>
+      <button class="ee-btn" data-act="upd-revert-orig">Revert to original</button>
+      <span class="stackpos" id="upd-pos">no stack</span>
+      <button class="ee-btn primary" data-act="upd-save" id="upd-save" disabled>⬆ Save to Library</button>
+    </div>
+  </div>`;
+}
+
+class UpdateView {
+  constructor(panel) {
+    panel.innerHTML = panelHTML();
+    this.panel = panel;
+    this.el = {};
+    for (const id of ['preset', 'seed', 'random', 'run', 'status', 'prompt',
+      'saved', 'stage', 'empty', 'cmp', 'img-a', 'wrap-b', 'img-b', 'div',
+      'tag-a', 'tag-b', 'pos', 'save']) {
+      this.el[id.replace(/-(\w)/g, (_, c) => c.toUpperCase())] =
+        panel.querySelector(`#upd-${id}`);
+    }
+    this.stack = null;          // version-stack state (update-stack.js)
+    this.presets = [];
+    this.running = false;
+    this.cmpPct = 50;           // comparer divider, percent from left
+
+    this.loadPresets();
+    this.loadSavedPrompts();
+    this.bind();
+    window.addEventListener('ellieedit:open-in-update',
+      this.onOpenIn = e => this.openIn(e.detail || {}));
+    window.addEventListener('ellieedit:tab-activated', e => {
+      if (e.detail?.name === 'update') this.loadSavedPrompts();
+    });
+    window.__upd = this;  // debug/probe hook
+  }
+
+  // ---- data ----------------------------------------------------------------
+  async loadPresets() {
+    try {
+      const r = await fetch('/api/update/presets');
+      const data = await r.json();
+      this.presets = data.presets || [];
+      const sel = this.el.preset;
+      sel.innerHTML = '';
+      for (const p of this.presets) {
+        const o = document.createElement('option');
+        o.value = p.file; o.textContent = p.name; o.title = p.description;
+        sel.appendChild(o);
+      }
+      this.updateRunEnabled();
+    } catch (err) {
+      this.el.status.textContent = 'preset load failed: ' + err.message;
+    }
+  }
+
+  async loadSavedPrompts() {
+    try {
+      const r = await fetch('/api/update/prompts');
+      const data = await r.json();
+      const sel = this.el.saved;
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">saved prompts…</option>';
+      for (const p of data.prompts || []) {
+        const o = document.createElement('option');
+        o.value = p.name; o.textContent = p.name; o.title = p.text.slice(0, 120);
+        sel.appendChild(o);
+      }
+      if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+    } catch { /* quiet — side feature */ }
+  }
+
+  // ---- handoff -------------------------------------------------------------
+  // Gallery lightbox ✎ Update dispatches 'ellieedit:open-in-update'
+  // { url, name, path }; url is a jailed gallery file link.
+  async openIn({ url, name, path }) {
+    if (!url) return;
+    try {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(r.status);
+      const blob = await r.blob();
+      const objUrl = URL.createObjectURL(blob);
+      this.stack = createStack({ url: objUrl, name: name || 'image.png', path: path || '' });
+      this.showCurrent();
+      this.el.status.textContent = `source: ${this.stack.entries[0].name}`;
+    } catch (err) {
+      this.el.status.textContent = 'failed to load image: ' + err.message;
+    }
+  }
+
+  // ---- render --------------------------------------------------------------
+  async run() {
+    if (this.running || !this.stack) return;
+    const preset = this.el.preset.value;
+    if (!preset) { this.el.status.textContent = 'pick a preset first'; return; }
+    const srcEntry = source(this.stack);
+    if (!srcEntry.path) { this.el.status.textContent = 'current source has no server path'; return; }
+    const useRandom = this.el.random.checked;
+    const seed = useRandom ? null : (parseInt(this.el.seed.value, 10) || 0);
+    if (!useRandom) this.el.seed.value = String(seed);
+    const prompt = this.el.prompt.value;
+    this.running = true;
+    this.el.run.disabled = true;
+    this.el.status.textContent = 'queued to ComfyUI…';
+    const frozenSeed = this.lastSeed;
+    try {
+      const r = await fetch('/api/update/run', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset, path: srcEntry.path, prompt, seed, random: useRandom }),
+      });
+      if (!r.ok) throw new Error((await r.json()).detail || r.status);
+      const data = await r.json();
+      this.lastSeed = data.seed;
+      this.el.seed.value = String(data.seed);
+      this.stack = pushRender(this.stack, {
+        url: data.image, name: `render seed=${data.seed}`, path: data.render_path || '',
+      });
+      this.showCurrent();
+      this.el.status.textContent = `render done (seed ${data.seed})`;
+    } catch (err) {
+      this.el.status.textContent = 'run failed: ' + err.message;
+    }
+    this.running = false;
+    this.el.run.disabled = false;
+    this.updateButtons();
+  }
+
+  // ---- save ----------------------------------------------------------------
+  async save() {
+    if (!this.stack || !saveable(this.stack)) return;
+    const entry = current(this.stack);
+    const tag = prompt('Save to Library — tag/project:', 'zengosoft');
+    if (tag === null) return;
+    try {
+      const r = await fetch('/api/update/save-family', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          render_path: entry.path,
+          original_path: this.stack.entries[0].path,
+          tag,
+          intermediates: this.stack.entries.slice(1, this.stack.idx)
+            .map(e => e.path).filter(Boolean),
+        }),
+      });
+      if (!r.ok) throw new Error((await r.json()).detail || r.status);
+      const data = await r.json();
+      this.el.status.textContent =
+        `saved — final ${data.final} · original ${data.original} (family ${data.family_id})`;
+    } catch (err) {
+      this.el.status.textContent = 'save failed: ' + err.message;
+    }
+  }
+
+  // ---- saved prompts -------------------------------------------------------
+  async savePrompt() {
+    const text = this.el.prompt.value;
+    if (!text.trim()) { this.el.status.textContent = 'nothing to save — prompt box is empty'; return; }
+    const name = prompt('Name this prompt:');
+    if (name === null || !name.trim()) return;
+    await fetch('/api/update/prompts', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim(), text }),
+    });
+    await this.loadSavedPrompts();
+    this.el.saved.value = name.trim();
+    this.el.status.textContent = `prompt saved: ${name.trim()}`;
+  }
+
+  async deletePrompt() {
+    const name = this.el.saved.value;
+    if (!name) return;
+    if (!confirm(`Delete saved prompt "${name}"?`)) return;
+    await fetch(`/api/update/prompts?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
+    await this.loadSavedPrompts();
+    this.el.status.textContent = `prompt deleted: ${name}`;
+  }
+
+  // ---- stack / display -----------------------------------------------------
+  showCurrent() {
+    const s = this.stack;
+    if (!s) return;
+    const cur = current(s), prev = compareEntry(s);
+    this.el.empty.style.display = 'none';
+    this.el.cmp.style.display = 'block';
+    this.el.imgA.src = prev.url;
+    this.el.imgB.src = cur.url;
+    // Match the B-clip wrapper width to A's rendered size so the divider
+    // reveals the same framing on both images.
+    this.el.imgA.onload = () => this.syncComparer();
+    this.syncComparer();
+    this.updateButtons();
+  }
+
+  syncComparer() {
+    this.el.wrapB.style.width = this.cmpPct + '%';
+    this.el.div.style.left = this.cmpPct + '%';
+    const s = this.stack;
+    this.el.tagA.textContent = s && s.idx > 0 ? 'previous' : 'original';
+    this.el.tagB.textContent = s && current(s) ? current(s).name : 'current';
+  }
+
+  updateButtons() {
+    const s = this.stack;
+    this.el.run.disabled = this.running || !s || !this.el.preset.value;
+    this.el.save.disabled = !s || !saveable(s);
+    this.el.pos.textContent = s ? `entry ${s.idx + 1}/${s.entries.length} · source ${s.sourceIdx + 1}` : 'no stack';
+  }
+
+  // ---- events --------------------------------------------------------------
+  bind() {
+    this.el.preset.addEventListener('change', () => this.updateButtons());
+    this.el.run.addEventListener('click', () => this.run());
+    this.el.save.addEventListener('click', () => this.save());
+    this.el.saved.addEventListener('change', () => {
+      const name = this.el.saved.value;
+      if (!name) return;
+      const opt = this.el.saved.selectedOptions[0];
+      if (opt && opt.title) this.el.prompt.value = opt.title;
+    });
+    this.panel.querySelector('[data-act="upd-save-prompt"]')
+      .addEventListener('click', () => this.savePrompt());
+    this.panel.querySelector('[data-act="upd-del-prompt"]')
+      .addEventListener('click', () => this.deletePrompt());
+    this.panel.querySelector('[data-act="upd-swap"]')
+      .addEventListener('click', () => {
+        if (!this.stack) return;
+        this.stack = swap(this.stack);
+        this.el.status.textContent = `source set to entry ${this.stack.sourceIdx + 1}`;
+        this.updateButtons();
+      });
+    this.panel.querySelector('[data-act="upd-revert"]')
+      .addEventListener('click', () => {
+        if (!canRevert(this.stack)) return;
+        this.stack = revert(this.stack);
+        this.showCurrent();
+      });
+    this.panel.querySelector('[data-act="upd-revert-orig"]')
+      .addEventListener('click', () => {
+        if (!this.stack) return;
+        this.stack = revertToOriginal(this.stack);
+        this.showCurrent();
+      });
+
+    // Draggable comparer divider — pointer events cover mouse + iPad touch.
+    const stage = this.el.cmp;
+    const drag = e => {
+      const rect = this.el.imgA.getBoundingClientRect();
+      if (!rect.width) return;
+      const pct = Math.min(100, Math.max(0, ((e.clientX - rect.left) / rect.width) * 100));
+      this.cmpPct = pct;
+      this.syncComparer();
+    };
+    let dragging = false;
+    stage.addEventListener('pointerdown', e => {
+      dragging = true;
+      stage.setPointerCapture(e.pointerId);
+      drag(e);
+    });
+    stage.addEventListener('pointermove', e => { if (dragging) drag(e); });
+    stage.addEventListener('pointerup', () => { dragging = false; });
+    stage.addEventListener('pointercancel', () => { dragging = false; });
+  }
+}
+
+registerModule({
+  name: 'update',
+  label: 'Update',
+  icon: '✎',
+  order: 0,
+  mount: (panel) => new UpdateView(panel),
+});

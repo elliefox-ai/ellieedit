@@ -177,6 +177,7 @@ function panelHTML() {
       <span class="fname" data-id="viewer-name"></span>
       <button class="ee-btn primary" data-act="viewer-promote" title="Promote to Library (P)">⬆ Promote</button>
       <button class="ee-btn primary" data-act="to-facecycle">→ FaceCycle</button>
+      <button class="ee-btn" data-act="to-update" title="Open in Update tab (version stack)">✎ Update</button>
       <button class="ee-btn" data-act="close">✕</button>
     </div>
     <div class="stage"><img data-id="viewer-img" alt=""></div>
@@ -771,6 +772,14 @@ export class Gallery {
       const url = this.fileUrl(item.path);
       window.dispatchEvent(new CustomEvent('ellieedit:open-in-facecycle',
         { detail: { url, name: item.name } }));
+      this.closeViewer();
+    });
+    act('to-update').addEventListener('click', () => {
+      const item = this.items[this.viewIdx];
+      if (!item) return;
+      window.dispatchEvent(new CustomEvent('ellieedit:open-in-update',
+        { detail: { url: this.fileUrl(item.path), name: item.name, path: item.path } }));
+      window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'update' } }));
       this.closeViewer();
     });
     this.el.viewerImg.addEventListener('click', e => { if (e.target === this.el.viewerImg) this.closeViewer(); });
