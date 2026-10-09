@@ -10,10 +10,16 @@ import asyncio, hashlib, json, os, shutil, sys, tempfile, time
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-BASE = "http://127.0.0.1:8800"
-MANIFEST = Path(__file__).resolve().parents[1] / ".pending-delete.json"
-LEDGER = Path(__file__).resolve().parents[1] / ".dupe-verdicts.jsonl"
-SIGNALS_LOG = Path(__file__).resolve().parents[1] / ".dupe-signals.jsonl"
+BASE = os.environ.get("ELLIEEDIT_PROBE_BASE", "http://127.0.0.1:8800")
+MANIFEST = Path(os.environ.get(
+    "ELLIEEDIT_PENDING_MANIFEST",
+    str(Path(__file__).resolve().parents[1] / ".pending-delete.json")))
+LEDGER = Path(os.environ.get(
+    "ELLIEEDIT_DUPE_LEDGER",
+    str(Path(__file__).resolve().parents[1] / ".dupe-verdicts.jsonl")))
+SIGNALS_LOG = Path(os.environ.get(
+    "ELLIEEDIT_DUPE_SIGNALS_LOG",
+    str(Path(__file__).resolve().parents[1] / ".dupe-signals.jsonl")))
 os.makedirs(".probes", exist_ok=True)
 
 # iPad PWA viewport — the operator's device. Mandatory for screenshots.
@@ -104,7 +110,10 @@ async def main():
             # Click a FRESH family: the first unresolved card can carry an
             # all-deferred ledger entry (deferred stays 'unresolved' but its
             # verdicts pre-load, so pick is a no-op and the probe dead-ends).
-            # Walk the list via API; click the first family with no preload.
+            # Walk the list via API; click the first family with no preload
+            # whose member files ALL still exist (vanishing members 404 their
+            # thumbs and dead-end the champion assertions — the live tree has
+            # such stragglers as of 2026-10-09b).
             await pg.evaluate("""async () => {
               let cursor = '';
               for (;;) {
@@ -113,6 +122,8 @@ async def main():
                 for (const it of d.items) {
                   const det = await fetch('/api/dupe/families/' + it.id)
                     .then(r => r.json());
+                  if (det.members.some(m => m.exists === false || !m.thumb))
+                    continue;
                   const v = det.verdict || {};
                   const judged = Object.values(v).filter(Boolean);
                   if (!judged.length) {
@@ -140,6 +151,15 @@ async def main():
                 f"family entry is not zoom-first: {zf}"
             await pg.evaluate("() => document.querySelector('#ss-zoom-back').click()")
             await pg.wait_for_timeout(600)
+            # cold-cache thumbs on /mnt can take seconds; wait for the
+            # champion image to actually decode before layout assertions
+            try:
+                await pg.wait_for_function(
+                    """() => { const i = document.querySelector('.ss-champ img');
+                              return i && i.complete && i.naturalWidth > 0; }""",
+                    timeout=30000)
+            except Exception:
+                pass
             ss = await pg.evaluate("""() => ({
               header: !!document.querySelector('.ss-header'),
               champion: (() => { const c = document.querySelector('.ss-champ');
@@ -1601,6 +1621,62 @@ async def main():
             # A majority-rejected resolved family re-enters the unresolved
             # queue as a PRE-MARKED UNCOMMITTED draft: normal zoom/flip/Enter
             # commit loop; the mass action covers still-uncommitted ones only.
+            # Earlier sections consume the fresh unresolved families, so the
+            # scratch runner pre-seeds two dedicated death-row families
+            # (guarded — never on a live root).
+            if os.environ.get("ELLIEEDIT_DUPE_SEED_OK") == "1":
+                from PIL import Image as _Image
+                _dr_root = Path(os.environ.get(
+                    "ELLIEEDIT_DUPE_ROOT", "/mnt/shared/_Incoming/DupeReview"))
+                _dr_fams = [
+                    ("fam-dea7babe0001", "probe-dr1",
+                     ["s1.png", "s2.png", "s3.png"]),
+                    ("fam-dea7babe0002", "probe-dr2", ["t1.png", "t2.png"]),
+                ]
+                for _fid, _folder, _files in _dr_fams:
+                    _rels = []
+                    for _j, _f in enumerate(_files):
+                        _rel = f"{_folder}/{_f}"
+                        (_dr_root / _folder).mkdir(parents=True, exist_ok=True)
+                        _Image.new("RGB", (320, 240),
+                                   (120, 30 + 40 * _j, 90)).save(_dr_root / _rel)
+                        _rels.append(_rel)
+                    (_dr_root / ".dupes" / "families" / f"{_fid}.json").write_text(
+                        json.dumps({
+                            "format": "dupe-analyzer.family", "version": 1,
+                            "id": _fid, "created": "2026-10-09T00:00:00-07:00",
+                            "root": str(_dr_root), "authored": False,
+                            "members": [
+                                {"path": r, "abs_path": str(_dr_root / r),
+                                 "size": (_dr_root / r).stat().st_size,
+                                 "mtime": int((_dr_root / r).stat().st_mtime),
+                                 "dhash": "0" * 16, "phash": "1" * 16}
+                                for r in _rels],
+                            "edges": [{"a": _rels[0], "b": _rels[1],
+                                       "tier": "exact", "distance": 0}],
+                            "related": []}))
+                _idx_path = _dr_root / ".dupes" / "index.json"
+                _idx = json.loads(_idx_path.read_text())
+                _have = {f["id"] for f in _idx["families"]}
+                for _fid, _folder, _files in _dr_fams:
+                    if _fid not in _have:
+                        _idx["families"].append({
+                            "id": _fid, "size": len(_files),
+                            "tiers": ["exact"],
+                            "first_member": f"{_folder}/{_files[0]}",
+                            "authored": False})
+                _idx_path.write_text(json.dumps(_idx))
+                report["dr_seeded"] = True
+                # the client cached its listing under the pre-seed index key —
+                # reload for a clean slate, then re-enter the Dupe tab
+                await pg.reload(wait_until="networkidle")
+                await pg.wait_for_timeout(2000)
+                await pg.evaluate("""() => {
+                  const btn = [...document.querySelectorAll('#tabbar .tab')]
+                    .find(t => t.dataset.name === 'dupe');
+                  btn.click();
+                }""")
+                await pg.wait_for_timeout(3000)
             await pg.evaluate("() => { try { localStorage.eeAutoAdvance = '0'; } catch (_) {} }")
             dr_seed = await pg.evaluate("""async () => {
               let cursor = '';
@@ -1611,6 +1687,8 @@ async def main():
                   if ((it.size || 0) < 3) continue;
                   const det = await fetch('/api/dupe/families/' + it.id)
                     .then(r => r.json());
+                  if (det.members.some(m => m.exists === false || !m.thumb))
+                    continue;
                   if (det.state === 'unresolved' &&
                       !Object.values(det.verdict || {}).filter(Boolean).length)
                     return det;
@@ -1728,6 +1806,8 @@ async def main():
                   if ((it.size || 0) < 2) continue;
                   const det = await fetch('/api/dupe/families/' + it.id)
                     .then(r => r.json());
+                  if (det.members.some(m => m.exists === false || !m.thumb))
+                    continue;
                   if (det.state === 'unresolved' &&
                       !Object.values(det.verdict || {}).filter(Boolean).length)
                     return det;
@@ -1796,8 +1876,10 @@ async def main():
             import re as _re
             m_label = _re.search(r"\((\d+) files", bar_label)
             assert m_label, f"label missing file count: {bar_label}"
-            # the mass set is EXACTLY the still-uncommitted seed (the first
-            # seed was Enter-committed; real families were never opened)
+            # the mass set is EXACTLY the still-uncommitted rehydrated
+            # families this session: dr2 plus (legitimately) the signals-
+            # seeded tie family from section 10 if it was never re-committed.
+            # The first death-row seed dropped out via its Enter commit.
             captured = {}
             async def _capture(route):
                 import json as _json
@@ -1809,12 +1891,22 @@ async def main():
                 "() => document.querySelector('#dupe-death-commit').click()")
             await pg.wait_for_timeout(2000)
             report["dr_mass_request"] = captured.get("body")
-            assert captured.get("body", {}).get("families") == [dr2["id"]], \
-                f"mass POST families wrong: {captured.get('body')}"
+            mass_fams = (captured.get("body") or {}).get("families") or []
+            assert dr2["id"] in mass_fams, \
+                f"mass POST missing the uncommitted seed: {captured.get('body')}"
+            assert mass_fams == list(dict.fromkeys(mass_fams)) \
+                and "fam-aaaaaaaa0004" not in mass_fams, \
+                f"mass POST has dupes or an Enter-committed family: {mass_fams}"
             assert captured["body"].get("expected_files") == int(m_label.group(1)), \
                 f"mass POST count != label: {captured['body']} vs {bar_label}"
-            assert int(m_label.group(1)) == dr2_rej_files, \
-                f"label count != family rejected files: {bar_label} vs {dr2_rej_files}"
+            # label count == stat-exact rejected files across the mass set
+            mass_files = await pg.evaluate("""async (fids) => {
+              const d = await fetch('/api/dupe/death-row').then(r => r.json());
+              return d.items.filter(x => fids.includes(x.id))
+                .reduce((a, r) => a + r.rejected_files, 0);
+            }""", mass_fams)
+            assert int(m_label.group(1)) == mass_files, \
+                f"label count != stat-exact mass set: {bar_label} vs {mass_files}"
             bar_gone = await pg.evaluate("""() => {
               const b = document.querySelector('#dupe-deathbar');
               return !b || b.style.display === 'none';
