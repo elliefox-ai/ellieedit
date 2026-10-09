@@ -8,3 +8,4 @@ __pycache__/
 .dupe-verdicts.jsonl
 .dupe-signals.jsonl
 .pending-audit.jsonl
+data/
