@@ -70,14 +70,8 @@ function panelHTML() {
     .gal-cell.thumb-loading img { opacity: 0; }
     .gal-cell.thumb-loaded img { opacity: 1; transition: opacity 0.25s ease-in; }
     @keyframes gal-shimmer { to { background-position: -200% 0; } }
-    /* Library promote: 44px iPad-reachable action, top-left */
-    .gal-cell .gal-promote {
-      position: absolute; top: 4px; left: 4px; z-index: 3;
-      min-width: 44px; min-height: 44px; padding: 0 8px;
-      background: rgba(20,20,40,0.75); color: #b8c8ff; font-size: 16px;
-      border-color: #4a4a6c; line-height: 1;
-    }
-    .gal-cell .gal-promote:active { background: #3a3ab0; color: #fff; }
+    /* Promote lives in the lightbox viewer bar (2026-10-09c): cards are
+       clean thumbnails; 44px touch target on the viewer action. */
     /* Pending-delete badge (All view + pending filter): red edge + tint */
     .gal-cell.ispending { border-color: #d04040; }
     .gal-cell.ispending img { filter: sepia(0.35) hue-rotate(-30deg) brightness(0.8); }
@@ -134,6 +128,13 @@ function panelHTML() {
     .gal-viewer .stage { flex: 1; display: flex; align-items: center; justify-content: center;
       overflow: hidden; min-height: 0; }
     .gal-viewer .stage img { max-width: 100%; max-height: 100%; object-fit: contain; }
+    .gal-viewer .bar .ee-btn { min-height: 44px; }
+    .gal-viewer .moved-note {
+      display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+      background: rgba(20,20,40,0.85); color: #b0b0d0; font-size: 14px;
+      padding: 12px 20px; border-radius: 8px; border: 1px solid #4a4a6c;
+      pointer-events: none;
+    }
     .gal-viewer .navzone { position: absolute; top: 60px; bottom: 0; width: 30%;
       display: flex; align-items: center; justify-content: center; font-size: 34px;
       color: rgba(255,255,255,0.25); cursor: pointer; user-select: none; -webkit-user-select: none; }
@@ -174,10 +175,12 @@ function panelHTML() {
   <div class="gal-viewer" data-id="viewer">
     <div class="bar">
       <span class="fname" data-id="viewer-name"></span>
+      <button class="ee-btn primary" data-act="viewer-promote" title="Promote to Library (P)">⬆ Promote</button>
       <button class="ee-btn primary" data-act="to-facecycle">→ FaceCycle</button>
       <button class="ee-btn" data-act="close">✕</button>
     </div>
     <div class="stage"><img data-id="viewer-img" alt=""></div>
+    <div class="moved-note" data-id="viewer-note">already moved — › for next</div>
     <div class="navzone left" data-act="prev">‹</div>
     <div class="navzone right" data-act="next">›</div>
   </div>`;
@@ -210,6 +213,7 @@ export class Gallery {
       viewer: panel.querySelector('[data-id="viewer"]'),
       viewerName: panel.querySelector('[data-id="viewer-name"]'),
       viewerImg: panel.querySelector('[data-id="viewer-img"]'),
+      viewerNote: panel.querySelector('[data-id="viewer-note"]'),
       pendingBar: panel.querySelector('[data-id="pending-bar"]'),
       pdMsg: panel.querySelector('[data-id="pd-msg"]'),
       pdDeleteAll: panel.querySelector('[data-act="pd-delete-all"]'),
@@ -523,6 +527,8 @@ export class Gallery {
   }
 
   // ---- promote to library ----------------------------------------------
+  // Returns an outcome so callers can react: 'moved' | 'already' (source
+  // file was already gone — treated as resolved) | 'cancel' | 'error'.
   async promoteCell(item, cell) {
     let tag = '';
     try {
@@ -530,7 +536,7 @@ export class Gallery {
       tag = d.tag || '';
     } catch { /* derive is best-effort — empty prompt is fine */ }
     const input = prompt(`Promote to Library — tag/project:`, tag);
-    if (input === null) return;  // cancelled
+    if (input === null) return 'cancel';
     tag = input.trim().toLowerCase() || tag;
     try {
       const r = await fetch('/api/library/promote', {
@@ -541,25 +547,43 @@ export class Gallery {
         const err = await r.json().catch(() => ({}));
         if (r.status === 404) {  // double-promote: source already moved
           this.toast(`${item.name} already promoted`);
-          cell.remove();          // reflect reality — no ghost card
+          cell?.remove();         // reflect reality — no ghost card
           this.items = this.items.filter(i => i.path !== item.path);
           this.updateActionBars();
-          return;
+          return 'already';
         }
         throw new Error(err.detail || r.status);
       }
       // Move succeeded: the file is gone from GALLERY_ROOT — remove the
       // card, don't show a ghost.
-      cell.remove();
+      cell?.remove();
       this.items = this.items.filter(i => i.path !== item.path);
       this.selected.delete(item.path);
       this.updateActionBars();
       this.updateMarkCount();
       this.toast(`Promoted ${item.name} → ${tag}`);
       window.dispatchEvent(new CustomEvent('ellieedit:library-changed'));
+      return 'moved';
     } catch (err) {
       this.toast(`Promote failed: ${err.message}`, true);
+      return 'error';
     }
+  }
+
+  // Lightbox promote (P / ⬆ button): promote, then advance to the image
+  // that now sits at the same index (next-in-listing). CLOSE-AT-END: when
+  // the promoted image was the last one, the lightbox closes — no wrap,
+  // so a promote session ends instead of re-looping promoted work.
+  async promoteFromViewer() {
+    const idx = this.viewIdx;
+    const item = this.items[idx];
+    if (!item) return;
+    const cell = [...this.el.grid.children].find(c => c.dataset.path === item.path);
+    const res = await this.promoteCell(item, cell);
+    if (res !== 'moved' && res !== 'already') return;  // cancel/error: stay
+    if (this.el.viewer.style.display !== 'flex') return;
+    if (!this.items.length || idx >= this.items.length) { this.closeViewer(); return; }
+    this.openViewer(Math.min(idx, this.items.length - 1));
   }
 
   toast(msg, isErr) {
@@ -683,14 +707,6 @@ export class Gallery {
       await this.syncManifest();
     });
     cell.append(img, check, name, ret);
-    // Library promote: 44px touch target, stopPropagation so the cell's
-    // click (viewer/marking) never fires. Prompt defaults to the derived
-    // project tag from the backend.
-    const promo = document.createElement('button');
-    promo.className = 'ee-btn gal-promote'; promo.textContent = '⬆';
-    promo.title = 'Promote to Library'; promo.setAttribute('aria-label', 'Promote to Library');
-    promo.addEventListener('click', e => { e.stopPropagation(); this.promoteCell(item, cell); });
-    cell.append(promo);
     cell.addEventListener('click', () => {
       if (this.deleteMode) {
         // Deferred: visual flip only — no fetch, no re-render, no grid swap.
@@ -724,6 +740,13 @@ export class Gallery {
   openViewer(idx) {
     this.viewIdx = idx;
     const it = this.items[idx];
+    this.el.viewerNote.style.display = 'none';
+    this.el.viewerImg.onload = () => { this.el.viewerNote.style.display = 'none'; };
+    this.el.viewerImg.onerror = () => {
+      // Quiet "already moved" state: file gone (promoted/deleted elsewhere);
+      // navigation still works — no error dialog.
+      if (this.el.viewer.style.display === 'flex') this.el.viewerNote.style.display = 'block';
+    };
     this.el.viewerImg.src = this.fileUrl(it.path);
     this.el.viewerName.textContent = `${it.name} · ${it.width}×${it.height} · ${new Date(it.mtime * 1000).toLocaleString()}`;
     this.el.viewer.style.display = 'flex';
@@ -741,6 +764,7 @@ export class Gallery {
     act('close').addEventListener('click', () => this.closeViewer());
     act('prev').addEventListener('click', () => this.nav(-1));
     act('next').addEventListener('click', () => this.nav(1));
+    act('viewer-promote').addEventListener('click', () => this.promoteFromViewer());
     act('to-facecycle').addEventListener('click', () => {
       const item = this.items[this.viewIdx];
       if (!item) return;
@@ -753,6 +777,7 @@ export class Gallery {
     this.onKey = e => {
       if (this.el.viewer.style.display !== 'flex') return;
       if (e.key === 'Escape') this.closeViewer();
+      else if (e.key === 'p' || e.key === 'P') this.promoteFromViewer();
       else if (e.key === 'ArrowLeft') this.nav(-1);
       else if (e.key === 'ArrowRight') this.nav(1);
     };
