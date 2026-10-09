@@ -57,6 +57,47 @@ FAMILY_ID_RE = re.compile(r"^fam-[0-9a-f]{12}$")
 PAGE_SIZE = 40
 SCAN_LOG = Path("/tmp/ellieedit-dupescan.log")
 
+# ------------------------------------------- death-row rehydration (2026-10-09b)
+# The operator's pre-purge confidence sweep: RESOLVED families whose latest
+# verdict is MAJORITY-REJECTED re-enter the normal unresolved queue as
+# pre-marked UNCOMMITTED drafts (the client applies the historical verdict
+# map as the current draft; only his own re-commits ever write the ledger).
+# Read-only over the ledger: these endpoints consume history, never append.
+
+DEATH_ROW_TTL = 300.0         # bytes summary cache (an ~11k-stat /mnt walk)
+_death_row_cache: tuple[str, list[dict]] | None = None  # (idx:ledger key, rows)
+
+
+def _death_row_rows(verdicts: dict | None = None,
+                    idx: dict | None = None) -> list[dict]:
+    """Majority-rejected resolved families, biggest-rejected-first.
+    Majority = rejected >= kept and rejected > 0 over the LATEST ledger
+    entry only (latest-verdict-wins). Pure ledger+index read — no file
+    stats here; bytes are computed lazily by /death-row for the summary."""
+    verdicts = verdicts if verdicts is not None else _verdicts()
+    fams = (idx or _index())["families"]
+    rows = []
+    for f in fams:
+        v = verdicts.get(f["id"])
+        if not v:
+            continue
+        kept = rejected = 0
+        for val in (v.get("members") or {}).values():
+            if val == "kept":
+                kept += 1
+            elif val == "rejected":
+                rejected += 1
+        if rejected > 0 and rejected >= kept:
+            rows.append({
+                "id": f["id"], "size": f.get("size"),
+                "tiers": f.get("tiers", []),
+                "first_member": f.get("first_member", ""),
+                "state": "unresolved", "rehydrated": True,
+                "rejected": rejected, "kept": kept,
+            })
+    rows.sort(key=lambda r: (-r["rejected"], r["id"]))
+    return rows
+
 # Slow-storage defenses: the canonical tree lives on /mnt (10-100x slower
 # than local disk), so every hot endpoint serves from mtime-keyed caches and
 # never walks or stats the tree per request.
@@ -394,6 +435,17 @@ def families(state: str = "unresolved", cursor: str = "",
                 and "rejected" in (verdicts[f["id"]].get("members") or {}).values()
                 and bool(STRICT_TIERS & set(f.get("tiers", [])))),
         })
+    # Death-row rehydration (2026-10-09b): majority-rejected resolved
+    # families ride the normal unresolved queue, appended after the
+    # genuinely unresolved ones, biggest-rejected-first. Each is a
+    # pre-marked UNCOMMITTED draft client-side (rehydrated flag).
+    rehydrated = 0
+    if state == "unresolved":
+        dh = _death_row_rows(verdicts, idx)
+        have = {r["id"] for r in rows}
+        dh = [r for r in dh if r["id"] not in have]
+        rows = rows + dh
+        rehydrated = len(dh)
     start = 0
     if cursor:
         try:
@@ -429,7 +481,121 @@ def families(state: str = "unresolved", cursor: str = "",
     except OSError:
         key = f"{idx_mt}:0.0"
     return {"items": page, "next_cursor": next_cursor,
-            "counts": counts, "total": len(idx["families"]), "key": key}
+            "counts": counts, "total": len(idx["families"]), "key": key,
+            "rehydrated": rehydrated}
+
+
+@router.get("/death-row")
+def death_row():
+    """Mass-commit summary: every majority-rejected resolved family with
+    honest rejected-file counts AND bytes (stat of each rejected member
+    still on disk — same size source the deletion view shows). Cached on
+    the index:ledger key; the first walk after a change stats /mnt."""
+    global _death_row_cache
+    idx = _index()
+    try:
+        idx_mt = (DUPE_DATA / "index.json").stat().st_mtime
+    except OSError:
+        idx_mt = 0.0
+    try:
+        key = f"{idx_mt}:{float(LEDGER.stat().st_mtime)}"
+    except OSError:
+        key = f"{idx_mt}:0.0"
+    if _death_row_cache and _death_row_cache[0] == key:
+        rows = _death_row_cache[1]
+    else:
+        verdicts = _verdicts()
+        rows = []
+        for r in _death_row_rows(verdicts, idx):
+            fam_verdict = (verdicts.get(r["id"], {}).get("members") or {})
+            rejected = [p for p, v in fam_verdict.items() if v == "rejected"]
+            files = 0
+            nbytes = 0
+            for rel in rejected:
+                try:
+                    p = jailed(rel)
+                    if not p.is_file():
+                        continue
+                    files += 1
+                    nbytes += p.stat().st_size
+                except HTTPException:
+                    continue
+            rows.append({**r, "rejected_files": files, "rejected_bytes": nbytes})
+        rows.sort(key=lambda r: (-r["rejected"], r["id"]))
+        _death_row_cache = (key, rows)
+    return {
+        "items": rows,
+        "families": len(rows),
+        "total_files": sum(r["rejected_files"] for r in rows),
+        "total_bytes": sum(r["rejected_bytes"] for r in rows),
+    }
+
+
+class DeathRowBody(BaseModel):
+    families: list[str]
+    expected_files: int | None = None
+
+
+@router.post("/death-row/commit")
+def death_row_commit(body: DeathRowBody, request: Request = None):
+    """Mass enqueue: every still-rejected member of the given (validated
+    majority-rejected) families -> the EXISTING Pending Delete manifest.
+    Nothing unlinks here — /api/pending/confirm stays the only destructive
+    endpoint. Missing files (already promoted/pardoned/vanished) are skipped
+    and counted, never invented. expected_files is an optimistic guard so a
+    stale button label cannot enqueue a different set than confirmed."""
+    from .pending import _audit, _load, _save, manifest_lock
+    if not body.families:
+        raise HTTPException(400, "no families")
+    dr = {r["id"]: r for r in _death_row_rows()}
+    bad = [f for f in body.families if not FAMILY_ID_RE.match(f) or f not in dr]
+    if bad:
+        raise HTTPException(400, f"not majority-rejected families: {bad[:3]}")
+    verdicts = _verdicts()
+    batch: dict[str, str] = {}          # rel path -> family id (dedupe)
+    for fid in dict.fromkeys(body.families):
+        for p, v in (verdicts.get(fid, {}).get("members") or {}).items():
+            if v == "rejected":
+                batch.setdefault(p.replace("\\", "/"), fid)
+    existing: list[str] = []
+    missing = 0
+    for rel in batch:
+        try:
+            p = jailed(rel)
+            if not p.is_file():
+                missing += 1
+                continue
+        except HTTPException:
+            missing += 1
+            continue
+        existing.append(rel)
+    if body.expected_files is not None and len(existing) != body.expected_files:
+        raise HTTPException(
+            409, f"death row changed — {len(existing)} files on disk, "
+                 f"button showed {body.expected_files}")
+    with manifest_lock:
+        m = _load()
+        now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        added = already = 0
+        added_keys: list[str] = []
+        for rel in existing:
+            try:
+                key = jailed(rel).resolve().relative_to(
+                    _gallery_mod.GALLERY_ROOT.resolve()).as_posix()
+            except (HTTPException, OSError, ValueError):
+                key = rel  # dupe-pool-only member: keep dupe-relative key
+            if key not in m:
+                m[key] = now
+                added += 1
+                added_keys.append(key)
+            else:
+                already += 1
+        _save(m)
+    _audit("death_row_commit", added_keys, request)
+    return {"added": added, "already_pending": already, "missing": missing,
+            "count": len(m), "families": len(set(body.families)),
+            "bytes": sum(jailed(rel).stat().st_size for rel in existing
+                         if jailed(rel).is_file())}
 
 
 @router.get("/families/{fid}")
@@ -474,6 +640,11 @@ def family_detail(fid: str):
         "created": fam.get("created"),
         "root": str(DUPE_ROOT),
         "state": _family_state(fid, verdicts),
+        # Death-row rehydration (2026-10-09b): a majority-rejected resolved
+        # family detail carries the flag so the client treats the historical
+        # verdict map as the CURRENT UNCOMMITTED DRAFT (normal zoom/commit
+        # flow) instead of the read-only committed view.
+        "rehydrated": fid in {r["id"] for r in _death_row_rows(verdicts)},
         "members": [{k: v for k, v in m.items() if k != "_p"} for m in members],
         "edges": fam.get("edges", []),
         "related": [

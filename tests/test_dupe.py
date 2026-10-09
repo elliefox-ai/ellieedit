@@ -968,3 +968,139 @@ def test_probe_teardown_asserts_zero_probe_entries():
     assert finally_blk.index("_restore_files()") \
         < finally_blk.index("manifest reconcile".replace("manifest reconcile",
                                                          "manifest_err = None"))
+
+
+# ------------------------------------------------- death-row rehydration (2026-10-09b)
+
+def _majority_verdict(client, fid, keep=1, reject=2):
+    fam = client.get(f"/api/dupe/families/{fid}").json()
+    paths = [m["path"] for m in fam["members"]]
+    members = {p: "kept" for p in paths[:keep]}
+    for p in paths[keep:keep + reject]:
+        members[p] = "rejected"
+    r = client.post(f"/api/dupe/families/{fid}/verdict",
+                    json={"members": members, "note": "death row test"})
+    assert r.status_code == 200
+    return members
+
+
+def test_deathrow_rehydration_appended_sorted(env, client):
+    """Majority-rejected resolved families ride the unresolved queue after
+    the genuinely unresolved ones, biggest-rejected-first, flagged."""
+    root, _, _ = env
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)   # 2 rej
+    _majority_verdict(client, "fam-bbbbbbbbbbbb", keep=0, reject=1)   # 1 rej
+    lst = client.get("/api/dupe/families?state=unresolved").json()
+    ids = [it["id"] for it in lst["items"]]
+    # unresolved first, then rehydrated rows in rejected-desc order
+    assert ids[-2:] == ["fam-aaaaaaaaaaaa", "fam-bbbbbbbbbbbb"]
+    tail = lst["items"][-2:]
+    assert all(it["rehydrated"] and it["state"] == "unresolved" for it in tail)
+    assert tail[0]["rejected"] == 2 and tail[0]["kept"] == 1
+    assert lst["rehydrated"] == 2
+    # counts stay honest: the rehydrated families are still resolved
+    assert lst["counts"] == {"unresolved": 1, "resolved": 2}
+
+
+def test_deathrow_latest_verdict_wins(env, client):
+    """An overriding re-commit that flips the majority drops the family out
+    of the rehydration; a flip INTO majority-rejected pulls one back in."""
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    assert client.get("/api/dupe/families?state=unresolved").json()["rehydrated"] == 1
+    # override: now majority kept
+    client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict", json={
+        "members": {"a.png": "kept", "b.png": "kept", "sub/c.png": "rejected"}})
+    assert client.get("/api/dupe/families?state=unresolved").json()["rehydrated"] == 0
+    # flip back into majority-rejected
+    client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict", json={
+        "members": {"a.png": "rejected", "b.png": "rejected", "sub/c.png": "kept"}})
+    lst = client.get("/api/dupe/families?state=unresolved").json()
+    assert lst["rehydrated"] == 1
+    assert lst["items"][-1]["rejected"] == 2
+
+
+def test_deathrow_endpoints_never_write_ledger(env, client):
+    """The rehydration view READS history; listing/detail/summary must not
+    append a single ledger line."""
+    import os
+    before = dupe_mod.LEDGER.stat().st_size if dupe_mod.LEDGER.exists() else 0
+    _majority_verdict(client, "fam-aaaaaaaaaaaa")
+    seeded = dupe_mod.LEDGER.stat().st_size
+    assert seeded >= before
+    client.get("/api/dupe/families?state=unresolved")
+    client.get("/api/dupe/families/fam-aaaaaaaaaaaa")
+    s = client.get("/api/dupe/death-row").json()
+    assert s["families"] == 1
+    assert dupe_mod.LEDGER.stat().st_size == seeded, "read path wrote the ledger"
+
+
+def test_deathrow_summary_bytes_stat_source(env, client):
+    """rejected_bytes comes from stat of files still on disk — a vanished
+    (pardoned/promoted) member drops out of both count and bytes."""
+    root, _, _ = env
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    s = client.get("/api/dupe/death-row").json()
+    row = s["items"][0]
+    assert row["rejected_files"] == 2
+    sizes = sum((root / p).stat().st_size
+                for p in ("b.png", "sub/c.png"))
+    assert row["rejected_bytes"] == sizes
+    assert s["total_files"] == 2 and s["total_bytes"] == sizes
+    # pardon one member by removing it from disk (promote semantics: move out)
+    (root / "sub" / "c.png").unlink()
+    dupe_mod._death_row_cache = None   # force the re-walk
+    s2 = client.get("/api/dupe/death-row").json()
+    assert s2["items"][0]["rejected_files"] == 1
+    assert s2["items"][0]["rejected_bytes"] == (root / "b.png").stat().st_size
+
+
+def test_deathrow_mass_commit_exact_and_never_unlinks(env, client):
+    """Mass commit enqueues EXACTLY the un-pardoned rejected members into
+    the pending manifest; nothing unlinks; expected_files guards staleness."""
+    root, _, _ = env
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    _majority_verdict(client, "fam-bbbbbbbbbbbb", keep=0, reject=1)
+    (root / "sub" / "c.png").unlink()   # one member already promoted away
+    # (fam-b's d.png has no file on disk either — counted missing)
+    r = client.post("/api/dupe/death-row/commit", json={
+        "families": ["fam-aaaaaaaaaaaa", "fam-bbbbbbbbbbbb"],
+        "expected_files": 1})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["added"] == 1 and body["missing"] == 2
+    m = json.loads(pending_mod.MANIFEST.read_text())
+    assert sorted(m) == ["b.png"], m   # exact set: a.png is KEPT, c/d gone
+    # nothing unlinked: the enqueued file is still on disk
+    assert (root / "b.png").is_file()
+    # double commit = no dupes (already_pending)
+    r2 = client.post("/api/dupe/death-row/commit", json={
+        "families": ["fam-aaaaaaaaaaaa", "fam-bbbbbbbbbbbb"], "expected_files": 1})
+    assert r2.json()["already_pending"] == 1 and r2.json()["added"] == 0
+
+
+def test_deathrow_mass_commit_guards(env, client):
+    root, _, _ = env
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    # stale button label -> 409, nothing enqueued
+    r = client.post("/api/dupe/death-row/commit", json={
+        "families": ["fam-aaaaaaaaaaaa"], "expected_files": 99})
+    assert r.status_code == 409
+    assert (json.loads(pending_mod.MANIFEST.read_text())
+            if pending_mod.MANIFEST.exists() else {}) == {}
+    # a family that is not majority-rejected -> 400
+    r = client.post("/api/dupe/death-row/commit", json={
+        "families": ["fam-cccccccccccc"]})
+    assert r.status_code == 400
+    r = client.post("/api/dupe/death-row/commit", json={"families": []})
+    assert r.status_code == 400
+
+
+def test_deathrow_detail_carries_rehydrated_flag(env, client):
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    det = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
+    assert det["rehydrated"] is True and det["state"] == "resolved"
+    assert det["verdict"]["a.png"] == "kept"
+    assert det["verdict"]["b.png"] == "rejected"
+    # untouched family: no flag
+    det2 = client.get("/api/dupe/families/fam-cccccccccccc").json()
+    assert det2["rehydrated"] is False
