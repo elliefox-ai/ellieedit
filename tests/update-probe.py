@@ -239,20 +239,52 @@ async def scratch_e2e(pw, tmp: Path):
         check("revert to original → 1/3", "1/3" in pos, pos)
         check("swap survives revert-to-original", "source 2" in pos, pos)
 
-        # 8. Comparer divider drag works (pointer events)
-        pct_before = await page.evaluate(
-            "() => document.querySelector('#upd-wrap-b').style.width")
+        # 8. Comparer divider: single-box geometry (2026-10-09f). Same
+        #    source on both layers → identical layer boxes; drag changes the
+        #    CLIP only; keyboard arrows adjust; no horizontal squash.
+        layer = await page.evaluate(
+            """() => { const a = document.querySelector('#upd-img-a'),
+                            b = document.querySelector('#upd-img-b');
+                       return { aw: a.clientWidth, ah: a.clientHeight,
+                                bw: b.clientWidth, bh: b.clientHeight }; }""")
+        check("same image → identical layer boxes",
+              layer["aw"] == layer["bw"] and layer["ah"] == layer["bh"],
+              str(layer))
+        clip_before = await page.evaluate(
+            "() => document.querySelector('#upd-wrap-b').style.clipPath")
         box = await page.evaluate(
             """() => { const r = document.querySelector('#upd-cmp').getBoundingClientRect();
-                       return { x: r.x, y: r.y + r.height / 2 }; }""")
+                       return { x: r.x, y: r.y + r.height / 2, w: r.width }; }""")
         await page.mouse.move(box["x"] + 200, box["y"])
         await page.mouse.down()
         await page.mouse.move(box["x"] + 350, box["y"], steps=4)
         await page.mouse.up()
-        pct_after = await page.evaluate(
-            "() => document.querySelector('#upd-wrap-b').style.width")
-        check("comparer divider drags", pct_before != pct_after,
-              f"{pct_before} -> {pct_after}")
+        clip_after = await page.evaluate(
+            "() => document.querySelector('#upd-wrap-b').style.clipPath")
+        check("comparer divider drag changes clip", clip_before != clip_after,
+              f"{clip_before} -> {clip_after}")
+        # clip only: layer boxes unchanged by the drag, at several positions
+        widths = []
+        for pct in (20, 50, 80):
+            await page.evaluate(
+                "(p) => window.__upd.cmpPct = p", pct)
+            await page.evaluate("() => window.__upd.syncComparer()")
+            widths.append(await page.evaluate(
+                """() => { const a = document.querySelector('#upd-img-a'),
+                              b = document.querySelector('#upd-img-b');
+                          return { aw: a.clientWidth, bw: b.clientWidth,
+                                   cw: document.querySelector('#upd-cmp').clientWidth }; }"""))
+        check("rendered widths equal at any divider position (no squash)",
+              all(w["aw"] == w["bw"] == w["cw"] for w in widths)
+              and len({w["aw"] for w in widths}) == 1, str(widths))
+        # keyboard arrows adjust the divider
+        await page.evaluate("() => window.__upd.cmpPct = 50")
+        await page.evaluate("() => window.__upd.syncComparer()")
+        await page.focus('#upd-div')
+        await page.keyboard.press('ArrowRight')
+        kb = await page.evaluate(
+            "() => window.__upd.cmpPct")
+        check("keyboard arrow adjusts divider", kb == 52, str(kb))
 
         await browser.close()
     finally:
@@ -270,7 +302,7 @@ async def live_smoke(pw):
     await page.goto(LIVE, wait_until="networkidle")
     marker = await page.evaluate(
         "() => [...document.querySelectorAll('#tabbar span')].map(s => s.textContent).join(' ')")
-    check("live build marker 2026-10-09d", "2026-10-09d" in marker, marker)
+    check("live build marker 2026-10-09f", "2026-10-09f" in marker, marker)
     tabs = await page.evaluate(
         "() => [...document.querySelectorAll('.tab')].map(t => t.textContent.trim())")
     check("Update tab present on live", any("Update" in t for t in tabs), str(tabs))

@@ -34,11 +34,18 @@ function panelHTML() {
       padding: 12px; position: relative; overflow: hidden; }
     .cmp { position: relative; max-width: 100%; max-height: 100%;
       display: none; touch-action: none; user-select: none; -webkit-user-select: none; }
-    .cmp img { display: block; max-width: 100%; max-height: 76vh; width: auto; height: auto; }
+    /* Single-box geometry (2026-10-09f): ONE container sized by JS to the
+     * source image's aspect ratio; BOTH layers absolute inset:0 with
+     * object-fit:contain — natural sizes never lay the images out
+     * side-by-side, so identical sources produce pixel-identical layer
+     * boxes and the divider drag only ever moves the clip. */
+    .cmp img { display: block; position: absolute; inset: 0; width: 100%;
+      height: 100%; max-width: none; max-height: none; object-fit: contain; }
     .cmp .cmp-b { position: absolute; inset: 0; overflow: hidden; }
-    .cmp .cmp-b img { max-height: 100%; height: 100%; width: auto; }
+    .cmp .cmp-b img { max-height: none; height: 100%; width: 100%; }
     .cmp .cmp-div { position: absolute; top: 0; bottom: 0; width: 3px; background: #7a6aaa;
-      cursor: ew-resize; }
+      cursor: ew-resize; outline: none; }
+    .cmp .cmp-div:focus-visible { background: #b39ae0; }
     .cmp .cmp-div::after { content: '⇔'; position: absolute; top: 50%; left: 50%;
       transform: translate(-50%,-50%); background: #7a6aaa; color: #fff; border-radius: 50%;
       width: 34px; height: 34px; line-height: 34px; text-align: center; font-size: 15px; }
@@ -76,7 +83,9 @@ function panelHTML() {
       <div class="cmp" id="upd-cmp">
         <img id="upd-img-a" alt="previous">
         <div class="cmp-b" id="upd-wrap-b"><img id="upd-img-b" alt="current"></div>
-        <div class="cmp-div" id="upd-div"></div>
+        <div class="cmp-div" id="upd-div" tabindex="0" role="slider"
+          aria-label="before/after divider" aria-valuemin="0" aria-valuemax="100"
+          aria-valuenow="50"></div>
         <span class="cmp-tag a" id="upd-tag-a">before</span>
         <span class="cmp-tag b" id="upd-tag-b">after</span>
       </div>
@@ -106,6 +115,7 @@ class UpdateView {
     this.presets = [];
     this.running = false;
     this.cmpPct = 50;           // comparer divider, percent from left
+    window.addEventListener('resize', () => this.fitComparer());
 
     this.loadPresets();
     this.loadSavedPrompts();
@@ -267,16 +277,34 @@ class UpdateView {
     this.el.cmp.style.display = 'block';
     this.el.imgA.src = prev.url;
     this.el.imgB.src = cur.url;
-    // Match the B-clip wrapper width to A's rendered size so the divider
-    // reveals the same framing on both images.
-    this.el.imgA.onload = () => this.syncComparer();
-    this.syncComparer();
+    // ONE container sized to the source image (2026-10-09f): both layers
+    // fill it inset:0 with object-fit:contain, so same-size sources yield
+    // pixel-identical layer boxes — the divider only moves the clip.
+    this.el.imgA.onload = () => this.fitComparer();
+    this.fitComparer();
     this.updateButtons();
   }
 
+  fitComparer() {
+    const img = this.el.imgA, st = this.el.stage, cmp = this.el.cmp;
+    const natW = img.naturalWidth || 0, natH = img.naturalHeight || 0;
+    if (!natW || !natH || cmp.style.display === 'none') return;
+    const availW = Math.max(60, st.clientWidth - 24);
+    const availH = Math.max(60, Math.min(st.clientHeight - 24,
+      window.innerHeight * 0.76));
+    const scale = Math.min(availW / natW, availH / natH);
+    cmp.style.width = Math.round(natW * scale) + 'px';
+    cmp.style.height = Math.round(natH * scale) + 'px';
+    this.syncComparer();
+  }
+
   syncComparer() {
-    this.el.wrapB.style.width = this.cmpPct + '%';
+    // Clip-only divider (2026-10-09f): the top layer keeps its full box and
+    // is clipped by inset() from the right — no width resize, so the layers
+    // never reflow or squash as the divider moves.
+    this.el.wrapB.style.clipPath = `inset(0 ${100 - this.cmpPct}% 0 0)`;
     this.el.div.style.left = this.cmpPct + '%';
+    this.el.div.setAttribute('aria-valuenow', String(Math.round(this.cmpPct)));
     const s = this.stack;
     this.el.tagA.textContent = s && s.idx > 0 ? 'previous' : 'original';
     this.el.tagB.textContent = s && current(s) ? current(s).name : 'current';
@@ -342,6 +370,20 @@ class UpdateView {
     stage.addEventListener('pointermove', e => { if (dragging) drag(e); });
     stage.addEventListener('pointerup', () => { dragging = false; });
     stage.addEventListener('pointercancel', () => { dragging = false; });
+
+    // Keyboard divider adjust (2026-10-09f): arrows move the clip; shift =
+    // coarse steps. The divider is a pure overlay — keys change nothing but
+    // the clip position.
+    this.el.div.addEventListener('keydown', e => {
+      const step = e.shiftKey ? 10 : 2;
+      if (e.key === 'ArrowLeft') {
+        this.cmpPct = Math.max(0, this.cmpPct - step);
+      } else if (e.key === 'ArrowRight') {
+        this.cmpPct = Math.min(100, this.cmpPct + step);
+      } else return;
+      e.preventDefault();
+      this.syncComparer();
+    });
   }
 }
 
