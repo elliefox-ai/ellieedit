@@ -522,14 +522,25 @@ async def main():
                 f"no multi-member unresolved family for the sift pass: {sift_fam}"
             await pg.evaluate("() => document.querySelector('#dupe-back').click()")
             await wait_grid_ready(pg)
-            opened = await pg.evaluate("""(fid) => {
-              const card = [...document.querySelectorAll('.fam-card')]
-                .find(c => c.textContent.includes(fid));
-              if (card) { card.click(); return true; }
-              return false;
-            }""", sift_fam["id"])
+            # the biggest family may sit past PAGE_SIZE — page via Load more
+            # until its card renders (same pattern as the seed path)
+            opened = False
+            for _ in range(40):
+                opened = await pg.evaluate("""(fid) => {
+                  const card = [...document.querySelectorAll('.fam-card')]
+                    .find(c => c.textContent.includes(fid));
+                  if (card) { card.click(); return true; }
+                  const more = document.querySelector('#dupe-loadmore') ||
+                               document.querySelector('#dupe-more');
+                  if (more && !more.disabled) { more.click(); }
+                  return false;
+                }""", sift_fam["id"])
+                if opened:
+                    break
+                await pg.wait_for_timeout(1200)
             await pg.wait_for_timeout(3000)
-            assert opened, f"could not open sift family {sift_fam['id']} from first page"
+            assert opened, f"could not open sift family {sift_fam['id']} (paged)"
+            await pg.wait_for_selector("#ss-sift-btn", timeout=20000)
             await pg.evaluate("() => document.querySelector('#ss-sift-btn').click()")
             await pg.wait_for_timeout(1200)
             sift0 = await pg.evaluate("""() => {
@@ -662,11 +673,35 @@ async def main():
             # ── 7. Commit → verdict + pending manifest + AUTO-ADVANCE ─
             # (2026-10-08p commit&next: flash, then the next unresolved
             # family opens; the committed family flips to resolved.)
+            # Re-open the family the sift commit advanced to, pick one
+            # member in the zoom-first view, then commit via the
+            # bottom-right button.
+            sec7_fid = sift_advanced["fam"]
+            sec7_opened = False
+            for _ in range(40):
+                sec7_opened = await pg.evaluate("""(fid) => {
+                  const card = [...document.querySelectorAll('.fam-card')]
+                    .find(c => c.textContent.includes(fid));
+                  if (card) { card.click(); return true; }
+                  const more = document.querySelector('#dupe-loadmore') ||
+                               document.querySelector('#dupe-more');
+                  if (more && !more.disabled) { more.click(); }
+                  return false;
+                }""", sec7_fid)
+                if sec7_opened:
+                    break
+                await pg.wait_for_timeout(1200)
+            assert sec7_opened, f"could not re-open {sec7_fid} for section 7"
+            await pg.wait_for_timeout(2500)
             counts = await pg.evaluate("""() =>
               (document.querySelector('.ss-header')||{textContent:''}).textContent""")
             report["pre_commit_header"] = counts
             from_fid = await pg.evaluate(
                 "() => (document.querySelector('.ss-header .fam-id')||{}).textContent || null")
+            assert from_fid == sec7_fid, \
+                f"section 7 opened the wrong family: {from_fid} vs {sec7_fid}"
+            await pg.evaluate("() => document.querySelector('#ss-zoom-pick').click()")
+            await pg.wait_for_timeout(600)
             await pg.evaluate("() => document.querySelector('#dupe-commit').click()")
             await pg.wait_for_timeout(400)
             flash = await pg.evaluate(
@@ -704,15 +739,21 @@ async def main():
                                         (json.loads(manifest_backup).keys()
                                          if manifest_backup else [])]
             probe_paths = report["manifest_added"]
-            ledger_tail = LEDGER.read_text().strip().splitlines()[-1:] if LEDGER.exists() else []
-            report["ledger_last"] = ledger_tail
-            # Sift rank payload: latest ledger entry must carry 1-based ranks
-            # for every kept pick, and rejects in the pending manifest.
-            if ledger_tail:
-                last_e = json.loads(ledger_tail[0])
-                kept_paths = [p for p, v in last_e.get("members", {}).items()
+            # Sift rank payload: the SIFT FAMILY's ledger entry must carry
+            # 1-based ranks for every kept pick, and rejects in the pending
+            # manifest. (commit&next means later commits can follow in the
+            # ledger — match the family id, not the last line.)
+            if LEDGER.exists():
+                sift_e = None
+                for ln in reversed(LEDGER.read_text().strip().splitlines()):
+                    e = json.loads(ln)
+                    if e.get("family") == sift_fam["id"]:
+                        sift_e = e
+                        break
+                assert sift_e, f"no ledger entry for sift family {sift_fam['id']}"
+                kept_paths = [p for p, v in sift_e.get("members", {}).items()
                               if v == "kept"]
-                ranks = last_e.get("ranks", {})
+                ranks = sift_e.get("ranks", {})
                 assert set(ranks.keys()) == set(kept_paths) and len(ranks) >= 2, \
                     f"sift ranks missing/mismatched in ledger: {ranks} vs kept {kept_paths}"
                 assert sorted(ranks.values()) == list(range(1, len(ranks) + 1)), \
@@ -887,7 +928,11 @@ async def main():
             await pg.wait_for_timeout(1500)
             # The seed may sit past page 1 (PAGE_SIZE 40 of 600+): page the
             # grid with Load more until its card renders (2026-10-08o fix).
-            for _ in range(40):
+            # A single exhaustion gets ONE recovery: re-force the 'all' pill
+            # (a filter race can leave the unresolved list rendering) and
+            # page again — only a second exhaustion fails.
+            seed_exhausted_once = False
+            for _ in range(60):
                 found = await pg.evaluate(
                     """(fid) => [...document.querySelectorAll('.fam-card')]
                        .some(c => c.textContent.includes(fid))""", seed["id"])
@@ -896,8 +941,15 @@ async def main():
                 more_visible = await pg.evaluate(
                     """() => { const b = document.querySelector('#dupe-more');
                               return !!b && b.style.display !== 'none'; }""")
-                assert more_visible, \
-                    f"seed family {seed['id']} never appeared and no Load more left"
+                if not more_visible:
+                    assert not seed_exhausted_once, \
+                        f"seed family {seed['id']} never appeared and no Load more left"
+                    seed_exhausted_once = True
+                    await pg.evaluate("""() => [...document.querySelectorAll('.dupe-top .pill')]
+                      .find(p => p.dataset.f === 'all').click()""")
+                    await wait_grid_ready(pg)
+                    await pg.wait_for_timeout(1500)
+                    continue
                 await pg.evaluate(
                     "() => document.querySelector('#dupe-loadmore').click()")
                 await wait_grid_ready(pg)
@@ -1398,8 +1450,21 @@ async def main():
             }""")
             assert zf_fam, "no fresh unresolved family for the zoom-first section"
             report["zf_family"] = {k: zf_fam[k] for k in ("id", "size")}
-            await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
-              .find(c => c.textContent.includes('{zf_fam["id"]}'))?.click()""")
+            zf_opened = False
+            for _ in range(40):
+                zf_opened = await pg.evaluate("""(fid) => {
+                  const card = [...document.querySelectorAll('.fam-card')]
+                    .find(c => c.textContent.includes(fid));
+                  if (card) { card.click(); return true; }
+                  const more = document.querySelector('#dupe-loadmore') ||
+                               document.querySelector('#dupe-more');
+                  if (more && !more.disabled) { more.click(); }
+                  return false;
+                }""", zf_fam["id"])
+                if zf_opened:
+                    break
+                await pg.wait_for_timeout(1200)
+            assert zf_opened, f"could not open zf family {zf_fam['id']} (paged)"
             await pg.wait_for_timeout(2500)
             zf_entry = await pg.evaluate("""() => ({
               zoom: !!document.querySelector('#ss-zoom'),
