@@ -1,0 +1,501 @@
+{
+ "name": "Zengostyle transform",
+ "description": "Klein 4B img2img with the full Zengo LoRA chain (zengodraw_faces 0.1/-0.1 -> Octane 0.8 -> Dark Fantasy 0.3 -> FlatDeep_v2 0.6); style text block verbatim, page prompt appended after it.",
+ "params": {
+  "image": {
+   "node": "466",
+   "input": "image"
+  },
+  "seed": {
+   "node": "268",
+   "input": "seed"
+  },
+  "prompt": {
+   "node": "469",
+   "input": "string"
+  },
+  "prompt_order": "after_style_480_via_320"
+ },
+ "graph": {
+  "54": {
+   "inputs": {
+    "filename_prefix": "ellieedit_tmp/update",
+    "images": [
+     "483",
+     0
+    ]
+   },
+   "class_type": "SaveImage",
+   "_meta": {
+    "title": "Save Image"
+   }
+  },
+  "86": {
+   "inputs": {
+    "images": [
+     "483",
+     0
+    ]
+   },
+   "class_type": "PreviewImage",
+   "_meta": {
+    "title": "Preview Image"
+   }
+  },
+  "108": {
+   "inputs": {
+    "noise": [
+     "115",
+     0
+    ],
+    "guider": [
+     "124",
+     0
+    ],
+    "sampler": [
+     "123",
+     0
+    ],
+    "sigmas": [
+     "125",
+     0
+    ],
+    "latent_image": [
+     "112",
+     0
+    ]
+   },
+   "class_type": "SamplerCustomAdvanced",
+   "_meta": {
+    "title": "SamplerCustomAdvanced"
+   }
+  },
+  "109": {
+   "inputs": {
+    "samples": [
+     "108",
+     0
+    ],
+    "vae": [
+     "116",
+     0
+    ]
+   },
+   "class_type": "VAEDecode",
+   "_meta": {
+    "title": "VAE Decode"
+   }
+  },
+  "110": {
+   "inputs": {
+    "image": [
+     "122",
+     0
+    ]
+   },
+   "class_type": "GetImageSize",
+   "_meta": {
+    "title": "Get Image Size"
+   }
+  },
+  "111": {
+   "inputs": {
+    "conditioning": [
+     "113",
+     0
+    ]
+   },
+   "class_type": "ConditioningZeroOut",
+   "_meta": {
+    "title": "Conditioning Zero Out"
+   }
+  },
+  "112": {
+   "inputs": {
+    "width": [
+     "110",
+     0
+    ],
+    "height": [
+     "110",
+     1
+    ],
+    "batch_size": 1
+   },
+   "class_type": "EmptyFlux2LatentImage",
+   "_meta": {
+    "title": "Empty Flux 2 Latent"
+   }
+  },
+  "113": {
+   "inputs": {
+    "text": [
+     "320",
+     0
+    ],
+    "clip": [
+     "323",
+     1
+    ]
+   },
+   "class_type": "CLIPTextEncode",
+   "_meta": {
+    "title": "CLIP Text Encode (Positive Prompt)"
+   }
+  },
+  "115": {
+   "inputs": {
+    "noise_seed": [
+     "268",
+     0
+    ]
+   },
+   "class_type": "RandomNoise",
+   "_meta": {
+    "title": "RandomNoise"
+   }
+  },
+  "116": {
+   "inputs": {
+    "vae_name": "flux2-vae.safetensors"
+   },
+   "class_type": "VAELoader",
+   "_meta": {
+    "title": "Load VAE"
+   }
+  },
+  "117": {
+   "inputs": {
+    "clip_name": "qwen3-4b.safetensors",
+    "type": "flux2",
+    "device": "default"
+   },
+   "class_type": "CLIPLoader",
+   "_meta": {
+    "title": "Load CLIP"
+   }
+  },
+  "118": {
+   "inputs": {
+    "unet_name": "_Flux2Klein\\flux-2-klein-4b.safetensors",
+    "weight_dtype": "default"
+   },
+   "class_type": "UNETLoader",
+   "_meta": {
+    "title": "Load Diffusion Model"
+   }
+  },
+  "122": {
+   "inputs": {
+    "width": [
+     "335",
+     0
+    ],
+    "height": [
+     "335",
+     0
+    ],
+    "upscale_method": "lanczos",
+    "keep_proportion": "resize",
+    "pad_color": "0, 0, 0",
+    "crop_position": "center",
+    "divisible_by": 2,
+    "device": "cpu",
+    "image": [
+     "466",
+     0
+    ]
+   },
+   "class_type": "ImageResizeKJv2",
+   "_meta": {
+    "title": "Resize Image v2"
+   }
+  },
+  "123": {
+   "inputs": {
+    "sampler_name": "euler_ancestral"
+   },
+   "class_type": "KSamplerSelect",
+   "_meta": {
+    "title": "KSamplerSelect"
+   }
+  },
+  "124": {
+   "inputs": {
+    "cfg": 1.0,
+    "model": [
+     "323",
+     0
+    ],
+    "positive": [
+     "114:77",
+     0
+    ],
+    "negative": [
+     "114:76",
+     0
+    ]
+   },
+   "class_type": "CFGGuider",
+   "_meta": {
+    "title": "CFG Guider"
+   }
+  },
+  "125": {
+   "inputs": {
+    "steps": 8,
+    "width": [
+     "110",
+     0
+    ],
+    "height": [
+     "110",
+     1
+    ]
+   },
+   "class_type": "Flux2Scheduler",
+   "_meta": {
+    "title": "Flux2Scheduler"
+   }
+  },
+  "268": {
+   "inputs": {
+    "seed": 0
+   },
+   "class_type": "Seed (rgthree)",
+   "_meta": {
+    "title": "Seed (rgthree)"
+   },
+   "is_changed": [
+    189009915835624
+   ]
+  },
+  "320": {
+   "inputs": {
+    "string_a": [
+     "480",
+     0
+    ],
+    "string_b": [
+     "469",
+     0
+    ],
+    "delimiter": ""
+   },
+   "class_type": "StringConcatenate",
+   "_meta": {
+    "title": "Concatenate Text"
+   }
+  },
+  "322": {
+   "inputs": {
+    "lora_name": "_Flux2Klein\\Personal\\zengodraw_faces_v1_klein4b_base_768_te.safetensors",
+    "strength_model": 0.1,
+    "strength_clip": -0.1,
+    "model": [
+     "118",
+     0
+    ],
+    "clip": [
+     "117",
+     0
+    ]
+   },
+   "class_type": "LoraLoader",
+   "_meta": {
+    "title": "Load LoRA (Model and CLIP)"
+   }
+  },
+  "323": {
+   "inputs": {
+    "lora_name": "_Flux2Klein\\Personal\\FlatDeep_v2\\flatdeep_v2.safetensors",
+    "strength_model": 0.6,
+    "strength_clip": -0.1,
+    "model": [
+     "464",
+     0
+    ],
+    "clip": [
+     "464",
+     1
+    ]
+   },
+   "class_type": "LoraLoader",
+   "_meta": {
+    "title": "Load LoRA (Model and CLIP)"
+   }
+  },
+  "326": {
+   "inputs": {
+    "lora_name": "_Flux2Klein\\Style\\3D\\OctaneRenderKlein4BF - Octane Render.safetensors",
+    "strength_model": 0.8,
+    "strength_clip": -0.1,
+    "model": [
+     "322",
+     0
+    ],
+    "clip": [
+     "322",
+     1
+    ]
+   },
+   "class_type": "LoraLoader",
+   "_meta": {
+    "title": "Load LoRA (Model and CLIP)"
+   }
+  },
+  "331": {
+   "inputs": {
+    "rgthree_comparer": {
+     "images": [
+      {
+       "name": "A",
+       "selected": true,
+       "url": "/api/view?filename=rgthree.compare._temp_xltmo_00005_.png&type=temp&subfolder=&rand=0.5280270045187964"
+      },
+      {
+       "name": "B",
+       "selected": true,
+       "url": "/api/view?filename=rgthree.compare._temp_xltmo_00006_.png&type=temp&subfolder=&rand=0.442260827368234"
+      }
+     ]
+    },
+    "image_a": [
+     "466",
+     0
+    ],
+    "image_b": [
+     "86",
+     0
+    ]
+   },
+   "class_type": "Image Comparer (rgthree)",
+   "_meta": {
+    "title": "Image Comparer (rgthree)"
+   }
+  },
+  "335": {
+   "inputs": {
+    "value": 1440
+   },
+   "class_type": "easy int",
+   "_meta": {
+    "title": "height"
+   }
+  },
+  "464": {
+   "inputs": {
+    "lora_name": "_Flux2Klein\\Style\\Illustration\\Dark Fantasy illustration (Flux2) - D4rk_f4nt4sy_illustr4tion, dark fantasy illustration in a hatched style, with thick lines and pronounced textures.safetensors",
+    "strength_model": 0.3,
+    "strength_clip": -0.1,
+    "model": [
+     "326",
+     0
+    ],
+    "clip": [
+     "326",
+     1
+    ]
+   },
+   "class_type": "LoraLoader",
+   "_meta": {
+    "title": "Load LoRA (Model and CLIP)"
+   }
+  },
+  "466": {
+   "inputs": {
+    "image": "__IMAGE__"
+   },
+   "class_type": "PromptPeek",
+   "_meta": {
+    "title": "\ud83d\udd0d PromptPeek (image \u2192 prompt)"
+   },
+   "is_changed": [
+    1789839375.3317232
+   ]
+  },
+  "469": {
+   "inputs": {
+    "string": "__PROMPT__"
+   },
+   "class_type": "YANC.MultilineString",
+   "_meta": {
+    "title": "Multiline String"
+   }
+  },
+  "480": {
+   "inputs": {
+    "string": "depict this in a strong flatdeep style, zengostyle. STYLIZED SEMIREALISM.\n\nEmphasize layered depth effect.\n\nBold edge highlight creating strong edge separation.\n\nUse a polychromatic palette with rich tonal variations and an expanded color spectrum. Deep, distinct color value across all elements with high color saturation in the distance. \n\n\nUse extremely varied color palette with a broad color gamut. Colors are natural but enhanced to pop.\nReplce monochromatics. Replace monotone. Replace browns.\n\nUse a perfectly balanced histogram.\nEnsure lighting is consistent. Keep the ground detail simple.\nRemove the excessive ground noise.\nMake the ground detail more consistent and coherent. Replace noisy textures and patterns with subtler duotone patterns.\n\nExaggerated layered depth effect. stepped depth details. Crisp cutout edges. \n\nbeautifully rendered forms. sculpted shadows emphasizing depth.\nflat 2d figures on a 3d volumetric plane. stark separation of layers.\nEmphasize depth effect. crisp layered comic art.\n\nRender elements receding with softened level of detail based on distance from the focal plane. \n\n fine lineart throughout. softer lines in the distance.\n\nthe distant background has the softest outlines.\n\nRemove flyaways and loose strands."
+   },
+   "class_type": "YANC.MultilineString",
+   "_meta": {
+    "title": "Style"
+   }
+  },
+  "483": {
+   "inputs": {
+    "boolean": true,
+    "on_true": [
+     "109",
+     0
+    ],
+    "on_false": [
+     "466",
+     0
+    ]
+   },
+   "class_type": "Switch image [Crystools]",
+   "_meta": {
+    "title": "Gen / Original"
+   }
+  },
+  "114:76": {
+   "inputs": {
+    "conditioning": [
+     "111",
+     0
+    ],
+    "latent": [
+     "114:78",
+     0
+    ]
+   },
+   "class_type": "ReferenceLatent",
+   "_meta": {
+    "title": "Set Reference Latent"
+   }
+  },
+  "114:78": {
+   "inputs": {
+    "pixels": [
+     "122",
+     0
+    ],
+    "vae": [
+     "116",
+     0
+    ]
+   },
+   "class_type": "VAEEncode",
+   "_meta": {
+    "title": "VAE Encode"
+   }
+  },
+  "114:77": {
+   "inputs": {
+    "conditioning": [
+     "113",
+     0
+    ],
+    "latent": [
+     "114:78",
+     0
+    ]
+   },
+   "class_type": "ReferenceLatent",
+   "_meta": {
+    "title": "Set Reference Latent"
+   }
+  }
+ }
+}

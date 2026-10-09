@@ -1,0 +1,387 @@
+{
+ "name": "Plain transform",
+ "description": "Klein 4B img2img with no LoRAs and no baked prompt language \u2014 text comes entirely from the page prompt box (no empty-prompt guard; empty prompt = wasted render, accepted).",
+ "params": {
+  "image": {
+   "node": "466",
+   "input": "image"
+  },
+  "seed": {
+   "node": "268",
+   "input": "seed"
+  },
+  "prompt": {
+   "node": "113",
+   "input": "text"
+  },
+  "prompt_order": "prompt_only_no_style_block"
+ },
+ "graph": {
+  "54": {
+   "inputs": {
+    "filename_prefix": "ellieedit_tmp/update",
+    "images": [
+     "483",
+     0
+    ]
+   },
+   "class_type": "SaveImage",
+   "_meta": {
+    "title": "Save Image"
+   }
+  },
+  "86": {
+   "inputs": {
+    "images": [
+     "483",
+     0
+    ]
+   },
+   "class_type": "PreviewImage",
+   "_meta": {
+    "title": "Preview Image"
+   }
+  },
+  "108": {
+   "inputs": {
+    "noise": [
+     "115",
+     0
+    ],
+    "guider": [
+     "124",
+     0
+    ],
+    "sampler": [
+     "123",
+     0
+    ],
+    "sigmas": [
+     "125",
+     0
+    ],
+    "latent_image": [
+     "112",
+     0
+    ]
+   },
+   "class_type": "SamplerCustomAdvanced",
+   "_meta": {
+    "title": "SamplerCustomAdvanced"
+   }
+  },
+  "109": {
+   "inputs": {
+    "samples": [
+     "108",
+     0
+    ],
+    "vae": [
+     "116",
+     0
+    ]
+   },
+   "class_type": "VAEDecode",
+   "_meta": {
+    "title": "VAE Decode"
+   }
+  },
+  "110": {
+   "inputs": {
+    "image": [
+     "122",
+     0
+    ]
+   },
+   "class_type": "GetImageSize",
+   "_meta": {
+    "title": "Get Image Size"
+   }
+  },
+  "111": {
+   "inputs": {
+    "conditioning": [
+     "113",
+     0
+    ]
+   },
+   "class_type": "ConditioningZeroOut",
+   "_meta": {
+    "title": "Conditioning Zero Out"
+   }
+  },
+  "112": {
+   "inputs": {
+    "width": [
+     "110",
+     0
+    ],
+    "height": [
+     "110",
+     1
+    ],
+    "batch_size": 1
+   },
+   "class_type": "EmptyFlux2LatentImage",
+   "_meta": {
+    "title": "Empty Flux 2 Latent"
+   }
+  },
+  "113": {
+   "inputs": {
+    "text": "__PROMPT__",
+    "clip": [
+     "117",
+     0
+    ]
+   },
+   "class_type": "CLIPTextEncode",
+   "_meta": {
+    "title": "CLIP Text Encode (Positive Prompt)"
+   }
+  },
+  "115": {
+   "inputs": {
+    "noise_seed": [
+     "268",
+     0
+    ]
+   },
+   "class_type": "RandomNoise",
+   "_meta": {
+    "title": "RandomNoise"
+   }
+  },
+  "116": {
+   "inputs": {
+    "vae_name": "flux2-vae.safetensors"
+   },
+   "class_type": "VAELoader",
+   "_meta": {
+    "title": "Load VAE"
+   }
+  },
+  "117": {
+   "inputs": {
+    "clip_name": "qwen3-4b.safetensors",
+    "type": "flux2",
+    "device": "default"
+   },
+   "class_type": "CLIPLoader",
+   "_meta": {
+    "title": "Load CLIP"
+   }
+  },
+  "118": {
+   "inputs": {
+    "unet_name": "_Flux2Klein\\flux-2-klein-4b.safetensors",
+    "weight_dtype": "default"
+   },
+   "class_type": "UNETLoader",
+   "_meta": {
+    "title": "Load Diffusion Model"
+   }
+  },
+  "122": {
+   "inputs": {
+    "width": [
+     "335",
+     0
+    ],
+    "height": [
+     "335",
+     0
+    ],
+    "upscale_method": "lanczos",
+    "keep_proportion": "resize",
+    "pad_color": "0, 0, 0",
+    "crop_position": "center",
+    "divisible_by": 2,
+    "device": "cpu",
+    "image": [
+     "466",
+     0
+    ]
+   },
+   "class_type": "ImageResizeKJv2",
+   "_meta": {
+    "title": "Resize Image v2"
+   }
+  },
+  "123": {
+   "inputs": {
+    "sampler_name": "euler_ancestral"
+   },
+   "class_type": "KSamplerSelect",
+   "_meta": {
+    "title": "KSamplerSelect"
+   }
+  },
+  "124": {
+   "inputs": {
+    "cfg": 1.0,
+    "model": [
+     "118",
+     0
+    ],
+    "positive": [
+     "114:77",
+     0
+    ],
+    "negative": [
+     "114:76",
+     0
+    ]
+   },
+   "class_type": "CFGGuider",
+   "_meta": {
+    "title": "CFG Guider"
+   }
+  },
+  "125": {
+   "inputs": {
+    "steps": 8,
+    "width": [
+     "110",
+     0
+    ],
+    "height": [
+     "110",
+     1
+    ]
+   },
+   "class_type": "Flux2Scheduler",
+   "_meta": {
+    "title": "Flux2Scheduler"
+   }
+  },
+  "268": {
+   "inputs": {
+    "seed": 0
+   },
+   "class_type": "Seed (rgthree)",
+   "_meta": {
+    "title": "Seed (rgthree)"
+   },
+   "is_changed": [
+    189009915835624
+   ]
+  },
+  "331": {
+   "inputs": {
+    "rgthree_comparer": {
+     "images": [
+      {
+       "name": "A",
+       "selected": true,
+       "url": "/api/view?filename=rgthree.compare._temp_xltmo_00005_.png&type=temp&subfolder=&rand=0.5280270045187964"
+      },
+      {
+       "name": "B",
+       "selected": true,
+       "url": "/api/view?filename=rgthree.compare._temp_xltmo_00006_.png&type=temp&subfolder=&rand=0.442260827368234"
+      }
+     ]
+    },
+    "image_a": [
+     "466",
+     0
+    ],
+    "image_b": [
+     "86",
+     0
+    ]
+   },
+   "class_type": "Image Comparer (rgthree)",
+   "_meta": {
+    "title": "Image Comparer (rgthree)"
+   }
+  },
+  "335": {
+   "inputs": {
+    "value": 1440
+   },
+   "class_type": "easy int",
+   "_meta": {
+    "title": "height"
+   }
+  },
+  "466": {
+   "inputs": {
+    "image": "__IMAGE__"
+   },
+   "class_type": "PromptPeek",
+   "_meta": {
+    "title": "\ud83d\udd0d PromptPeek (image \u2192 prompt)"
+   },
+   "is_changed": [
+    1789839375.3317232
+   ]
+  },
+  "483": {
+   "inputs": {
+    "boolean": true,
+    "on_true": [
+     "109",
+     0
+    ],
+    "on_false": [
+     "466",
+     0
+    ]
+   },
+   "class_type": "Switch image [Crystools]",
+   "_meta": {
+    "title": "Gen / Original"
+   }
+  },
+  "114:76": {
+   "inputs": {
+    "conditioning": [
+     "111",
+     0
+    ],
+    "latent": [
+     "114:78",
+     0
+    ]
+   },
+   "class_type": "ReferenceLatent",
+   "_meta": {
+    "title": "Set Reference Latent"
+   }
+  },
+  "114:78": {
+   "inputs": {
+    "pixels": [
+     "122",
+     0
+    ],
+    "vae": [
+     "116",
+     0
+    ]
+   },
+   "class_type": "VAEEncode",
+   "_meta": {
+    "title": "VAE Encode"
+   }
+  },
+  "114:77": {
+   "inputs": {
+    "conditioning": [
+     "113",
+     0
+    ],
+    "latent": [
+     "114:78",
+     0
+    ]
+   },
+   "class_type": "ReferenceLatent",
+   "_meta": {
+    "title": "Set Reference Latent"
+   }
+  }
+ }
+}

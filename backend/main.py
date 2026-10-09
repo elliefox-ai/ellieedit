@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .routers import dupe, facecycle, gallery, library, pending, review
+from .routers import dupe, facecycle, gallery, library, pending, review, update
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -27,6 +27,7 @@ app.include_router(gallery.router)
 app.include_router(library.router)
 app.include_router(pending.router)
 app.include_router(review.router)
+app.include_router(update.router)
 
 
 @app.on_event("startup")
