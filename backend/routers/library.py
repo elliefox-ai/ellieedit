@@ -6,6 +6,12 @@ Design decisions (operator, 2026-10-09):
   - Promotion is a MOVE, never a copy: shutil.move (same-volume rename when
     possible, cross-device copy+unlink otherwise) — never leaves a copy.
   - Sources are jailed to GALLERY_ROOT or DUPE_ROOT; anything else is 400.
+  - Delete (2026-10-09e): a library delete is never an unlink. POST
+    /pending-delete MOVES the file into LIBRARY_ROOT/.pending-delete/ and
+    appends an index record with deleted_soon: true. The listing skips both
+    (the dot-dir is invisible and deleted-soon paths are filtered). The
+    only destructive step is POST /pending/confirm, which unlinks the
+    pending area — the library-side twin of the gallery pending queue.
   - Tags/projects: the operator thinks in project names ("ZengoSoft",
     "FlatDeep"). Default tag derived from the source subfolder via
     normalize_tag (lowercase, strip folder noise, alias map); an explicit
@@ -43,6 +49,14 @@ PAGE_SIZE = 40
 
 def index_path() -> Path:
     return LIBRARY_ROOT / ".library-index.jsonl"
+
+
+def pending_dir() -> Path:
+    """Deletion-queue pending area (2026-10-09e): files move HERE on delete,
+    never unlinked until the confirmed purge. Dot-prefixed so os.walk and
+    every listing skip it. Function (not a constant) so it always follows
+    the current LIBRARY_ROOT (tests monkeypatch it)."""
+    return LIBRARY_ROOT / ".pending-delete"
 
 
 # ---------------------------------------------------------------------------
@@ -87,9 +101,10 @@ def normalize_tag(folder: str) -> str:
 
 
 def derive_tag(src: Path) -> str:
-    """Default tag from the source path: first path component under the
-    source root; bare files at the root fall back to the filename stem's
-    leading token, then to BARE_FILE_TAG."""
+    """Default tag from the source path: the DEEPEST folder component under
+    the source root (2026-10-09e — subfolder navigation means the deepest
+    folder is the one the operator browsed into); bare files at the root
+    fall back to the filename stem's leading token, then to BARE_FILE_TAG."""
     for root in (_gallery_mod.GALLERY_ROOT, _dupe_mod.DUPE_ROOT):
         try:
             rel = src.resolve().relative_to(root.resolve())
@@ -97,7 +112,7 @@ def derive_tag(src: Path) -> str:
             continue
         parts = rel.parts
         if len(parts) >= 2:
-            return normalize_tag(parts[0])
+            return normalize_tag(parts[-2])
         # Bare file at root: a separator-bearing stem carries a project
         # prefix ("facecycle_composite(9).png" -> "facecycle"); a single
         # loose token is meaningless -> BARE_FILE_TAG unless aliased.
@@ -273,11 +288,26 @@ def retag(path: str, tags: list[str]) -> dict:
     return {"path": rel, "tags": clean}
 
 
+def deleted_soon_paths() -> set[str]:
+    """Paths whose latest index record is flagged deleted_soon (2026-10-09e):
+    the file already sits in the pending area, but a stale duplicate on
+    disk must never reappear in the listing."""
+    gone: set[str] = set()
+    for rec in read_index():
+        if rec.get("path"):
+            if rec.get("deleted_soon"):
+                gone.add(rec["path"])
+            else:
+                gone.discard(rec["path"])  # latest entry wins, even un-flagging
+    return gone
+
+
 def list_library(tag: str = "", cursor: int = 0) -> dict:
     """Paged listing of library images with tags. Latest-wins tags joined
     with what's actually on disk (index entries for vanished files are
     skipped)."""
     tags_by_path = latest_tags()
+    gone = deleted_soon_paths()
     rows: list[dict] = []
     for dirpath, dirnames, filenames in os.walk(LIBRARY_ROOT):
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
@@ -286,6 +316,8 @@ def list_library(tag: str = "", cursor: int = 0) -> dict:
                 continue
             full = Path(dirpath) / fn
             rel = full.relative_to(LIBRARY_ROOT).as_posix()
+            if rel in gone:
+                continue  # deleted-soon: queued, never listed again
             file_tags = tags_by_path.get(rel, [normalize_tag(full.parent.name)]
                                          if full.parent != LIBRARY_ROOT else [])
             rows.append({"path": rel, "name": fn, "mtime": full.stat().st_mtime,
@@ -315,6 +347,10 @@ class RetagBody(BaseModel):
     tags: list[str]
 
 
+class DeleteBody(BaseModel):
+    path: str
+
+
 @router.get("/list")
 def list_endpoint(tag: str = "", cursor: int = 0):
     return list_library(tag=tag, cursor=cursor)
@@ -335,6 +371,74 @@ def derive(path: str = Query(...)):
 @router.post("/retag")
 def retag_endpoint(body: RetagBody):
     return retag(body.path, body.tags)
+
+
+@router.post("/pending-delete")
+def pending_delete(body: DeleteBody):
+    """Library delete (2026-10-09e): enqueue into the deletion queue's
+    pending area. The file is MOVED to LIBRARY_ROOT/.pending-delete/ (never
+    unlinked), dropped from the listing, and the index is marked
+    deleted_soon. Actual destruction lives only in /pending/confirm."""
+    p = library_jailed(body.path)
+    if not p.is_file():
+        raise HTTPException(404, "not in library")
+    rel = p.relative_to(LIBRARY_ROOT).as_posix()
+    tags = latest_tags().get(rel, [])
+    pdir = pending_dir()
+    pdir.mkdir(parents=True, exist_ok=True)
+    dest = _unique_dest(pdir, p.name)
+    try:
+        os.replace(p, dest)
+    except OSError as e:
+        raise HTTPException(500, f"queue move failed: {e}")
+    append_index({
+        "path": rel, "tags": tags, "promoted_from": "",
+        "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "sha256": "", "deleted_soon": True,
+    })
+    log.info("library pending-delete: %s -> %s", rel, dest.name)
+    return {"ok": True, "path": rel, "queued": dest.name}
+
+
+@router.get("/pending")
+def pending_list():
+    items = []
+    total = 0
+    try:
+        entries = sorted(pending_dir().iterdir())
+    except FileNotFoundError:
+        entries = []
+    for f in entries:
+        try:
+            size = f.stat().st_size
+        except OSError:
+            continue
+        if f.is_file():
+            items.append({"name": f.name, "size": size})
+            total += size
+    return {"items": items, "count": len(items), "bytes": total}
+
+
+@router.post("/pending/confirm")
+def pending_confirm():
+    """The ONLY library destructive step: unlink everything in the pending
+    area. Mirrors /api/pending/confirm semantics (explicit, count-free for
+    the small library queue)."""
+    deleted = 0
+    bytes_freed = 0
+    try:
+        entries = list(pending_dir().iterdir())
+    except FileNotFoundError:
+        entries = []
+    for f in entries:
+        try:
+            size = f.stat().st_size
+            f.unlink()
+            deleted += 1
+            bytes_freed += size
+        except OSError as e:
+            log.warning("library pending confirm: could not unlink %s: %s", f, e)
+    return {"deleted": deleted, "bytes": bytes_freed}
 
 
 @router.get("/thumb")

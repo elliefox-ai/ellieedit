@@ -212,3 +212,60 @@ def test_normalize_tag():
 
 def test_derive_tag_bare_file(env):
     assert library_mod.derive_tag(env["gallery"] / "loose.png") == "misc"
+
+
+# ---- deletion queue: library pending-delete (2026-10-09e) ------------------
+
+def test_pending_delete_moves_not_unlinks(client, env):
+    """Library delete enqueues: the file SURVIVES on disk (moved into the
+    pending area), the original path is gone from the listing, and the
+    index carries deleted_soon."""
+    r = client.post("/api/library/promote", json={"path": "loose.png", "tag": "misc"})
+    assert r.status_code == 200
+    rel = r.json()["path"]
+    src = env["library"] / rel
+    assert src.is_file()
+
+    r = client.post("/api/library/pending-delete", json={"path": rel})
+    assert r.status_code == 200
+    # Never unlinked: bytes live in the pending area.
+    pdir = env["library"] / ".pending-delete"
+    assert not src.exists()
+    queued = list(pdir.iterdir())
+    assert len(queued) == 1 and queued[0].is_file()
+
+    # Listing skips it; index marks deleted_soon.
+    items = client.get("/api/library/list").json()["items"]
+    assert all(i["path"] != rel for i in items)
+    recs = [json.loads(l) for l in (env["library"] / ".library-index.jsonl").read_text().splitlines() if l.strip()]
+    assert recs[-1]["path"] == rel and recs[-1]["deleted_soon"] is True
+
+
+def test_pending_delete_jail(client, env):
+    r = client.post("/api/library/pending-delete", json={"path": "../../outside/evil.png"})
+    assert r.status_code == 400
+    r = client.post("/api/library/pending-delete", json={"path": "never-promoted.png"})
+    assert r.status_code == 404
+
+
+def test_pending_queue_list_and_confirm(client, env):
+    """GET /pending reports the queue; /pending/confirm is the only purge."""
+    r = client.post("/api/library/promote", json={"path": "loose.png", "tag": "misc"})
+    rel = r.json()["path"]
+    client.post("/api/library/pending-delete", json={"path": rel})
+    q = client.get("/api/library/pending").json()
+    assert q["count"] == 1 and q["bytes"] > 0
+    confirm = client.post("/api/library/pending/confirm").json()
+    assert confirm["deleted"] == 1
+    assert client.get("/api/library/pending").json()["count"] == 0
+    assert not (env["library"] / ".pending-delete").exists() or \
+        not list((env["library"] / ".pending-delete").iterdir())
+
+
+def test_derive_tag_deepest_folder(env):
+    """2026-10-09e: promote derives the tag from the DEEPEST folder."""
+    deep = env["gallery"] / "zengostyle" / "passes"
+    deep.mkdir(parents=True)
+    (deep / "d.png").write_bytes(_png())
+    assert library_mod.derive_tag(deep / "d.png") == "passes"
+    assert library_mod.derive_tag(env["gallery"] / "ZengoSoft Face" / "a.png") == "zengosoft"
