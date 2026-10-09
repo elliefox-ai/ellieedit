@@ -70,6 +70,14 @@ function panelHTML() {
     .gal-cell.thumb-loading img { opacity: 0; }
     .gal-cell.thumb-loaded img { opacity: 1; transition: opacity 0.25s ease-in; }
     @keyframes gal-shimmer { to { background-position: -200% 0; } }
+    /* Library promote: 44px iPad-reachable action, top-left */
+    .gal-cell .gal-promote {
+      position: absolute; top: 4px; left: 4px; z-index: 3;
+      min-width: 44px; min-height: 44px; padding: 0 8px;
+      background: rgba(20,20,40,0.75); color: #b8c8ff; font-size: 16px;
+      border-color: #4a4a6c; line-height: 1;
+    }
+    .gal-cell .gal-promote:active { background: #3a3ab0; color: #fff; }
     /* Pending-delete badge (All view + pending filter): red edge + tint */
     .gal-cell.ispending { border-color: #d04040; }
     .gal-cell.ispending img { filter: sepia(0.35) hue-rotate(-30deg) brightness(0.8); }
@@ -514,6 +522,46 @@ export class Gallery {
     }
   }
 
+  // ---- promote to library ----------------------------------------------
+  async promoteCell(item, cell) {
+    let tag = '';
+    try {
+      const d = await fetch(`/api/library/derive?path=${encodeURIComponent(item.path)}`).then(r => r.json());
+      tag = d.tag || '';
+    } catch { /* derive is best-effort — empty prompt is fine */ }
+    const input = prompt(`Promote to Library — tag/project:`, tag);
+    if (input === null) return;  // cancelled
+    tag = input.trim().toLowerCase() || tag;
+    try {
+      const r = await fetch('/api/library/promote', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: item.path, tag }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        if (r.status === 404) {  // double-promote: source already moved
+          this.toast(`${item.name} already promoted`);
+          cell.remove();          // reflect reality — no ghost card
+          this.items = this.items.filter(i => i.path !== item.path);
+          this.updateActionBars();
+          return;
+        }
+        throw new Error(err.detail || r.status);
+      }
+      // Move succeeded: the file is gone from GALLERY_ROOT — remove the
+      // card, don't show a ghost.
+      cell.remove();
+      this.items = this.items.filter(i => i.path !== item.path);
+      this.selected.delete(item.path);
+      this.updateActionBars();
+      this.updateMarkCount();
+      this.toast(`Promoted ${item.name} → ${tag}`);
+      window.dispatchEvent(new CustomEvent('ellieedit:library-changed'));
+    } catch (err) {
+      this.toast(`Promote failed: ${err.message}`, true);
+    }
+  }
+
   toast(msg, isErr) {
     const t = document.createElement('div');
     t.style.cssText = 'position:fixed;bottom:70px;left:50%;transform:translateX(-50%);' +
@@ -635,6 +683,14 @@ export class Gallery {
       await this.syncManifest();
     });
     cell.append(img, check, name, ret);
+    // Library promote: 44px touch target, stopPropagation so the cell's
+    // click (viewer/marking) never fires. Prompt defaults to the derived
+    // project tag from the backend.
+    const promo = document.createElement('button');
+    promo.className = 'ee-btn gal-promote'; promo.textContent = '⬆';
+    promo.title = 'Promote to Library'; promo.setAttribute('aria-label', 'Promote to Library');
+    promo.addEventListener('click', e => { e.stopPropagation(); this.promoteCell(item, cell); });
+    cell.append(promo);
     cell.addEventListener('click', () => {
       if (this.deleteMode) {
         // Deferred: visual flip only — no fetch, no re-render, no grid swap.
