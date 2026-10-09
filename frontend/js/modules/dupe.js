@@ -310,9 +310,9 @@ registerModule({
         <div class="dupe-detail" id="dupe-detail"></div>
       </div>
       <div class="dupe-bottom" id="dupe-bottom" style="display:none">
-        <button class="ee-btn back" id="dupe-back">← Back to families</button>
+        <button class="ee-btn back" id="dupe-back">← Return to families</button>
         <input class="dupe-note" id="dupe-note" placeholder="note (optional)">
-        <button class="ee-btn danger" id="dupe-commit">Commit family</button>
+        <button class="ee-btn primary" id="dupe-commit">Commit &amp; next family ›</button>
       </div>
     </div>`;
 
@@ -690,6 +690,7 @@ registerModule({
           else if (k === 'a' || k === 'A') zoom.querySelector('#ss-zoom-pick')?.click();
           else if (k === 'f' || k === 'F') zoom.querySelector('#ss-zoom-reject')?.click();
           else if (k === 't' || k === 'T') zoom.querySelector('#ss-zoom-twin')?.click();
+          else if (k === 's' || k === 'S') zoom.querySelector('#ss-zoom-survey')?.click();
           else if (k === 'p' || k === 'P') zoom.querySelector('#ss-zoom-pin')?.click();
           else if (k === ' ') zoom.querySelector('#ss-zoom-flip')?.click();
           else if (k === 'c' || k === 'C') zoom.querySelector('#ss-zoom-commit')?.click();
@@ -711,6 +712,7 @@ registerModule({
         else if (k === 'ArrowRight') kbCycle(1);
         else if (k === 'a' || k === 'A') { const ch = championMember(); if (!verdictOf(ch)) doPick(ch); }
         else if (k === 'f' || k === 'F') { const ch = championMember(); if (!verdictOf(ch)) doReject(ch); }
+        else if (k === 'c' || k === 'C') { commitAndNext(); }
         else return;
         e.preventDefault();
       } catch (err) {
@@ -1003,6 +1005,20 @@ registerModule({
       // Commit & next (step 4): C key + button — commit only queues to the
       // reversible manifest (confirm dropped), then the next unresolved
       // family opens. Esc still backs out without committing.
+      // SURVEY TOGGLE (2026-10-08p): zoom-first entry made survey a
+      // secondary in-zoom view — this button steps from zoom straight to
+      // the survey grid (spread stays reachable via '‹ back to spread').
+      const surveyBtn = document.createElement('button');
+      surveyBtn.className = 'ee-btn';
+      surveyBtn.id = 'ss-zoom-survey';
+      surveyBtn.style.minHeight = '44px';
+      surveyBtn.title = 'survey grid — all members (S)';
+      surveyBtn.textContent = '▦ Survey';
+      surveyBtn.addEventListener('click', () => {
+        trace('zoom → survey (secondary view toggle)');
+        ov.remove();
+        openSurvey();
+      });
       const commitNext = document.createElement('button');
       commitNext.className = 'ee-btn primary';
       commitNext.id = 'ss-zoom-commit';
@@ -1261,6 +1277,7 @@ registerModule({
         flipBtn);
       tools.append(pinBtn, pickBtn, rejBtn);
       top.append(back, ...modeBtns, info, twinChip, pinInfo, autoBtn,
+        surveyBtn,
         kbdLegendBtn([
           ['←/→', 'cycle members'],
           ['A', 'pick this member'],
@@ -1268,6 +1285,7 @@ registerModule({
           ['P', 'pin / unpin'],
           ['Space', 'flip pinned ↔ current'],
           ['T', 'jump to the twin'],
+          ['S', 'survey grid'],
           ['C', 'commit & next family'],
           ['Esc', 'back'],
         ]));
@@ -1281,6 +1299,10 @@ registerModule({
 
     function openSurvey() {
       closeSurvey();
+      // zoom-first entry (2026-10-08p): the auto-opened zoom overlay must
+      // not linger beneath a survey opened from the spread/zoom toggle —
+      // stale duplicate #ss-zoom ids break Esc/back disambiguation.
+      el.detail.querySelector('#ss-zoom')?.remove();
       surveyFocus = 0;
       meldSel.clear();      // meld selection is per survey visit
       meldMode = false;
@@ -1995,10 +2017,18 @@ registerModule({
         el.detail.classList.add('open');   // show detail
         el.bottom.style.display = 'flex';
         el.scroll.scrollTop = 0;
-        try {
-          if (committed) renderCommitted(commitSummary);
-          else renderSpread();
-        } catch (renderErr) {
+      // ZOOM-FIRST ENTRY (2026-10-08p): opening a family lands directly in
+      // the working zoom view. The spread DOM is still built underneath as
+      // the zoom's 'back' origin; survey stays reachable from inside zoom
+      // (▦ Survey toggle). The spread/survey are secondary views now —
+      // never a mandatory intermediate step.
+      el.commit.textContent = 'Commit & next family ›';
+      el.commit.style.background = '';
+      el.commit.style.borderColor = '';
+      try {
+        if (committed) renderCommitted(commitSummary);
+        else { renderSpread(); openZoom(0, 'spread'); }
+      } catch (renderErr) {
           // red error panel INSIDE the detail — never a silent blank view
           console.error('dupe renderSpread failed', renderErr);
           trace(`renderSpread threw: ${renderErr.message}`);
@@ -2067,16 +2097,25 @@ registerModule({
       }
     }
 
-    // Commit & next (twin-clearing loop, step 4): commit the current
-    // family, then open the next unresolved family — skipping families
-    // deferred this session (client-side session set). No next family →
-    // back to the browser grid.
+    // Commit & next (unified primary action, 2026-10-08p): commit the
+    // current family, show a brief visible confirmation on the SAME screen,
+    // then open the next unresolved family — skipping families deferred
+    // this session (client-side session set). Failure behavior: only a
+    // successful (2xx) commit advances — a screen that does not advance
+    // reads as not-committed. No next family → back to the browser grid.
+    // Used by BOTH the bottom-right button (#dupe-commit) and the zoom C
+    // shortcut / #ss-zoom-commit — same action in every state.
     async function commitAndNext() {
       const fid = current && current.id;
       if (!fid || committed) return;
       const ok = await commitFamily();
       if (!ok) return;
       deferredFamilies.add(fid);
+      // COMMIT-ADVANCE FLASH: ~800ms visible confirmation before advancing.
+      el.commit.textContent = '✓ committed — family cleared';
+      el.commit.style.background = '#2e7d46';
+      el.commit.style.borderColor = '#2e7d46';
+      await new Promise(r => setTimeout(r, 800));
       job('loading next family…');
       try {
         let cursor = '';
@@ -2097,16 +2136,9 @@ registerModule({
     }
 
 
-    el.commit.addEventListener('click', async () => {
-      if (!current || committed) return;
-      const rejects = Object.values(draft.verdicts)
-        .filter(v => v === 'rejected').length;
-      if (!Object.keys(draft.verdicts).length) {
-        job('nothing to commit — pick or reject at least one member', 'err');
-        return;
-      }
-      await commitFamily();
-    });
+    // Bottom-right primary: Commit & next family (2026-10-08p) — same
+    // commitAndNext path as the zoom C shortcut, all states.
+    el.commit.addEventListener('click', () => commitAndNext());
 
     // Diagnostics: surface thrown errors and unhandled rejections into the
     // status row so a silent blank grid can never happen again (iPad Safari).
