@@ -30,6 +30,20 @@ def sha(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 made = {p.name: sha(p) for p in probe_files}
 report, cleanup_fail = [], []
 
+async def descend(pg, folder_name, wait_ms=1500):
+    """2026-10-09e: folder navigation is breadcrumb/folder-card based.
+    Returns to root via the breadcrumb, then clicks the folder card."""
+    await pg.evaluate("() => { const c = document.querySelector('.gal-crumbs .crumb'); if (c) c.click(); }")
+    await pg.wait_for_timeout(800)
+    await pg.wait_for_function(
+        """(name) => [...document.querySelectorAll('.gal-cell.folder')]
+          .some(c => c.dataset.folder === name)""", arg=folder_name, timeout=60000)
+    await pg.evaluate(
+        """(name) => { [...document.querySelectorAll('.gal-cell.folder')]
+          .find(c => c.dataset.folder === name).click(); }""", folder_name)
+    await pg.wait_for_timeout(wait_ms)
+
+
 async def main():
     try:
         async with async_playwright() as p:
@@ -39,8 +53,7 @@ async def main():
             await pg.wait_for_timeout(1200)
 
             # ── 1. Open the probe folder, click a card → lightbox ──────────
-            await pg.select_option('[data-id="dir-select"]', probe_dir.name)
-            await pg.wait_for_timeout(1500)
+            await descend(pg, probe_dir.name)
             n_cells = await pg.evaluate("() => document.querySelectorAll('.gal-cell').length")
             report.append(("folder cells", n_cells))
             assert n_cells == 3, f"expected 3 cells, got {n_cells}"
@@ -136,13 +149,10 @@ async def main():
             # deleted server-side; opening it must show the quiet note and
             # navigation must skip forward without erroring.
             Image.new("RGB", (320, 240), (90, 90, 200)).save(probe_dir / "lb-moved.png")
-            # Force a listing reload without touching dir-select — switching
-            # folders races the in-flight /mnt scan (loadMore loading guard)
-            # and can leave the ROOT listing in the grid. this.dir is still
-            # the probe folder, so a synthetic change re-scans it.
-            await pg.evaluate(
-                "() => document.querySelector('[data-id=dir-select]')" \
-                ".dispatchEvent(new Event('change'))")
+            # Force a re-scan of the probe folder: breadcrumb back to root,
+            # then descend again (a synthetic change event has no dropdown
+            # anymore; descending re-runs the jailed /mnt scan).
+            await descend(pg, probe_dir.name)
             await pg.wait_for_function(
                 "() => [...document.querySelectorAll('.gal-cell')]"
                 ".some(c => c.dataset.path.includes('lb-moved'))", timeout=30000)
@@ -170,9 +180,7 @@ async def main():
             # ── 7. iPad 1024x768 pass: 44px promote + on-screen arrows ────
             # Re-seed one image to reopen the lightbox with content.
             Image.new("RGB", (320, 240), COLORS[0]).save(probe_dir / "lb-ipad.png")
-            await pg.evaluate(
-                "() => document.querySelector('[data-id=dir-select]')" \
-                ".dispatchEvent(new Event('change'))")
+            await descend(pg, probe_dir.name)
             await pg.wait_for_function(
                 "() => document.querySelectorAll('.gal-cell').length === 1", timeout=30000)
             await pg.evaluate("() => document.querySelector('.gal-cell').click()")

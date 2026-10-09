@@ -45,6 +45,10 @@ async def click_button(pg, match):
 
 async def scratch_e2e(pw, tmp: Path):
     groot, droot, lroot = tmp / "gallery", tmp / "dupes", tmp / "library"
+    # Scratch hygiene: wipe any leftovers so counts start at zero.
+    import shutil
+    for d in (groot, droot, lroot):
+        shutil.rmtree(d, ignore_errors=True)
     make_img(groot / "probe-a.png", (180, 40, 40))  # root files — visible in root listing
     make_img(groot / "probe-b.png", (40, 140, 200))
     make_img(groot / "probe-c.png", (60, 170, 90))
@@ -80,8 +84,11 @@ async def scratch_e2e(pw, tmp: Path):
                   dialog.default_value)
             await dialog.accept("")  # accept default
         pg.on("dialog", handler)
-        cell = pg.locator(".gal-cell", has_text="probe-a")
-        btn = cell.locator("button.gal-promote")
+        # 2026-10-09c/e: promote lives in the lightbox viewer bar — open the
+        # cell, then click ⬆ Promote there.
+        await pg.locator(".gal-cell", has_text="probe-a").click()
+        await pg.wait_for_timeout(600)
+        btn = pg.locator("[data-act=viewer-promote]")
         check("promote button present", await btn.count() == 1)
         box = await btn.bounding_box()
         check("promote 44px iPad-reachable",
@@ -116,8 +123,9 @@ async def scratch_e2e(pw, tmp: Path):
         pg.remove_listener("dialog", handler)
         pg.on("dialog", handler2)
         pg.on("dialog", handler2)
-        await pg.locator(".gal-cell", has_text="probe-b").locator(
-            "button.gal-promote").click()
+        await pg.locator(".gal-cell", has_text="probe-b").click()
+        await pg.wait_for_timeout(600)
+        await pg.locator("[data-act=viewer-promote]").click()
         await pg.wait_for_timeout(1200)
         await click_button(pg, "Library")
         await pg.wait_for_timeout(800)
@@ -147,11 +155,18 @@ async def live_smoke(pw):
     await pg.wait_for_timeout(1200)
     build = await pg.evaluate(
         "() => [...document.querySelectorAll('#tabbar span')].map(s => s.textContent).find(t => t.startsWith('build'))")
-    check("live 8800 build marker", "2026-10-09a" in (build or ""), str(build))
+    # Read the expected marker from the served source instead of hardcoding.
+    import urllib.request as _u
+    shell_src = _u.urlopen(LIVE + "/js/shell.js", timeout=5).read().decode()
+    import re as _re
+    expected = _re.search(r"const BUILD = '([^']+)'", shell_src).group(1)
+    check("live 8800 build marker", (build or "") == f"build {expected}", str(build))
     tabs = await pg.locator("#tabbar button").all_text_contents()
     check("Library tab present on live", any("Library" in t for t in tabs), str(tabs))
     await pg.locator("#tabbar button", has_text="Library").click()
-    await pg.wait_for_timeout(1200)
+    await pg.wait_for_function(
+        "() => (document.querySelector('#lib-status')?.textContent || '').length > 0",
+        timeout=30000)  # live library lives on /mnt/shared — give the fetch time
     count = await pg.locator("#lib-status").text_content()
     check("live library count line renders", (count or "").startswith("showing"), count)
     await b.close()

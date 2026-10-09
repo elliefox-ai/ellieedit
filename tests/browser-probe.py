@@ -33,6 +33,10 @@ async def descend_to(pg, folder_name):
     the folder card for `folder_name`. /mnt listings can be slow, so wait
     for the card instead of a fixed sleep."""
     try:
+        # Return to root first: dir persists across view switches, and the
+        # folder card for `folder_name` only exists one level up.
+        await pg.evaluate("() => { const c = document.querySelector('.gal-crumbs .crumb'); if (c) c.click(); }")
+        await pg.wait_for_timeout(800)
         await pg.wait_for_function(
             """(name) => [...document.querySelectorAll('.gal-cell.folder')]
               .some(c => c.dataset.folder === name)""", arg=folder_name, timeout=120000)
@@ -220,6 +224,10 @@ async def main():
             # ── 6. Post-delete grid (probe files gone) ─────────────────────
             await pg.click('.tab[data-name="gallery"]')
             await pg.wait_for_timeout(300)
+            # Post-confirm the view is still Pending (folder-agnostic); return
+            # to Active before descending — folder cards only render there.
+            await pg.evaluate("() => document.querySelector('[data-act=view-active]').click()")
+            await pg.wait_for_timeout(1200)
             await descend_to(pg, subdir)
             report["postDeleteGrid"] = await pg.evaluate(
                 "() => ({cells: document.querySelectorAll('.gal-cell').length,"
@@ -254,7 +262,7 @@ async def main():
                 """() => ({gridCells: document.querySelectorAll('.gal-cell').length,
                           folderLabels: [...document.querySelectorAll('.gal-cell .name')].map(n => n.textContent),
                           status: document.querySelector('[data-id=status]').textContent,
-                          dropdown: document.querySelector('[data-id=dir-select]').value})""")
+                          crumbs: [...document.querySelectorAll('.gal-crumbs .crumb')].map(b => b.textContent)})""")
             report["pendingCountAgrees"] = (
                 report["pendingGlobal"]["gridCells"] == report["manifestCrossFolder"])
             await pg.screenshot(path=".probes/09-pending-global-crossfolder.png")
