@@ -1316,17 +1316,23 @@ async def main():
 
             await b.close()
     finally:
-        # HARDENED TEARDOWN (2026-10-08h): the old single-pass restore leaked
-        # manifest entries written after the section-7 probe_paths snapshot —
-        # anything landing post-restore survived, and a restore that changed
-        # bytes passed silently. Now: the manifest is RECONCILED entry-by-entry
-        # (pardon everything added relative to the snapshot, re-add any
-        # snapshot entry that vanished — from captured bytes, never re-derived)
-        # with retries, because a live second client can write the manifest
-        # concurrently; wholesale overwrite would destroy real operator marks.
-        # Probe-exclusive files (ledger, signals, family JSONs) are restored
-        # byte-for-byte from the snapshot and hash-verified: any drift FAILS
-        # the probe instead of leaking.
+        # HARDENED TEARDOWN (2026-10-08h, restructured 2026-10-08o): the
+        # manifest is RECONCILED entry-by-entry (pardon everything added
+        # relative to the snapshot, re-add any snapshot entry that vanished —
+        # from captured bytes, never re-derived) with retries, because a live
+        # second client can write the manifest concurrently. Probe-exclusive
+        # files (ledger, signals, family JSONs) are restored byte-for-byte
+        # from the snapshot and hash-verified.
+        #
+        # LEAK FIX (2026-10-08o): the manifest reconcile previously ran FIRST
+        # and could raise (uncaught URLError from the pardon API, or a
+        # JSONDecodeError on the snapshot), aborting the finally BEFORE the
+        # ledger restore ran — the probe's signal-conflict ledger seeds then
+        # leaked into the real verdict ledger with no RESTORE LEAK report.
+        # Now: probe-exclusive files are restored FIRST in a path that cannot
+        # be skipped, the manifest reconcile runs wrapped, and the teardown
+        # asserts zero `"probe": true` ledger entries + byte identity at the
+        # end. Any future leak fails the probe loudly.
         import urllib.request
 
         def _read_manifest():
@@ -1336,56 +1342,93 @@ async def main():
             except (OSError, json.JSONDecodeError):
                 return {}
 
-        base = json.loads(manifest_backup.decode()) if manifest_backup else {}
-        manifest_bad = {}
-        for attempt in range(6):
-            cur = _read_manifest()
-            added = [k for k in cur if k not in base]
-            if added:
-                req = urllib.request.Request(
-                    BASE + "/api/pending",
-                    data=json.dumps({"paths": added}).encode(),
-                    headers={"Content-Type": "application/json"},
-                    method="DELETE")
-                try:
-                    urllib.request.urlopen(req)
-                except urllib.error.HTTPError:
-                    pass  # jail edge: fall back to direct merge below
-            # re-add snapshot entries that vanished, captured bytes only
-            cur = _read_manifest()
-            missing = {k: v for k, v in base.items() if cur.get(k) != v}
-            if missing:
-                merged = dict(cur)
-                merged.update(missing)
-                MANIFEST.write_text(json.dumps(merged, indent=1))
-            manifest_bad = {k: cur.get(k) for k in base
-                            if _read_manifest().get(k) != base[k]}
-            probe_left = [k for k in _read_manifest() if k not in base]
-            if not manifest_bad and not probe_left:
-                break
-            time.sleep(1.0)  # let a concurrent writer settle, then retry
-        if manifest_bad or probe_left:
-            raise AssertionError(
-                f"PROBE RESTORE LEAK (manifest): base entries wrong "
-                f"{manifest_bad} / probe entries survived {probe_left}")
-        # probe-exclusive files: byte restore + hash verify
-        for attempt in range(6):
-            for p, data in snap.items():
-                if data is None:
-                    p.unlink(missing_ok=True)
-                else:
-                    p.write_bytes(data)
-            bad = {str(p): ("missing" if not p.exists() else
-                            hashlib.sha256(p.read_bytes()).hexdigest()[:16])
-                   for p, data in snap.items()
-                   if (p.read_bytes() if p.exists() else None) != data}
-            if not bad:
-                break
-            time.sleep(1.0)
-        if bad:
-            raise AssertionError(
-                f"PROBE RESTORE LEAK: state not byte-identical after "
-                f"teardown (6 attempts): {bad}")
+        # ── 1. probe-exclusive files: byte restore + hash verify, FIRST,
+        # in a path the manifest reconcile can never skip.
+        def _restore_files():
+            for attempt in range(6):
+                for p, data in snap.items():
+                    if data is None:
+                        p.unlink(missing_ok=True)
+                    else:
+                        p.write_bytes(data)
+                bad = {str(p): ("missing" if not p.exists() else
+                                hashlib.sha256(p.read_bytes()).hexdigest()[:16])
+                       for p, data in snap.items()
+                       if (p.read_bytes() if p.exists() else None) != data}
+                if not bad:
+                    return {}
+                time.sleep(1.0)
+            return bad
+
+        try:
+            files_bad = _restore_files()
+        except Exception as e:          # noqa: BLE001 — never skip the report
+            files_bad = {"<restore error>": f"{type(e).__name__}: {e}"}
+            try:
+                _restore_files()
+            except Exception:
+                pass
+
+        # ── 2. teardown assertion: zero probe entries in the real ledger.
+        probe_entries = []
+        if LEDGER.exists():
+            probe_entries = [
+                ln for ln in LEDGER.read_text(encoding="utf-8",
+                                              errors="replace").splitlines()
+                if '"probe": true' in ln or '"probe":true' in ln]
+
+        # ── 3. manifest reconcile (network + file writes) — wrapped so its
+        # failures are REPORTED, never allowed to skip the restores above.
+        manifest_err = None
+        try:
+            base = json.loads(manifest_backup.decode()) \
+                if manifest_backup else {}
+            manifest_bad = {}
+            for attempt in range(6):
+                cur = _read_manifest()
+                added = [k for k in cur if k not in base]
+                if added:
+                    req = urllib.request.Request(
+                        BASE + "/api/pending",
+                        data=json.dumps({"paths": added}).encode(),
+                        headers={"Content-Type": "application/json"},
+                        method="DELETE")
+                    try:
+                        urllib.request.urlopen(req)
+                    except urllib.error.HTTPError:
+                        pass  # jail edge: fall back to direct merge below
+                # re-add snapshot entries that vanished, captured bytes only
+                cur = _read_manifest()
+                missing = {k: v for k, v in base.items() if cur.get(k) != v}
+                if missing:
+                    merged = dict(cur)
+                    merged.update(missing)
+                    MANIFEST.write_text(json.dumps(merged, indent=1))
+                manifest_bad = {k: cur.get(k) for k in base
+                                if _read_manifest().get(k) != base[k]}
+                probe_left = [k for k in _read_manifest() if k not in base]
+                if not manifest_bad and not probe_left:
+                    break
+                time.sleep(1.0)  # let a concurrent writer settle, then retry
+            if manifest_bad or probe_left:
+                raise AssertionError(
+                    f"PROBE RESTORE LEAK (manifest): base entries wrong "
+                    f"{manifest_bad} / probe entries survived {probe_left}")
+        except Exception as e:          # noqa: BLE001 — reported, not fatal
+            manifest_err = f"{type(e).__name__}: {e}"
+
+        # ── 4. combined loud verdict: any failure fails the probe.
+        errs = []
+        if files_bad:
+            errs.append(f"state not byte-identical after teardown (6 "
+                        f"attempts): {files_bad}")
+        if probe_entries:
+            errs.append(f"LEDGER LEAK: {len(probe_entries)} probe entries "
+                        f"survived teardown: {probe_entries[:3]}")
+        if manifest_err:
+            errs.append(f"manifest reconcile failed: {manifest_err}")
+        if errs:
+            raise AssertionError("PROBE RESTORE LEAK: " + " | ".join(errs))
 
 
 asyncio.run(main())

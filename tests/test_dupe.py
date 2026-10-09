@@ -835,3 +835,136 @@ def test_pending_count_endpoint_cheap(env, client, tmp_path):
     j = r.json()
     assert j["count"] == 2 and sorted(j["paths"]) == ["g1.png", "g2.png"]
     assert "bytes" not in j and "items" not in j
+
+
+# ── Probe ledger isolation (2026-10-08o) ─────────────────────────────
+# The dupe-probe's signal-conflict section seeds verdicts into the REAL
+# ledger (server env has no override) — the guard is the probe's own
+# snapshot/restore. These tests import the probe module (paths patched
+# to a tmp dir) and prove the mechanism: everything the probe's seed
+# path can touch is covered by snapshot_state(), and a snapshot-based
+# restore leaves ZERO `"probe": true` entries + byte-identical files.
+
+PROBE_PATH = Path(__file__).resolve().parent / "dupe-probe.py"
+
+
+@pytest.fixture()
+def probe_mod():
+    # The probe runs asyncio.run(main()) at module bottom, so exec_module
+    # would run the whole live probe — extract ONLY the snapshot helpers
+    # (their exact code) via ast and exec them in a scratch namespace.
+    import ast
+    tree = ast.parse(PROBE_PATH.read_text())
+    ns = {"os": __import__("os"), "Path": Path}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) \
+                and node.name in ("_sig_data_dir", "snapshot_state"):
+            exec(compile(ast.Module(body=[node], type_ignores=[]),
+                         str(PROBE_PATH), "exec"), ns)
+    class _ProbeNS:
+        """Attribute access IS the exec globals — patched names are visible
+        inside the extracted functions (their __globals__ is this dict)."""
+        def __init__(self, ns):
+            self.__dict__ = ns
+
+    assert "snapshot_state" in ns and "_sig_data_dir" in ns, \
+        "probe helpers missing — dupe-probe.py changed shape"
+    mod = _ProbeNS(ns)
+    mod.LEDGER = Path(".dupe-verdicts.jsonl")   # patched per-test
+    mod.SIGNALS_LOG = Path(".dupe-signals.jsonl")
+    return mod
+
+
+def _seed_probe_writes(probe, ledger, fam_file):
+    """Mirror the probe's two signal-conflict LEDGER.open('a') seeds plus a
+    family-JSON mutation — the exact writes that leaked before the fix."""
+    with ledger.open("a") as fh:
+        fh.write(json.dumps({"ts": "2026-10-08T09:00:00-07:00",
+                             "family": "fam-aaaaaaaaaaaa",
+                             "members": {"a.png": "kept", "b.png": "rejected"},
+                             "note": "probe signal-conflict seed",
+                             "probe": True}) + "\n")
+    with ledger.open("a") as fh:
+        fh.write(json.dumps({"ts": "2026-10-08T09:30:00-07:00",
+                             "family": "fam-aaaaaaaaaaaa",
+                             "members": {"a.png": "deferred",
+                                         "b.png": "deferred"},
+                             "note": "probe deferral reopen",
+                             "probe": True}) + "\n")
+    fam_file.write_text(json.dumps({**FAM, "edges": []}))
+
+
+def _probe_restore(snap):
+    """Same byte-restore the probe teardown performs (extracted semantics):
+    captured bytes only, never re-derived content."""
+    for p, data in snap.items():
+        if data is None:
+            p.unlink(missing_ok=True)
+        else:
+            p.write_bytes(data)
+
+
+def test_probe_seed_paths_are_snapshot_covered(probe_mod, tmp_path,
+                                               monkeypatch):
+    ledger = tmp_path / ".dupe-verdicts.jsonl"
+    signals = tmp_path / ".dupe-signals.jsonl"
+    fam_dir = tmp_path / "families"
+    fam_dir.mkdir()
+    fam_file = fam_dir / "fam-aaaaaaaaaaaa.json"
+    fam_file.write_text(json.dumps(FAM))
+    monkeypatch.setattr(probe_mod, "LEDGER", ledger)
+    monkeypatch.setattr(probe_mod, "SIGNALS_LOG", signals)
+    monkeypatch.setattr(probe_mod, "_sig_data_dir",
+                        lambda: tmp_path)
+
+    snap = probe_mod.snapshot_state()
+    # every file the seed path writes must be in the snapshot
+    assert set(snap) == {ledger, signals, fam_file}
+    _seed_probe_writes(probe_mod, ledger, fam_file)
+    _probe_restore(snap)
+    _exists = lambda p: p.read_bytes() if p.exists() else None
+    assert _exists(ledger) == snap[ledger]
+    assert _exists(fam_file) == snap[fam_file]
+
+
+def test_probe_restore_leaves_zero_probe_entries(probe_mod, tmp_path,
+                                                 monkeypatch):
+    ledger = tmp_path / ".dupe-verdicts.jsonl"
+    real_entry = json.dumps({"ts": "2026-10-08T10:00:00-07:00",
+                             "family": "fam-cccccccccccc",
+                             "members": {"x.png": "kept"},
+                             "note": "operator verdict"}) + "\n"
+    ledger.write_text(real_entry)
+    fam_dir = tmp_path / "families"
+    fam_dir.mkdir()
+    monkeypatch.setattr(probe_mod, "LEDGER", ledger)
+    monkeypatch.setattr(probe_mod, "SIGNALS_LOG",
+                        tmp_path / ".dupe-signals.jsonl")
+    monkeypatch.setattr(probe_mod, "_sig_data_dir", lambda: tmp_path)
+
+    before = ledger.read_bytes()
+    snap = probe_mod.snapshot_state()
+    _seed_probe_writes(probe_mod, ledger, fam_dir / "none.json")
+    assert '"probe": true' in ledger.read_text()
+    _probe_restore(snap)
+    after = ledger.read_bytes()
+    assert after == before, "probe restore did not return ledger to pre-probe bytes"
+    probe_left = [ln for ln in after.decode().splitlines()
+                  if '"probe": true' in ln or '"probe":true' in ln]
+    assert probe_left == [], \
+        f"probe entries survived teardown: {probe_left}"
+
+
+def test_probe_teardown_asserts_zero_probe_entries():
+    """The probe source must end with the loud teardown assertion: any
+    future leak FAILS the probe instead of passing silently."""
+    src = PROBE_PATH.read_text()
+    assert '"probe": true' in src or "'\"probe\": true'" in src
+    assert "LEDGER LEAK" in src, \
+        "teardown zero-probe-entries assertion missing"
+    assert "PROBE RESTORE LEAK" in src
+    # the file restore must run BEFORE the manifest reconcile in the finally
+    finally_blk = src[src.index("    finally:"):]
+    assert finally_blk.index("_restore_files()") \
+        < finally_blk.index("manifest reconcile".replace("manifest reconcile",
+                                                         "manifest_err = None"))
