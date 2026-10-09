@@ -817,10 +817,12 @@ async def main():
             # PARTIAL split on purpose: keep one, reject one, leave the rest
             # unjudged — the family stays UNRESOLVED (a full verdict would
             # flip it to committed mode, where the signals bar is suppressed
-            # by design) while the kept↔rejected strict edge still conflicts.
-            entry_members = {seed["keep"]: "kept", em_disagree: "rejected"} \
-                if (em_disagree := next(p for p in entry_members
-                                        if p != seed["keep"])) else entry_members
+            # by design). The rejected member is the OTHER ENDPOINT of the
+            # first strict edge, so the detail signals bar has a guaranteed
+            # kept↔rejected conflict pair (2026-10-08o fix — rejecting an
+            # arbitrary non-keep member can miss every edge and leave
+            # conflicts: [] ).
+            entry_members = {seed["keep"]: "kept", em[1]: "rejected"}
             with LEDGER.open("a") as fh:
                 fh.write(json.dumps({"ts": "2026-10-08T09:00:00-07:00",
                                      "family": seed["id"],
@@ -839,7 +841,25 @@ async def main():
             await pg.wait_for_timeout(1500)
             await pg.evaluate("""() => [...document.querySelectorAll('.dupe-top .pill')]
               .find(p => p.dataset.f === 'all').click()""")
-            await pg.wait_for_timeout(3000)
+            await wait_grid_ready(pg)   # fixed sleep raced /mnt re-render
+            await pg.wait_for_timeout(1500)
+            # The seed may sit past page 1 (PAGE_SIZE 40 of 600+): page the
+            # grid with Load more until its card renders (2026-10-08o fix).
+            for _ in range(40):
+                found = await pg.evaluate(
+                    """(fid) => [...document.querySelectorAll('.fam-card')]
+                       .some(c => c.textContent.includes(fid))""", seed["id"])
+                if found:
+                    break
+                more_visible = await pg.evaluate(
+                    """() => { const b = document.querySelector('#dupe-more');
+                              return !!b && b.style.display !== 'none'; }""")
+                assert more_visible, \
+                    f"seed family {seed['id']} never appeared and no Load more left"
+                await pg.evaluate(
+                    "() => document.querySelector('#dupe-loadmore').click()")
+                await wait_grid_ready(pg)
+                await pg.wait_for_timeout(1200)
             flag = await pg.evaluate("""(fid) => {
               const card = [...document.querySelectorAll('.fam-card')]
                 .find(c => c.textContent.includes(fid));
