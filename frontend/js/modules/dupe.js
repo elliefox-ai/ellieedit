@@ -24,7 +24,8 @@ import { registerModule } from '../shell.js';
 import { sigIsOverride, sigChipText } from './dupe-signals.js';
 import { queueCounts, gb } from './death-row.js';
 import { zoomMembers, orderBySimilarity, twinInfo, nextUnhandled,
-         TWIN_NEAR, listCacheDecision } from './dupe-view.js';
+         TWIN_NEAR, listCacheDecision, listQuery, stragglerChips,
+         stragglerProgressText } from './dupe-view.js';
 
 const api = (p, opts) => fetch(`/api/dupe${p}`, opts).then(r => {
   if (!r.ok) return r.json().then(e => Promise.reject(new Error(e.detail || r.status)));
@@ -290,6 +291,7 @@ registerModule({
         border-radius:8px; margin-left:5px; }
       .ghost-chip.lib { background:rgba(70,140,90,0.25); color:#9fd0ae; }
       .ghost-chip.gone { background:rgba(120,120,140,0.2); color:#9a9ab2; }
+      .ghost-chip.straggler { background:rgba(140,100,200,0.22); color:#c4aef0; }
       .dupe-deathbar .ss-reject { font-weight:600; }
       .kbd-legend { position:absolute; z-index:60; right:12px; top:46px;
                     background:#1d1d33; border:1px solid #4a4a6c; border-radius:10px;
@@ -313,6 +315,7 @@ registerModule({
         <span class="pill" data-f="unresolved">Unresolved</span>
         <span class="pill" data-f="resolved">Resolved</span>
         <span class="pill" data-f="all">All</span>
+        <span class="pill" data-f="straggler" title="import batch — files the original scan never indexed, found by the straggler scan">Stragglers</span>
         <label class="arch-toggle" id="dupe-arch-label" style="font-size:11px;color:#8a8aaa;display:flex;align-items:center;gap:4px;cursor:pointer">
           <input type="checkbox" id="dupe-archived"> archived</label>
         <span class="status" id="dupe-status"></span>
@@ -435,6 +438,29 @@ registerModule({
     });
     el.loadmore.addEventListener('click', () => renderList(cursor));
 
+    // Straggler scan progress (2026-10-09g): one status poll on mount, then
+    // every 5s while a scan runs. Shows in the job bar either way — inline
+    // scans surface here too, background ones keep the line alive.
+    let scanPollTimer = null;
+    async function pollStragglerScan() {
+      try {
+        const s = await api('/scan-stragglers/status');
+        const text = stragglerProgressText(s);
+        jobbar.querySelectorAll('.badge.dupe-scan').forEach(b => b.remove());
+        if (text) {
+          const b = document.createElement('span');
+          b.className = 'badge dupe-scan';
+          b.textContent = text;
+          jobbar.appendChild(b);
+          if (!scanPollTimer) scanPollTimer = setInterval(pollStragglerScan, 5000);
+        } else if (scanPollTimer) {
+          clearInterval(scanPollTimer);
+          scanPollTimer = null;
+        }
+      } catch (_) { /* status endpoint is optional surface */ }
+    }
+    pollStragglerScan();
+
     function skeletons(n = 6) {
       const grid = document.createElement('div');
       grid.className = 'fam-grid';
@@ -492,6 +518,10 @@ registerModule({
         if (inLib.length) ghostChips += `<span class="ghost-chip lib" title="kept member now lives in the Library">✓ in Library ×${inLib.length}</span>`;
         if (gone.length) ghostChips += `<span class="ghost-chip gone" title="member file already deleted">already deleted ×${gone.length}</span>`;
       }
+      // Straggler import batch (2026-10-09g): provenance badge + '✓ in
+      // Library' reference chip for members whose counterpart lives in the
+      // Library (reference only — never a member, never served).
+      ghostChips += stragglerChips(f);
       meta.innerHTML =
         `<span>${f.id}</span><span>${f.size} members</span>` +
         (f.tiers || []).map(t => `<span class="tier-badge ${t}">${t}</span>`).join('') +
@@ -506,7 +536,7 @@ registerModule({
 
     function renderCountLine(shown, data) {
       // "showing 40 of 627 families" (2026-10-08n pagination UI)
-      const target = filter === 'all' ? data.total
+      const target = (filter === 'all' || filter === 'straggler') ? data.total
         : (data.counts ? data.counts[filter] : null);
       el.count.textContent = (target != null && target !== shown)
         ? `showing ${shown} of ${target} families`
@@ -536,6 +566,7 @@ registerModule({
       el.pills[0].textContent = `Unresolved (${data.counts.unresolved})`;
       el.pills[1].textContent = `Resolved (${data.counts.resolved})`;
       el.pills[2].textContent = `All (${data.total})`;
+      if (el.pills[3]) el.pills[3].textContent = `Stragglers (${data.total})`;
       renderCountLine(grid.children.length, data);
     }
 
@@ -548,7 +579,7 @@ registerModule({
       try {
         const [s, data] = await Promise.all([
           api('/status'),
-          api(`/families?state=${filter}&cursor=&include_archived=${archQ()}`),
+          api(`/families?state=${listQuery(filter).state}&source=${listQuery(filter).source}&cursor=&include_archived=${archQ()}`),
         ]);
         if (seq !== viewSeq) return;      // user did something since — drop
         const freshKey = s.key || null;
@@ -608,7 +639,8 @@ registerModule({
       }
       job(firstPage ? 'loading families…' : 'loading more…');
       try {
-        const data = await api(`/families?state=${filter}&cursor=${encodeURIComponent(nextCursor)}&include_archived=${archQ()}`);
+        const q = listQuery(filter);
+        const data = await api(`/families?state=${q.state}&source=${q.source}&cursor=${encodeURIComponent(nextCursor)}&include_archived=${archQ()}`);
         if (seq !== viewSeq) { trace(`renderList(${seq}) stale — a newer render won`); return; }
         if (data.key) listKey = data.key;
         if (firstPage) listDirty = false;

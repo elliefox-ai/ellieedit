@@ -153,3 +153,33 @@ export function listCacheDecision(cachedKey, freshKey, dirty) {
   if (!cachedKey || !freshKey) return "refetch";
   return cachedKey === freshKey ? "reuse" : "refetch";
 }
+
+// Straggler import batch (2026-10-09g): pure listing-query logic for the
+// 'Stragglers' pill and the provenance chip strings on a card. No DOM —
+// node-tested in tests/js/dupe-straggler.test.mjs.
+
+// filter -> {state, source} query params. The straggler pill browses the
+// provenance-marked import batch over BOTH states; every other filter is
+// the plain state query with no source narrowing.
+export function listQuery(filter) {
+  if (filter === "straggler") return { state: "all", source: "straggler" };
+  return { state: filter, source: "" };
+}
+
+// Family row -> extra chip HTML for import-batch provenance. Reference
+// only: a library counterpart is never a member and gets no thumb.
+export function stragglerChips(f) {
+  if (!f || f.source !== "straggler-scan") return "";
+  let out = `<span class="ghost-chip straggler" title="import batch — found by the straggler scan, not the original index">straggler</span>`;
+  const n = f.library_matches || 0;
+  if (n > 0) out += `<span class="ghost-chip lib" title="a Library copy of this image exists (reference only, not a member)">✓ in Library ×${n}</span>`;
+  return out;
+}
+
+// Scan progress line text from /scan-stragglers/status — null when idle.
+export function stragglerProgressText(s) {
+  if (!s || !s.running) return null;
+  const p = s.progress;
+  if (!p) return "straggler scan: starting…";
+  return `straggler scan: ${p.phase} ${p.done}/${p.total}`;
+}
