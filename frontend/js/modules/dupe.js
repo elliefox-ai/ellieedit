@@ -22,6 +22,7 @@
 // NOTHING persists before Commit; commit = verdict POST + send-pending.
 import { registerModule } from '../shell.js';
 import { sigIsOverride, sigChipText } from './dupe-signals.js';
+import { queueCounts, gb } from './death-row.js';
 import { zoomMembers, orderBySimilarity, twinInfo, nextUnhandled,
          TWIN_NEAR, listCacheDecision } from './dupe-view.js';
 
@@ -279,6 +280,13 @@ registerModule({
          styles merely hide the affordances on coarse/no-hover devices. */
       .kbd-btn { min-width:34px; min-height:34px; padding:0 8px; font-size:12px;
                  flex-shrink:0; }
+      /* death-row mass action (2026-10-09b): sticky bottom bar, thumb-reachable */
+      .dupe-deathbar { position:sticky; bottom:0; z-index:45; display:flex; gap:12px;
+        align-items:center; justify-content:flex-end; flex-wrap:wrap;
+        padding:8px 12px calc(8px + env(safe-area-inset-bottom));
+        background:rgba(16,16,28,0.94); border-top:1px solid #6a2f2f; }
+      .dupe-death-note { flex:1; min-width:200px; font-size:12px; color:#8a8aaa; }
+      .dupe-deathbar .ss-reject { font-weight:600; }
       .kbd-legend { position:absolute; z-index:60; right:12px; top:46px;
                     background:#1d1d33; border:1px solid #4a4a6c; border-radius:10px;
                     padding:10px 14px; font-size:12px; color:#d4d4e0;
@@ -316,6 +324,10 @@ registerModule({
         <input class="dupe-note" id="dupe-note" placeholder="note (optional)">
         <button class="ee-btn primary" id="dupe-commit">Commit &amp; next family ›</button>
       </div>
+      <div class="dupe-deathbar" id="dupe-deathbar" style="display:none">
+        <span class="dupe-death-note" id="dupe-death-note"></span>
+        <button class="ee-btn ss-reject" id="dupe-death-commit" style="min-height:44px"></button>
+      </div>
     </div>`;
 
     const el = {
@@ -331,6 +343,9 @@ registerModule({
       back: panel.querySelector('#dupe-back'),
       note: panel.querySelector('#dupe-note'),
       commit: panel.querySelector('#dupe-commit'),
+      deathbar: panel.querySelector('#dupe-deathbar'),
+      deathCommit: panel.querySelector('#dupe-death-commit'),
+      deathNote: panel.querySelector('#dupe-death-note'),
     };
     let filter = 'unresolved';
     let cursor = '';
@@ -371,6 +386,10 @@ registerModule({
     let twinMap = new Map();
     // families deferred this session — skipped by Commit & next (step 4)
     const deferredFamilies = new Set();
+    // death-row rehydration (2026-10-09b): rehydrated families still
+    // UNCOMMITTED this session — the mass "send all" action covers exactly
+    // these; any family he re-commits via Enter drops out automatically.
+    const rehydrateQueue = new Set();
     // LIST CACHE (2026-10-08n): rendered listing payloads held in memory,
     // keyed by the index:ledger mtime key the server exposes on /status and
     // /families. Returning from a family (or re-activating the tab) with an
@@ -448,7 +467,8 @@ registerModule({
         `<span>${f.id}</span><span>${f.size} members</span>` +
         (f.tiers || []).map(t => `<span class="tier-badge ${t}">${t}</span>`).join('') +
         (f.conflict ? '<span class="sig-flag" title="signal conflict — prior verdict splits members the hashes call near-identical">⚡</span>' : '') +
-        (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '');
+        (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '') +
+        (f.rehydrated ? `<span class="verdict-tag rejected" title="pre-marked draft from the prior verdict — nothing is committed until you commit it again">death row · ${f.rejected} rejected</span>` : '');
       card.append(strip, meta);
       card.addEventListener('click', () => renderDetail(f.id));
       return card;
@@ -513,6 +533,7 @@ registerModule({
           cursor = data.next_cursor || '';
           exhausted = !data.next_cursor;
           el.more.style.display = exhausted ? 'none' : 'flex';
+          paintDeathBar();
         }
       } catch (_) { /* stale cache is fine until the next real render */ }
     }
@@ -549,6 +570,7 @@ registerModule({
           exhausted = !cached.next_cursor;
           el.more.style.display = exhausted ? 'none' : 'flex';
           job('');
+          paintDeathBar();
           const mySeq = seq;
           backgroundRefresh(mySeq);
           return;
@@ -573,8 +595,67 @@ registerModule({
         exhausted = !data.next_cursor;
         el.more.style.display = exhausted ? 'none' : 'flex';
         job('');
+        paintDeathBar();
       } catch (e) { job(`dupe: ${e.message}`, 'err'); }
     }
+
+    // ── DEATH-ROW MASS ACTION (2026-10-09b) ──────────────────────────
+    // "Send all to deletion queue": enqueues the still-rejected members of
+    // every rehydrated family still UNCOMMITTED this session. One confirm,
+    // exact counts (server 409-guarded), existing manifest semantics —
+    // nothing unlinks here; files stay on disk until queue purge.
+    let deathSummary = null;
+    let deathKey = null;
+    async function paintDeathBar() {
+      const bar = el.deathbar;
+      if (!bar) return;
+      if (!rehydrateQueue.size || current) { bar.style.display = 'none'; return; }
+      bar.style.display = 'flex';
+      el.deathCommit.disabled = true;
+      el.deathCommit.textContent = 'counting…';
+      try {
+        const key = listKey || '';
+        if (!deathSummary || deathKey !== key) {
+          deathSummary = await api('/death-row');
+          deathKey = key;
+        }
+        if (current) return;   // summary resolved after a detail opened
+        const rows = deathSummary.items.filter(r => rehydrateQueue.has(r.id));
+        const q = queueCounts(rows);
+        if (!q.files) { bar.style.display = 'none'; return; }
+        el.deathCommit.textContent =
+          `Send all to deletion queue (${q.files} files, ${gb(q.bytes)} GB)`;
+        el.deathCommit.disabled = false;
+        el.deathNote.textContent =
+          `${rows.length} pre-marked families — nothing deletes until you purge the queue`;
+      } catch (e) {
+        el.deathCommit.textContent = `death row: ${e.message}`;
+      }
+    }
+    el.deathCommit.addEventListener('click', async () => {
+      const rows = ((deathSummary && deathSummary.items) || [])
+        .filter(r => rehydrateQueue.has(r.id));
+      const q = queueCounts(rows);
+      if (!q.files) return;
+      if (!window.confirm(
+        `Queue ${q.files} rejected files (${gb(q.bytes)} GB) for deletion? ` +
+        'Nothing is deleted until you purge the queue.')) return;
+      try {
+        const r = await api('/death-row/commit', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ families: rows.map(x => x.id),
+                                 expected_files: q.files }),
+        });
+        rows.forEach(x => rehydrateQueue.delete(x.id));
+        listDirty = true;
+        deathSummary = null;   // queue changed — refetch on next paint
+        window.dispatchEvent(new CustomEvent('ellieedit:pending-changed'));
+        job(`death row: +${r.added} queued (${r.already_pending} already ` +
+            `queued, ${r.missing} missing)`, 'ok');
+        el.deathbar.style.display = 'none';
+        renderList();
+      } catch (e) { job(`death row commit: ${e.message}`, 'err'); }
+    });
 
     // ───────────────────────────────────────── STACK-SPREAD detail view ──
     const DRAFT_CLASSES = { kept: 'pick', pick: 'pick', rejected: 'reject', melded: 'meld', deferred: 'defer' };
@@ -2005,7 +2086,7 @@ registerModule({
         }
         el.note.value = f.note || '';
         championIdx = 0;
-        if (f.state === 'resolved') {
+        if (f.state === 'resolved' && !f.rehydrated) {
           committed = true;
           const vs = draft.verdicts;
           const c = Object.values(vs).filter(x => x === 'kept').length;
@@ -2014,10 +2095,17 @@ registerModule({
           const df = Object.values(vs).filter(x => x === 'deferred').length;
           commitSummary =
             `saved verdict: ${c} kept · ${r} rejected · ${mm} melded · ${df} deferred`;
+        } else if (f.rehydrated) {
+          // Death-row rehydration (2026-10-09b): the historical verdict map
+          // above is the CURRENT UNCOMMITTED draft — flip anything, then
+          // Commit writes the ledger as usual. Track it for the mass action.
+          rehydrateQueue.add(fid);
+          job(`death row draft — ${Object.values(draft.verdicts).filter(x => x === 'rejected').length} pre-rejected · flip or commit`);
         }
         el.list.classList.add('open');     // hide list (open = hidden)
         el.detail.classList.add('open');   // show detail
         el.bottom.style.display = 'flex';
+        el.deathbar.style.display = 'none';   // mass action is list-view only
         el.scroll.scrollTop = 0;
       // ZOOM-FIRST ENTRY (2026-10-08p): opening a family lands directly in
       // the working zoom view. The spread DOM is still built underneath as
@@ -2089,6 +2177,9 @@ registerModule({
         }
         committed = true;
         listDirty = true;   // listing state changed — next render refetches
+        // A manual re-commit (Enter) drops the family out of the death-row
+        // mass set — it's no longer an uncommitted pre-filled draft.
+        rehydrateQueue.delete(current.id);
         commitSummary = `${pendingNote} · ${keeps} picked · ${melds} melded · ${rejects} rejected`;
         renderCommitted(commitSummary);
         job(`committed — ${pendingNote}`, 'ok');
