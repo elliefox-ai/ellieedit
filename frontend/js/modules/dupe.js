@@ -695,7 +695,7 @@ registerModule({
           else if (k === 's' || k === 'S') zoom.querySelector('#ss-zoom-survey')?.click();
           else if (k === 'p' || k === 'P') zoom.querySelector('#ss-zoom-pin')?.click();
           else if (k === ' ') zoom.querySelector('#ss-zoom-flip')?.click();
-          else if (k === 'c' || k === 'C') zoom.querySelector('#ss-zoom-commit')?.click();
+          else if (k === 'c' || k === 'C' || k === 'Enter') zoom.querySelector('#ss-zoom-commit')?.click();  // Enter: same path as C
           else return;
           e.preventDefault(); return;
         }
@@ -714,7 +714,7 @@ registerModule({
         else if (k === 'ArrowRight') kbCycle(1);
         else if (k === 'a' || k === 'A') { const ch = championMember(); if (!verdictOf(ch)) doPick(ch); }
         else if (k === 'f' || k === 'F') { const ch = championMember(); if (!verdictOf(ch)) doReject(ch); }
-        else if (k === 'c' || k === 'C') { commitAndNext(); }
+        else if (k === 'c' || k === 'C' || k === 'Enter') { commitAndNext(); }  // Enter: same path/guards as C
         else return;
         e.preventDefault();
       } catch (err) {

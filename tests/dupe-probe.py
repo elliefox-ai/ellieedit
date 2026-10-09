@@ -1566,6 +1566,34 @@ async def main():
             report["zf_btn_next"] = btn_next
             assert btn_next and btn_next != c_next["fam"], \
                 f"bottom-right button did not advance: {btn_next} vs {c_next['fam']}"
+            # ENTER parity at SPREAD level (2026-10-08q): Enter maps to the
+            # same commitAndNext as C. First: empty draft → no advance.
+            enter_no_adv = await pg.evaluate(
+                "() => (document.querySelector('.ss-header .fam-id')||{}).textContent || null")
+            await pg.keyboard.press("Enter")
+            await pg.wait_for_timeout(1500)
+            enter_still = await pg.evaluate(
+                "() => (document.querySelector('.ss-header .fam-id')||{}).textContent || null")
+            report["zf_enter_empty_no_advance"] = {
+                "before": enter_no_adv, "after": enter_still}
+            assert enter_still == enter_no_adv, \
+                f"Enter with empty draft advanced — violates not-committed contract: {enter_no_adv}→{enter_still}"
+            # then A + Enter → flash → advance to a distinct family
+            await pg.keyboard.press("a")
+            await pg.wait_for_timeout(400)
+            await pg.keyboard.press("Enter")
+            await pg.wait_for_timeout(400)
+            enter_flash = await pg.evaluate(
+                "() => document.querySelector('#dupe-commit').textContent")
+            report["zf_enter_flash"] = enter_flash
+            assert "committed" in enter_flash.lower(), \
+                f"Enter produced no commit flash: {enter_flash}"
+            await pg.wait_for_timeout(2500)
+            enter_next = await pg.evaluate(
+                "() => (document.querySelector('.ss-header .fam-id')||{}).textContent || null")
+            report["zf_enter_next"] = enter_next
+            assert enter_next and enter_next != enter_no_adv, \
+                f"Enter did not advance to the next family: {enter_next} vs {enter_no_adv}"
             await pg.evaluate("() => document.querySelector('#dupe-back').click()")
             await wait_grid_ready(pg)
 
