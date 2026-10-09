@@ -221,7 +221,19 @@ def promote_move(src: Path, tag: str | None = None) -> dict:
         except OSError as e:
             if getattr(e, "errno", None) != 18:  # EXDEV
                 raise
-            shutil.move(str(src), str(dest))
+            try:
+                shutil.move(str(src), str(dest))
+            except PermissionError:
+                # DrvFS sources (/mnt/*): shutil.move's copy2 copystat dies
+                # on utime ("Operation not permitted") AFTER copying bytes.
+                # Fall back to a plain content copy + best-effort metadata,
+                # then unlink — still a move; the source never survives.
+                shutil.copyfile(src, dest)
+                try:
+                    shutil.copystat(src, dest)
+                except PermissionError:
+                    pass
+                src.unlink()
     except HTTPException:
         raise
     except FileNotFoundError:

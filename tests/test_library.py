@@ -5,6 +5,7 @@ ever touches the real gallery, dupe, or library trees."""
 import hashlib
 import io
 import json
+import shutil
 
 import pytest
 from fastapi.testclient import TestClient
@@ -68,6 +69,28 @@ def test_promote_move_not_copy(client, env):
     strays = [p for p in env["tmp"].rglob("a.png")
               if env["library"] not in p.parents]
     assert strays == []
+
+
+def test_promote_drvfs_copystat_fallback(client, env, monkeypatch):
+    # DrvFS sources (/mnt/*): shutil.move's copy2 dies on copystat utime
+    # AFTER the bytes landed. Promote must still complete as a move.
+    import errno as _errno
+    import backend.routers.library as lib
+    def drvfs_move(src, dst):
+        shutil.copyfile(src, dst)
+        raise PermissionError(1, "Operation not permitted")  # utime stage
+    def exdev_replace(a, b):
+        raise OSError(_errno.EXDEV, "Invalid cross-device link")
+    monkeypatch.setattr(lib.shutil, "move", drvfs_move)
+    monkeypatch.setattr(lib.os, "replace", exdev_replace)
+    src = env["gallery"] / "loose.png"
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()
+    r = client.post("/api/library/promote", json={"path": "loose.png", "tag": "probe"})
+    assert r.status_code == 200, r.text
+    assert not src.exists(), "source survived the DrvFS fallback"
+    dest = env["library"] / "probe" / "loose.png"
+    assert dest.is_file()
+    assert hashlib.sha256(dest.read_bytes()).hexdigest() == digest
 
 
 def test_promote_dupe_root_source(client, env):
