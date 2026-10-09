@@ -61,6 +61,13 @@ async def main():
             b = await p.chromium.launch()
             ctx = await b.new_context(viewport=VIEWPORT, has_touch=True)
             pg = await ctx.new_page()
+            # Field diagnostics (2026-10-08n): surface [dupe trace] + JS errors
+            # in the probe log so a dead pick/render can be diagnosed from
+            # the run output instead of guesswork.
+            pg.on("console", lambda m: (
+                print("CONSOLE:", m.text[:160])
+                if (m.type == "error" or "[dupe trace]" in m.text) else None))
+            pg.on("pageerror", lambda e: print("PAGEERROR:", str(e)[:200]))
             await pg.goto(BASE + "/", wait_until="networkidle")
             await pg.evaluate("() => { try { localStorage.eeDupeDebug = '1'; } catch (_) {} }")
             # twin loop (10-08m): the legacy zoom_pick step asserts the button
@@ -94,7 +101,30 @@ async def main():
             await pg.screenshot(path=".probes/ss-01-browser.png")
 
             # ── 2. Stack-spread detail: champion + fan ─────────────────
-            await pg.evaluate("() => document.querySelector('.fam-card').click()")
+            # Click a FRESH family: the first unresolved card can carry an
+            # all-deferred ledger entry (deferred stays 'unresolved' but its
+            # verdicts pre-load, so pick is a no-op and the probe dead-ends).
+            # Walk the list via API; click the first family with no preload.
+            await pg.evaluate("""async () => {
+              let cursor = '';
+              for (;;) {
+                const d = await fetch('/api/dupe/families?state=unresolved&cursor='
+                  + encodeURIComponent(cursor)).then(r => r.json());
+                for (const it of d.items) {
+                  const det = await fetch('/api/dupe/families/' + it.id)
+                    .then(r => r.json());
+                  const v = det.verdict || {};
+                  const judged = Object.values(v).filter(Boolean);
+                  if (!judged.length) {
+                    const card = [...document.querySelectorAll('.fam-card')]
+                      .find(c => c.textContent.includes(it.id));
+                    if (card) { card.click(); return it.id; }
+                  }
+                }
+                if (!d.next_cursor) { document.querySelector('.fam-card').click(); return null; }
+                cursor = d.next_cursor;
+              }
+            }""")
             await pg.wait_for_timeout(3000)
             ss = await pg.evaluate("""() => ({
               header: !!document.querySelector('.ss-header'),
@@ -164,16 +194,28 @@ async def main():
             # undo the pick so later sections start from a clean draft
             await pg.tap(".ss-champ")
             await pg.wait_for_timeout(400)
+            report["after_unpick"] = await pg.evaluate(
+                "() => document.querySelectorAll('.ss-pick-chip').length")
 
             # ── 2b. Binding growth: re-open browser→detail twice; card click
             # handlers are re-created per render, but a double-mount would
             # double-fire renderDetail — detect via viewSeq trace deltas and
             # by asserting only ONE detail load per tap (status not erroring).
+            # Re-open the CURRENT family (first card can be an all-deferred
+            # family whose pre-loaded verdicts dead-end every later section).
+            cur_fid = await pg.evaluate(
+                "() => document.querySelector('.ss-header .fam-id')?.textContent.trim()")
+            cur_fid = cur_fid or ""
             for _ in range(2):
                 await pg.evaluate("() => document.querySelector('#dupe-back').click()")
                 await wait_grid_ready(pg)
-                await pg.evaluate(
-                    "() => document.querySelector('.fam-card:not(.skel)').click()")
+                opened = await pg.evaluate("""(fid) => {
+                  const card = [...document.querySelectorAll('.fam-card')]
+                    .find(c => c.textContent.includes(fid));
+                  if (card) { card.click(); return true; }
+                  return false;
+                }""", cur_fid)
+                assert opened, f"2b could not re-open {cur_fid} from the grid"
                 await pg.wait_for_selector(".ss-header", timeout=20000)
                 reopen = await pg.evaluate("""() => ({
                   detail_open: document.querySelector('#dupe-detail').classList.contains('open'),
@@ -183,6 +225,9 @@ async def main():
                 assert reopen["detail_open"] and reopen["header"] and \
                     reopen["list_display"] == "none", f"re-open broken: {reopen}"
             report["reopen_x2"] = "ok"
+            report["after_reopen"] = await pg.evaluate(
+                "() => ({chips: document.querySelectorAll('.ss-pick-chip').length,"
+                " hdr: document.querySelector('.ss-header')?.textContent.slice(0,60)})")
 
             # ── 3. Duel: tap a fan card → becomes champion ────────────
             champ_before = await pg.evaluate(
@@ -199,8 +244,12 @@ async def main():
                 report["duel"] = champ_before != champ_after
             else:
                 report["duel"] = "n/a (single-member family)"
+            report["after_duel"] = await pg.evaluate(
+                "() => ({chips: document.querySelectorAll('.ss-pick-chip').length,"
+                " hdr: document.querySelector('.ss-header')?.textContent.slice(0,60)})")
 
             # ── 4. Pick champion → strip ordinal #1 ────────────────────
+            print(json.dumps(report, indent=1))   # early dump: pre-section-4 state survives a section-4 failure
             await pg.evaluate(
                 "() => document.querySelector('.ss-champ').dispatchEvent("
                 "new PointerEvent('pointerup', {bubbles: true}))")
@@ -215,8 +264,11 @@ async def main():
               return {text: c && c.textContent, h: r && Math.round(r.height)};
             }""")
             report["pick_ordinal"] = ord1
+            report["pick_ctx"] = await pg.evaluate(
+                "() => ({hdr: document.querySelector('.ss-header')?.textContent.slice(0,100),"
+                " chips: document.querySelectorAll('.ss-pick-chip').length})")
             assert ord1["text"] == "#1" and ord1["h"] and ord1["h"] >= 40, \
-                f"pick chip/ordinal broken: {ord1}"
+                f"pick chip/ordinal broken: {ord1} ctx={report['pick_ctx']}"
             await pg.screenshot(path=".probes/ss-03-picks-strip.png")
 
             # ── 5. Reject via button (the piloted control) ─────────────
@@ -431,7 +483,17 @@ async def main():
               for (let page = 0; page < 20; page++) {
                 const d = await fetch('/api/dupe/families?state=unresolved&cursor='
                   + encodeURIComponent(cursor)).then(r => r.json());
-                for (const it of d.items) if (!best || it.size > best.size) best = it;
+                for (const it of d.items) {
+                  // fresh families only: an all-deferred ledger entry keeps
+                  // 'unresolved' state but pre-loads verdicts, which dead-ends
+                  // keep/reject toggles (2026-10-08n probe hardening)
+                  if (!best || it.size > best.size) {
+                    const det = await fetch('/api/dupe/families/' + it.id)
+                      .then(r => r.json());
+                    if (!Object.values(det.verdict || {}).filter(Boolean).length)
+                      best = it;
+                  }
+                }
                 if (!d.next_cursor || (best && best.size >= 6)) break;
                 cursor = d.next_cursor;
               }
@@ -625,11 +687,20 @@ async def main():
             # ── 9. Large family (N big): fan scrolls, decision area fixed ──
             big = await pg.evaluate("""async () => {
               // scan pages for a genuinely large unresolved family
+              // (fresh only — all-deferred families pre-load verdicts and
+              // render an empty fan, 2026-10-08n probe hardening)
               let cursor = '', best = null;
               for (let page = 0; page < 20; page++) {
                 const d = await fetch('/api/dupe/families?state=unresolved&cursor='
                   + encodeURIComponent(cursor)).then(r => r.json());
-                for (const it of d.items) if (!best || it.size > best.size) best = it;
+                for (const it of d.items) {
+                  if (!best || it.size > best.size) {
+                    const det = await fetch('/api/dupe/families/' + it.id)
+                      .then(r => r.json());
+                    if (!Object.values(det.verdict || {}).filter(Boolean).length)
+                      best = it;
+                  }
+                }
                 if (!d.next_cursor || (best && best.size >= 15)) break;
                 cursor = d.next_cursor;
               }
@@ -808,10 +879,12 @@ async def main():
             # entry reopens it; the suggestion comes from the decided entry.
             all_paths = [mm["path"].replace("\\", "/")
                          for mm in seed["json"]["members"]]
-            non_keep = [p for p in all_paths if p != seed["keep"]]
-            seed["json"]["edges"] = [{"a": non_keep[0], "b": non_keep[1],
-                                      "tier": "exact", "distance": 0}] \
-                if len(non_keep) >= 2 else []
+            # Suggestion needs ZERO strict kept↔rejected conflicts. With prior
+            # verdict history on the seed family (earlier sections/probe runs),
+            # any fixed edge pair can carry disagreeing lasts — so clear the
+            # strict edges entirely: the suggestion needs 'no conflicts' and a
+            # decided-then-deferred history, not edges (2026-10-08n fix).
+            seed["json"]["edges"] = []
             with LEDGER.open("a") as fh:
                 fh.write(json.dumps({"ts": "2026-10-08T09:30:00-07:00",
                                      "family": seed["id"],
@@ -826,7 +899,17 @@ async def main():
                 f'.fam-card:not(.skel):has-text("{seed["id"]}")', timeout=30000)
             await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
               .find(c => c.textContent.includes('{seed['id']}')).click()""")
-            await pg.wait_for_selector("#ss-suggest", timeout=20000)
+            try:
+                await pg.wait_for_selector("#ss-suggest", timeout=20000)
+            except Exception:
+                dump = await pg.evaluate("""async () => ({
+                  detail_open: document.querySelector('#dupe-detail')?.classList.contains('open'),
+                  hdr: document.querySelector('.ss-header')?.textContent.slice(0,60),
+                  bar: document.querySelector('#ss-signals')?.textContent.slice(0,200) || null,
+                  sig: await fetch('/api/dupe/families/' + (document.querySelector('.ss-header .fam-id')?.textContent.trim() || '') + '/signals').then(r => r.json()).then(s => ({conflicts: s.conflicts?.length, sug: !!s.suggestion})).catch(e => String(e)),
+                  disk_edges: await fetch('/api/dupe/families/' + (document.querySelector('.ss-header .fam-id')?.textContent.trim() || '')).then(r => r.json()).then(d => (d.edges || []).map(e => [e.a, e.b, e.tier])).catch(e => String(e)),
+                })""")
+                raise AssertionError(f"#ss-suggest timeout — state: {dump}")
             sug = await pg.evaluate("""() => {
               const row = document.querySelector('#ss-suggest');
               const r = row && row.getBoundingClientRect();
@@ -1079,6 +1162,16 @@ async def main():
                 mems = fj.get("members", [])
                 hashed = [m for m in mems if m.get("dhash")]
                 if len(hashed) < 2:
+                    continue
+                # fresh families only: a preloaded verdict (any prior commit
+                # or deferral for this id) makes pick/F no-ops and dead-ends
+                # the auto-advance assertions (2026-10-08n probe hardening)
+                try:
+                    _det = json.loads(_ureq.urlopen(
+                        BASE + "/api/dupe/families/" + it["id"]).read())
+                except OSError:
+                    continue
+                if any((_det.get("verdicts") or {}).values()):
                     continue
                 # expected greedy chain (same algorithm as dupe-view.js)
                 chain = [hashed[0]]

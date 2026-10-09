@@ -743,3 +743,95 @@ def test_status_endpoint_caches_within_ttl(env, client, monkeypatch):
     assert s2.status_code == 200
     assert s2.json() == s1.json()
     assert calls["n"] == 1, f"freshness computed {calls['n']}x — status cache miss"
+
+
+# ------------------------------------------------- perf-causes (2026-10-08n)
+
+def test_families_never_opens_pil(env, client, monkeypatch):
+    """Cause-1 guard: the families listing must do ZERO PIL opens, cold or
+    warm — thumbnails come from the preview cache + on-demand /thumb."""
+    import backend.routers.gallery as g
+    calls = {"n": 0}
+    real_open = g.Image.open
+
+    def counting_open(*a, **k):
+        calls["n"] += 1
+        return real_open(*a, **k)
+
+    monkeypatch.setattr(g.Image, "open", counting_open)
+    monkeypatch.setattr(dupe_mod, "_preview_cache", {})
+    r1 = client.get("/api/dupe/families")
+    assert r1.status_code == 200
+    r2 = client.get("/api/dupe/families")   # warm
+    assert r2.status_code == 200
+    assert calls["n"] == 0, f"listing opened images with PIL {calls['n']}x"
+
+
+def test_families_list_cache_key_exposed(env, client):
+    """Clients key their in-memory listing cache on this; must move when the
+    ledger moves (a verdict) and match /status's key."""
+    s = client.get("/api/dupe/status").json()
+    lst = client.get("/api/dupe/families").json()
+    assert lst["key"] and lst["key"] == s["key"]
+    client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict",
+                json={"members": {"a.png": "kept", "b.png": "rejected"}})
+    lst2 = client.get("/api/dupe/families").json()
+    s2 = client.get("/api/dupe/status").json()
+    assert lst2["key"] != lst["key"] and lst2["key"] == s2["key"]
+
+
+def test_thumb_cache_control_fingerprint_immutable(env, client):
+    """Fingerprinted thumb URLs (?v=mtime-size) are content-addressed:
+    immutable caching. Unfingerprinted keeps the 24h policy."""
+    r = client.get("/api/dupe/thumb?path=a.png")
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "public, max-age=86400"
+    import re as _re
+    lst = client.get("/api/dupe/families").json()
+    url = next(m["thumb"] for m in lst["items"][0]["members"]
+               if m["thumb"] and "a.png" in m["thumb"])
+    v = _re.search(r"v=\d+-\d+", url).group(0)
+    r2 = client.get(f"/api/dupe/thumb?path=a.png&{v}")
+    assert r2.status_code == 200
+    assert r2.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+def test_list_members_thumb_urls_fingerprinted(env, client):
+    lst = client.get("/api/dupe/families").json()
+    for m in lst["items"][0]["members"]:
+        assert m["thumb"] and "v=" in m["thumb"]
+    det = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
+    for m in det["members"]:
+        assert "v=" in (m["thumb"] or "")
+
+
+def test_family_detail_single_jail_resolution(env, client, monkeypatch):
+    """Cause-2: family_detail resolves each member ONCE (the old code
+    resolved twice — explicit jail + _missing_member's own)."""
+    calls = {"n": 0}
+    real = dupe_mod.jailed
+
+    def counting_jailed(rel):
+        calls["n"] += 1
+        return real(rel)
+
+    monkeypatch.setattr(dupe_mod, "jailed", counting_jailed)
+    r = client.get("/api/dupe/families/fam-aaaaaaaaaaaa")
+    assert r.status_code == 200
+    members = r.json()["members"]
+    assert calls["n"] <= len(members), (
+        f"jailed() called {calls['n']}x for {len(members)} members — double resolve is back")
+
+
+def test_pending_count_endpoint_cheap(env, client, tmp_path):
+    """Cause-6: badge source returns manifest keys only — no per-entry
+    stats, no sizes. Full payload stays on GET /api/pending."""
+    from backend.routers import gallery as g
+    _png(tmp_path / "gallery" / "g1.png", (10, 200, 10))
+    _png(tmp_path / "gallery" / "g2.png", (10, 200, 20))
+    client.post("/api/pending", json={"paths": ["g1.png", "g2.png"]})
+    r = client.get("/api/pending/count")
+    assert r.status_code == 200
+    j = r.json()
+    assert j["count"] == 2 and sorted(j["paths"]) == ["g1.png", "g2.png"]
+    assert "bytes" not in j and "items" not in j
