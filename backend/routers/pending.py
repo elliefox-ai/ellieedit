@@ -119,6 +119,15 @@ def list_pending():
     return {"items": items, "count": len(items), "bytes": sum(i["size"] or 0 for i in items)}
 
 
+@router.get("/count")
+def count_pending():
+    """Cheap badge source (2026-10-08n): manifest keys only — no per-entry
+    /mnt stats. Bytes/sizes stay in GET /api/pending for the Deletion view."""
+    with manifest_lock:
+        m = _load()
+    return {"count": len(m), "paths": sorted(m)}
+
+
 @router.post("")
 def add_pending(body: PathsBody, request: Request = None,
                 expected_count: int | None = None):

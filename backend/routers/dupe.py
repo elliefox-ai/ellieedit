@@ -183,6 +183,45 @@ def _member_view(m: dict) -> dict:
     }
 
 
+def _fingerprint(v: dict, p: Path) -> dict:
+    """Append an mtime-size fingerprint to a thumb URL (2026-10-08n) so the
+    browser/SW can cache thumbs immutably — the URL itself proves content.
+    The stat here piggybacks on the existence check the caller already paid
+    for; no extra /mnt round-trip."""
+    try:
+        st = p.stat()
+        v["thumb"] += f"&v={int(st.st_mtime)}-{st.st_size}"
+    except OSError:
+        v["thumb"] = None
+        v["exists"] = False
+    return v
+
+
+def _preview_member(m: dict) -> dict:
+    """ONE resolution pass per member (2026-10-08n): cheap jail string check,
+    then a single jailed()+stat that doubles as the missing-file check AND
+    the thumb fingerprint source. Replaces _missing_member's separate
+    resolve for the listing path."""
+    v = _member_view(m)
+    if _jailed_cheap(v["path"]):
+        v["thumb"] = None
+        v["jailed"] = True
+        v["exists"] = False
+        return v
+    try:
+        p = jailed(v["path"])
+        if not p.is_file():
+            v["thumb"] = None
+            v["exists"] = False
+        else:
+            _fingerprint(v, p)
+    except HTTPException:
+        v["thumb"] = None
+        v["jailed"] = True
+        v["exists"] = False
+    return v
+
+
 def _missing_member(v: dict) -> dict:
     """Null the thumb of a member whose file vanished (confirmed deletes
     leave stale family entries; a dead thumb URL logs a 404 console error
@@ -251,6 +290,7 @@ def status():
         "unresolved": len(fams) - resolved,
         "index_generated": idx.get("generated"),
         "index_age_s": int(time.time() - idx_mtime),
+        "key": key,
         "freshness": freshness,
         "ledger": str(LEDGER),
         "scan_hint": (
@@ -309,18 +349,17 @@ def _family_preview(fid: str) -> list[dict]:
     hit = _preview_cache.get(fid)
     # TTL: a confirmed delete removes member files WITHOUT touching the
     # family file, so mtime alone would cache dead thumbs indefinitely.
-    if hit and hit[0] == mt and time.time() - hit[1] < 10:
+    # 60s (2026-10-08n, was 10s): the per-refresh cost is one stat per
+    # member on /mnt; the client-side list cache makes tab returns free
+    # regardless, so this bounds stale-missing exposure without re-walking
+    # 40 cards' members every few seconds.
+    if hit and hit[0] == mt and time.time() - hit[1] < 60:
         return [dict(m) for m in hit[2]]
     try:
         fam = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError) as e:
         raise HTTPException(500, f"family unreadable: {e}")
-    members = [_missing_member(_member_view(m))
-               for m in fam.get("members", [])[:6]]
-    for m in members:
-        if _jailed_cheap(m["path"]):
-            m["thumb"] = None  # jailed member: no thumbnail, flag it
-            m["jailed"] = True
+    members = [_preview_member(m) for m in fam.get("members", [])[:6]]
     _preview_cache[fid] = (mt, time.time(), members)
     return [dict(m) for m in members]
 
@@ -378,8 +417,19 @@ def families(state: str = "unresolved", cursor: str = "",
     counts = {"unresolved": 0, "resolved": 0}
     for f in idx["families"]:
         counts[_family_state(f["id"], verdicts)] += 1
+    # Cache key (2026-10-08n): index+ledger mtimes. Clients hold the listing
+    # in memory keyed by this and skip the refetch on tab return when both
+    # are unchanged (same key /status exposes).
+    try:
+        idx_mt = (DUPE_DATA / "index.json").stat().st_mtime
+    except OSError:
+        idx_mt = 0.0
+    try:
+        key = f"{idx_mt}:{float(LEDGER.stat().st_mtime)}"
+    except OSError:
+        key = f"{idx_mt}:0.0"
     return {"items": page, "next_cursor": next_cursor,
-            "counts": counts, "total": len(idx["families"])}
+            "counts": counts, "total": len(idx["families"]), "key": key}
 
 
 @router.get("/families/{fid}")
@@ -387,20 +437,25 @@ def family_detail(fid: str):
     fam = _load_family(fid)
     verdicts = _verdicts()
     members = []
+    # Single resolution pass (2026-10-08n): ONE jailed()+stat per member —
+    # the old code resolved every member twice (explicit jail +
+    # _missing_member's own resolve), doubling /mnt latency on this path.
     for m in fam.get("members", []):
         v = _member_view(m)
         try:
-            jailed(v["path"])
-            st = v["_p"] = jailed(v["path"])
-            v["exists"] = st.is_file()
+            p = jailed(v["path"])
         except HTTPException:
             v["thumb"] = None
             v["jailed"] = True
             v["exists"] = False
         else:
-            _missing_member(v)
-            if "exists" not in v:
-                v["exists"] = True
+            if p.is_file():
+                _fingerprint(v, p)
+                if "exists" not in v:
+                    v["exists"] = True
+            else:
+                v["thumb"] = None
+                v["exists"] = False
         members.append(v)
     fam_verdict = verdicts.get(fid, {})
     note = fam_verdict.get("note", "")
@@ -699,7 +754,7 @@ def file(path: str):
 
 
 @router.get("/thumb")
-def thumb(path: str):
+def thumb(path: str, v: str = ""):
     EXTS = {".jpg", ".jpeg", ".png", ".webp"}
     src = jailed(path)
     if not src.is_file() or src.suffix.lower() not in EXTS:
@@ -708,8 +763,12 @@ def thumb(path: str):
         tp = get_thumbnail(src)
     except Exception as e:
         raise HTTPException(500, f"thumbnail failed: {e}")
+    # Fingerprinted URLs are content-addressed: immutable caching (2026-10-08n).
+    # Unfingerprinted callers keep the old 24h policy.
+    cc = ("public, max-age=31536000, immutable" if v
+          else "public, max-age=86400")
     return FileResponse(tp, media_type="image/webp",
-                        headers={"Cache-Control": "public, max-age=86400"})
+                        headers={"Cache-Control": cc})
 
 
 # ------------------------------------------------- background scan (optional)
