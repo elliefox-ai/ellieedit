@@ -12,6 +12,7 @@
 import { registerModule } from '../shell.js';
 import { planFaceCycleHandoff } from '../handoff.js';
 import { planMarkBatch } from './marking-batch.js';
+import { crumbsFor, joinDir, isBrowsableDir } from './gallery-path.js';
 
 function panelHTML() {
   return `
@@ -22,6 +23,15 @@ function panelHTML() {
     }
     .gal-header h1 { font-size: 17px; font-weight: 600; color: #e0e0f0; }
     .gal-header h1 .subtitle { color: #6c6c8e; font-weight: 400; font-size: 12px; margin-left: 8px; }
+    /* Breadcrumb folder navigation (2026-10-09e) */
+    .gal-crumbs { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
+    .gal-crumbs .crumb {
+      background: transparent; border: none; color: #8a8ab0; font-size: 12px;
+      padding: 6px 6px; min-height: 32px; cursor: pointer; border-radius: 4px;
+    }
+    .gal-crumbs .crumb:hover { color: #e0e0f0; background: #22223a; }
+    .gal-crumbs .crumb:last-child { color: #e0e0f0; font-weight: 600; }
+    .gal-crumbs .csep { color: #4a4a6c; font-size: 12px; }
     .gal-header select {
       background: #22223a; color: #d4d4e0; border: 1px solid #4a4a6c;
       border-radius: 4px; padding: 4px 8px; font-size: 12px; max-width: 220px;
@@ -70,6 +80,12 @@ function panelHTML() {
     .gal-cell.thumb-loading img { opacity: 0; }
     .gal-cell.thumb-loaded img { opacity: 1; transition: opacity 0.25s ease-in; }
     @keyframes gal-shimmer { to { background-position: -200% 0; } }
+    /* Folder cards (2026-10-09e): descend into subfolders */
+    .gal-cell.folder { display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 4px; background: #20203a; border-color: #3a3a5c; }
+    .gal-cell.folder .ficon { font-size: 30px; }
+    .gal-cell.folder .fname2 { color: #c8c8e8; font-size: 11px; max-width: 95%;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     /* Promote lives in the lightbox viewer bar (2026-10-09c): cards are
        clean thumbnails; 44px touch target on the viewer action. */
     /* Pending-delete badge (All view + pending filter): red edge + tint */
@@ -144,7 +160,7 @@ function panelHTML() {
   </style>
   <div class="gal-header">
     <h1>Gallery <span class="subtitle">— generated images</span></h1>
-    <select data-id="dir-select"></select>
+    <div class="gal-crumbs" data-id="crumbs"></div>
     <span class="gal-status" data-id="status"></span>
     <div class="gal-viewseg">
       <button class="ee-btn gal-btn" data-act="view-all">All</button>
@@ -176,8 +192,8 @@ function panelHTML() {
     <div class="bar">
       <span class="fname" data-id="viewer-name"></span>
       <button class="ee-btn primary" data-act="viewer-promote" title="Promote to Library (P)">⬆ Promote</button>
-      <button class="ee-btn primary" data-act="to-facecycle">→ FaceCycle</button>
       <button class="ee-btn" data-act="to-update" title="Open in Update tab (version stack)">✎ Update</button>
+      <button class="ee-btn danger" data-act="viewer-delete" title="Mark for deletion (Delete key) — nothing is deleted until you confirm in the Deletion view">🗑 Delete</button>
       <button class="ee-btn" data-act="close">✕</button>
     </div>
     <div class="stage"><img data-id="viewer-img" alt=""></div>
@@ -193,7 +209,7 @@ export class Gallery {
     this.panel = panel;
     this.el = {
       grid: panel.querySelector('[data-id="grid"]'),
-      dirSelect: panel.querySelector('[data-id="dir-select"]'),
+      crumbs: panel.querySelector('[data-id="crumbs"]'),
       status: panel.querySelector('[data-id="status"]'),
       selectBtn: panel.querySelector('[data-act="select-mode"]'),
       deleteBtn: panel.querySelector('[data-act="delete-mode"]'),
@@ -247,7 +263,7 @@ export class Gallery {
     this.bindChrome();
     this.bindViewer();
     this.bindCrossModule();
-    this.refreshDirs();
+    this.renderCrumbs();
     this.syncManifest();
   }
 
@@ -597,6 +613,55 @@ export class Gallery {
     setTimeout(() => t.remove(), 4000);
   }
 
+  // Lightbox delete (🗑 / Delete key, 2026-10-09e): two-step confirm, then
+  // enqueue into the EXISTING pending-delete manifest — never an unlink.
+  // Then advance exactly like promote (close-at-end).
+  armViewerDelete() {
+    const btn = this.panel.querySelector('[data-act="viewer-delete"]');
+    if (!btn.dataset.armed) {
+      btn.dataset.armed = '1';
+      btn.textContent = 'Really delete? ✓ Confirm';
+      return;
+    }
+    this.disarmViewerDelete();
+    this.deleteFromViewer();
+  }
+
+  disarmViewerDelete() {
+    const btn = this.panel.querySelector('[data-act="viewer-delete"]');
+    delete btn.dataset.armed;
+    btn.textContent = '🗑 Delete';
+  }
+
+  async deleteFromViewer() {
+    const idx = this.viewIdx;
+    const item = this.items[idx];
+    if (!item) return;
+    try {
+      const r = await fetch('/api/pending', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths: [item.path] }),
+      });
+      if (!r.ok) throw new Error(r.status);
+      this.toast(`Marked ${item.name} for deletion — confirm in the Deletion view`);
+    } catch (err) {
+      this.toast(`Delete failed: ${err.message}`, true);
+      return;
+    }
+    await this.syncManifest();
+    // Advance like promote: remove from the listing, next image takes the
+    // same index; close-at-end when it was the last one.
+    const cell = [...this.el.grid.children].find(c => c.dataset.path === item.path);
+    cell?.remove();
+    this.items = this.items.filter(i => i.path !== item.path);
+    this.selected.delete(item.path);
+    this.updateActionBars();
+    this.updateMarkCount();
+    if (this.el.viewer.style.display !== 'flex') return;
+    if (!this.items.length || idx >= this.items.length) { this.closeViewer(); return; }
+    this.openViewer(Math.min(idx, this.items.length - 1));
+  }
+
   // ---- champion highlight (post-ladder visibility) ------------------------
   applyChampion() {
     for (const cell of this.el.grid.children) {
@@ -615,22 +680,28 @@ export class Gallery {
   }
 
   // ---- browse --------------------------------------------------------------
-  async refreshDirs() {
-    try {
-      const r = await fetch('/api/gallery/list');
-      const data = await r.json();
-      const sel = this.el.dirSelect;
-      sel.innerHTML = '<option value="">/ (root)</option>';
-      for (const d of data.subdirs) {
-        const o = document.createElement('option');
-        o.value = d; o.textContent = d + '/';
-        sel.appendChild(o);
+  renderCrumbs() {
+    const host = this.el.crumbs;
+    host.innerHTML = '';
+    const crumbs = crumbsFor(this.dir);
+    crumbs.forEach((c, i) => {
+      if (i) {
+        const sep = document.createElement('span');
+        sep.className = 'csep'; sep.textContent = '›';
+        host.appendChild(sep);
       }
-      sel.addEventListener('change', () => { this.dir = sel.value; this.reload(); });
-      this.reload();
-    } catch (err) {
-      this.el.status.textContent = 'Backend error: ' + err.message;
-    }
+      const b = document.createElement('button');
+      b.className = 'crumb'; b.textContent = c.name;
+      b.addEventListener('click', () => { this.setDir(c.dir); });
+      host.appendChild(b);
+    });
+  }
+
+  setDir(dir) {
+    if (this.dir === dir) return;
+    this.dir = dir;
+    this.renderCrumbs();
+    this.reload();
   }
 
   async reload() {
@@ -659,6 +730,15 @@ export class Gallery {
       this.items.push(...data.items);
       this.cursor = data.next_cursor;
       for (let i = 0; i < data.items.length; i++) this.addCell(data.items[i], start + i);
+      // Folder cards render above the newest images on the first page of a
+      // browse level (2026-10-09e). Subfolders of the CURRENT depth come
+      // straight from the listing; ellieedit_tmp is filtered out.
+      if (start === 0) {
+        for (const d of (data.subdirs || [])) {
+          if (!isBrowsableDir(d)) continue;
+          this.addFolderCell(d);
+        }
+      }
       this.el.status.textContent =
         `${this.items.length} images${data.next_cursor ? ' +' : ''}` +
         (this.viewFilter === 'all' && this.pendingSet.size
@@ -669,6 +749,19 @@ export class Gallery {
       this.el.status.textContent = 'Load failed: ' + err.message;
     }
     this.loading = false;
+  }
+
+  addFolderCell(name) {
+    const cell = document.createElement('div');
+    cell.className = 'gal-cell folder';
+    cell.dataset.folder = name;
+    const icon = document.createElement('div');
+    icon.className = 'ficon'; icon.textContent = '📁';
+    const label = document.createElement('div');
+    label.className = 'fname2'; label.textContent = name;
+    cell.append(icon, label);
+    cell.addEventListener('click', () => this.setDir(joinDir(this.dir, name)));
+    this.el.grid.insertBefore(cell, this.el.grid.firstChild);
   }
 
   addCell(item, idx) {
@@ -741,6 +834,7 @@ export class Gallery {
   openViewer(idx) {
     this.viewIdx = idx;
     const it = this.items[idx];
+    this.disarmViewerDelete();
     this.el.viewerNote.style.display = 'none';
     this.el.viewerImg.onload = () => { this.el.viewerNote.style.display = 'none'; };
     this.el.viewerImg.onerror = () => {
@@ -753,7 +847,7 @@ export class Gallery {
     this.el.viewer.style.display = 'flex';
   }
 
-  closeViewer() { this.el.viewer.style.display = 'none'; this.el.viewerImg.src = ''; }
+  closeViewer() { this.disarmViewerDelete(); this.el.viewer.style.display = 'none'; this.el.viewerImg.src = ''; }
 
   nav(dir) {
     if (!this.items.length) return;
@@ -766,6 +860,7 @@ export class Gallery {
     act('prev').addEventListener('click', () => this.nav(-1));
     act('next').addEventListener('click', () => this.nav(1));
     act('viewer-promote').addEventListener('click', () => this.promoteFromViewer());
+    act('viewer-delete').addEventListener('click', () => this.armViewerDelete());
     act('to-facecycle').addEventListener('click', () => {
       const item = this.items[this.viewIdx];
       if (!item) return;
@@ -787,6 +882,7 @@ export class Gallery {
       if (this.el.viewer.style.display !== 'flex') return;
       if (e.key === 'Escape') this.closeViewer();
       else if (e.key === 'p' || e.key === 'P') this.promoteFromViewer();
+      else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); this.armViewerDelete(); }
       else if (e.key === 'ArrowLeft') this.nav(-1);
       else if (e.key === 'ArrowRight') this.nav(1);
     };

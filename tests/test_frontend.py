@@ -63,3 +63,13 @@ def test_no_invalid_star_class_in_module():
     assert 'class="***"' not in src
     assert ".*** {" not in src
     assert 'fc-canvas-wrap' in src
+
+
+def test_js_gallery_path_helpers():
+    """Breadcrumb path helpers for subfolder navigation (2026-10-09e)."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "gallery-path.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+    assert "PASS" in r.stdout

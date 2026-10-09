@@ -283,3 +283,20 @@ def test_pending_view_survives_pagination(gclient):
         assert set(paths) == {"sub/b.jpg", "other/d.jpg"}
     finally:
         g.PAGE_SIZE = old
+
+
+def test_list_nested_subdirs_at_depth(client, monkeypatch):
+    """Subfolder navigation (2026-10-09e): each depth returns ITS OWN
+    subdirs; the tmp dir stays hidden at every level."""
+    root = gallery_mod.GALLERY_ROOT
+    (root / "zengostyle" / "passes").mkdir(parents=True)
+    img = Image.new("RGB", (32, 32))
+    buf = io.BytesIO(); img.save(buf, "PNG")
+    (root / "zengostyle" / "passes" / "deep.png").write_bytes(buf.getvalue())
+    r = client.get("/api/gallery/list", params={"dir": "zengostyle"})
+    assert r.status_code == 200
+    assert r.json()["subdirs"] == ["passes"]
+    r = client.get("/api/gallery/list", params={"dir": "zengostyle/passes"})
+    assert r.status_code == 200
+    assert [i["name"] for i in r.json()["items"]] == ["deep.png"]
+    assert r.json()["subdirs"] == []
