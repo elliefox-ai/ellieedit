@@ -992,14 +992,26 @@ def test_deathrow_rehydration_appended_sorted(env, client):
     _majority_verdict(client, "fam-bbbbbbbbbbbb", keep=0, reject=1)   # 1 rej
     lst = client.get("/api/dupe/families?state=unresolved").json()
     ids = [it["id"] for it in lst["items"]]
-    # unresolved first, then rehydrated rows in rejected-desc order
-    assert ids[-2:] == ["fam-aaaaaaaaaaaa", "fam-bbbbbbbbbbbb"]
-    tail = lst["items"][-2:]
+    # unresolved first, then rehydrated rows in rejected-desc order.
+    # fam-bbbbbbbbbbbb (member d.png gone from disk) is a GHOST family —
+    # hidden from the default list (2026-10-09f), revealed by the toggle.
+    assert ids[-1] == "fam-aaaaaaaaaaaa"
+    assert "fam-bbbbbbbbbbbb" not in ids
+    tail = lst["items"][-1:]
     assert all(it["rehydrated"] and it["state"] == "unresolved" for it in tail)
     assert tail[0]["rejected"] == 2 and tail[0]["kept"] == 1
-    assert lst["rehydrated"] == 2
+    assert lst["rehydrated"] == 1
+    assert lst["archived_hidden"] == 1
     # counts stay honest: the rehydrated families are still resolved
     assert lst["counts"] == {"unresolved": 1, "resolved": 2}
+    # the archived toggle reveals the ghost family, flagged + zero on disk
+    full = client.get(
+        "/api/dupe/families?state=unresolved&include_archived=1").json()
+    fids = [it["id"] for it in full["items"]]
+    assert "fam-bbbbbbbbbbbb" in fids
+    ghost_row = next(it for it in full["items"] if it["id"] == "fam-bbbbbbbbbbbb")
+    assert ghost_row["archived"] is True and ghost_row["on_disk"] == 0
+    assert full["rehydrated"] == 2 and full["archived_hidden"] == 1
 
 
 def test_deathrow_latest_verdict_wins(env, client):
@@ -1104,3 +1116,48 @@ def test_deathrow_detail_carries_rehydrated_flag(env, client):
     # untouched family: no flag
     det2 = client.get("/api/dupe/families/fam-cccccccccccc").json()
     assert det2["rehydrated"] is False
+
+
+def test_deathrow_ghost_states_resolved(env, client, monkeypatch):
+    """2026-10-09f ghost resolution: kept member promoted to the Library
+    resolves 'library', vanished member resolves 'deleted', on-disk member
+    stays 'disk'; zero-on-disk families hide from the default list; /death-row
+    carries honest on_disk/archived flags. Read-only: no ledger writes."""
+    from backend.routers import library as lib
+    root, _, tmp = env
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    # promote the kept member (a.png) into the Library the way promote_move
+    # does — index record with promoted_from, file gone from the dupe root
+    lroot = tmp / "library"
+    lroot.mkdir(parents=True, exist_ok=True)
+    # patch the library module onto the tmp root (fixture doesn't touch it)
+    monkeypatch.setattr(lib, "LIBRARY_ROOT", lroot)
+    lib.append_index({"path": "kept/a.png", "tags": ["probe"],
+                      "promoted_from": "a.png", "sha256": "x" * 64})
+    (root / "a.png").unlink()
+    # fresh session: the per-process exists/ghost caches are TTL'd for the
+    # running server, so a test (like a server restart) starts clean
+    dupe_mod._exists_cache.clear()
+    dupe_mod._ghost_cache = None
+    before_ledger = (env[1].parent / "verdicts.jsonl")
+    n_before = len(before_ledger.read_text().splitlines())
+    lst = client.get("/api/dupe/families?state=unresolved").json()
+    # a.png -> library, others on disk: family stays in the default list
+    row = next(it for it in lst["items"] if it["id"] == "fam-aaaaaaaaaaaa")
+    states = {m["path"]: m["member_state"] for m in row["members"]}
+    verdicts_map = {m["path"]: m["verdict"] for m in row["members"]}
+    assert states.get("a.png") == "library"
+    assert verdicts_map.get("a.png") == "kept"
+    assert row["archived"] is False and row["on_disk"] >= 1
+    # detail carries the same chips data
+    det = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
+    dstates = {m["path"]: m["member_state"] for m in det["members"]}
+    assert dstates.get("a.png") == "library"
+    assert all(st in ("disk", "library", "deleted") for st in dstates.values())
+    # /death-row honest per-family on_disk + archived
+    dr = client.get("/api/dupe/death-row").json()
+    drow = next(r for r in dr["items"] if r["id"] == "fam-aaaaaaaaaaaa")
+    assert drow["on_disk"] == row["on_disk"] and drow["archived"] is False
+    # rendering wrote NOTHING to the ledger
+    n_after = len(before_ledger.read_text().splitlines())
+    assert n_after == n_before

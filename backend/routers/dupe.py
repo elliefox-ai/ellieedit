@@ -98,6 +98,116 @@ def _death_row_rows(verdicts: dict | None = None,
     rows.sort(key=lambda r: (-r["rejected"], r["id"]))
     return rows
 
+
+# ---- ghost states (2026-10-09f): members whose files left the dupe roots ----
+# Kept files were promoted into the Library; rejected files were purged. A
+# family whose members are ALL gone renders as blank thumbs. Resolution uses
+# EXISTING signals only — the library index (promoted_from paths) plus
+# os.path.exists-equivalent stats on the dupe roots — cached per server
+# session; no hashing, no re-walks per render.
+
+_GHOST_TTL = float(os.environ.get("ELLIEEDIT_GHOST_TTL", "60"))
+                                   # seconds an exists lookup stays fresh
+                                   # (probe env shortens it; /mnt stats are
+                                   # the thing this router defends against)
+_exists_cache: dict[str, tuple[float, bool]] = {}  # rel path -> (ts, on disk)
+_library_cache: tuple[float, dict] | None = None   # (index mtime, promoted_from -> rec)
+_ghost_cache: tuple[str, dict] | None = None       # (index:ledger key, per-family states)
+
+
+def _il_key() -> str:
+    """index:ledger mtime key — the cache key /status, /families and
+    /death-row already agree on. Paths included so different roots (test
+    tmp dirs) never share a cache entry on matching mtimes."""
+    try:
+        idx_mt = (DUPE_DATA / "index.json").stat().st_mtime
+    except OSError:
+        idx_mt = 0.0
+    try:
+        led_mt = float(LEDGER.stat().st_mtime)
+    except OSError:
+        led_mt = 0.0
+    return f"{DUPE_DATA}:{LEDGER}:{idx_mt}:{led_mt}"
+
+
+def _library_lookup() -> dict:
+    """promoted_from path -> library record, cached on the index mtime.
+    Unreadable/absent index -> empty map (everything resolves 'deleted')."""
+    global _library_cache
+    from .library import index_path, read_index
+    ip = index_path()
+    try:
+        mt = ip.stat().st_mtime
+    except OSError:
+        mt = -1.0
+    ck = f"{ip}:{mt}"          # path in the key: tmp roots must not collide
+    if _library_cache and _library_cache[0] == ck:
+        return _library_cache[1]
+    out: dict[str, dict] = {}
+    try:
+        for rec in read_index():
+            src = (rec.get("promoted_from") or "").replace("\\", "/")
+            if src and not rec.get("deleted_soon"):
+                out.setdefault(src, rec)
+    except Exception as e:            # never let the listing die on the lookup
+        log.warning("library index unreadable for ghost resolution: %s", e)
+    _library_cache = (ck, out)
+    return out
+
+
+def _member_on_disk(rel: str) -> bool:
+    """TTL-cached existence probe (one stat per path per _GHOST_TTL, not per
+    render — /mnt stats are the thing this whole router defends against)."""
+    now = time.monotonic()
+    hit = _exists_cache.get(rel)
+    if hit and now - hit[0] < _GHOST_TTL:
+        return hit[1]
+    try:
+        ok = jailed(rel).is_file()
+    except HTTPException:
+        ok = False
+    _exists_cache[rel] = (now, ok)
+    return ok
+
+
+def _member_state(rel: str, verdict: str | None) -> str:
+    """'disk' | 'library' | 'deleted' for one member path. Library wins over
+    deleted ONLY on an index hit — absence alone never claims a promotion."""
+    if _member_on_disk(rel):
+        return "disk"
+    if rel in _library_lookup():
+        return "library"
+    return "deleted"
+
+
+def _death_ghosts(verdicts: dict, idx: dict) -> dict:
+    """fid -> {on_disk: n, states: {rel: state}} for every majority-rejected
+    family, cached on the index:ledger key (one family-file read + one cached
+    stat per member per key — the same cost class /death-row already pays)."""
+    global _ghost_cache
+    key = _il_key()
+    if _ghost_cache and _ghost_cache[0] == key:
+        return _ghost_cache[1]
+    out: dict[str, dict] = {}
+    for r in _death_row_rows(verdicts, idx):
+        fid = r["id"]
+        try:
+            fam = json.loads(_family_path(fid).read_text())
+        except (OSError, json.JSONDecodeError, HTTPException):
+            continue
+        vmap = (verdicts.get(fid, {}).get("members") or {})
+        states: dict[str, str] = {}
+        on_disk = 0
+        for m in fam.get("members", []):
+            rel = m["path"].replace("\\", "/")
+            st = _member_state(rel, vmap.get(rel))
+            states[rel] = st
+            if st == "disk":
+                on_disk += 1
+        out[fid] = {"on_disk": on_disk, "states": states}
+    _ghost_cache = (key, out)
+    return out
+
 # Slow-storage defenses: the canonical tree lives on /mnt (10-100x slower
 # than local disk), so every hot endpoint serves from mtime-keyed caches and
 # never walks or stats the tree per request.
@@ -407,7 +517,8 @@ def _family_preview(fid: str) -> list[dict]:
 
 @router.get("/families")
 def families(state: str = "unresolved", cursor: str = "",
-             offset: int = 0, limit: int = 0):
+             offset: int = 0, limit: int = 0,
+             include_archived: int = 0):
     if state not in ("unresolved", "resolved", "all"):
         raise HTTPException(400, "state must be unresolved|resolved|all")
     idx = _index()
@@ -440,10 +551,22 @@ def families(state: str = "unresolved", cursor: str = "",
     # genuinely unresolved ones, biggest-rejected-first. Each is a
     # pre-marked UNCOMMITTED draft client-side (rehydrated flag).
     rehydrated = 0
+    archived_hidden = 0
     if state == "unresolved":
         dh = _death_row_rows(verdicts, idx)
         have = {r["id"] for r in rows}
         dh = [r for r in dh if r["id"] not in have]
+        # Ghost states (2026-10-09f): families with ZERO members still on
+        # disk are hidden from the default list (include_archived=1 reveals
+        # them). No ledger writes — resolution is read-only signals.
+        ghosts = _death_ghosts(verdicts, idx)
+        for r in dh:
+            g = ghosts.get(r["id"], {})
+            r["on_disk"] = g.get("on_disk", 0)
+            r["archived"] = r["on_disk"] == 0
+        archived_hidden = sum(1 for r in dh if r["archived"])
+        if not include_archived:
+            dh = [r for r in dh if not r["archived"]]
         rows = rows + dh
         rehydrated = len(dh)
     start = 0
@@ -460,11 +583,23 @@ def families(state: str = "unresolved", cursor: str = "",
     start = max(start, offset)
     size = limit if limit > 0 else PAGE_SIZE
     page = rows[start:start + size]
+    # states for the page loop — one shared cache read, no second walk
+    ghosts_by_state = _death_ghosts(verdicts, idx) if state == "unresolved" else {}
     # Thumbnails for the first few members of each card (strip view), served
     # from the per-family preview cache — no family-file reads or /mnt stats
     # when nothing changed on disk.
     for r in page:
         r["members"] = _family_preview(r["id"])
+        # Ghost chips (2026-10-09f): rehydrated cards annotate each preview
+        # member with its resolved state + historical verdict so the client
+        # can chip "✓ in Library" / "already deleted" without extra calls.
+        if r.get("rehydrated"):
+            vmap = (verdicts.get(r["id"], {}).get("members") or {})
+            ghosts = ghosts_by_state.get(r["id"], {})
+            states = ghosts.get("states", {})
+            for m in r["members"]:
+                m["verdict"] = vmap.get(m["path"])
+                m["member_state"] = states.get(m["path"], "disk")
     next_cursor = page[-1]["id"] if page and start + size < len(rows) else None
     counts = {"unresolved": 0, "resolved": 0}
     for f in idx["families"]:
@@ -482,7 +617,7 @@ def families(state: str = "unresolved", cursor: str = "",
         key = f"{idx_mt}:0.0"
     return {"items": page, "next_cursor": next_cursor,
             "counts": counts, "total": len(idx["families"]), "key": key,
-            "rehydrated": rehydrated}
+            "rehydrated": rehydrated, "archived_hidden": archived_hidden}
 
 
 @router.get("/death-row")
@@ -503,6 +638,7 @@ def death_row():
         key = f"{idx_mt}:0.0"
     if _death_row_cache and _death_row_cache[0] == key:
         rows = _death_row_cache[1]
+        ghosts = _death_ghosts(_verdicts(), idx)   # cache-hit read, no re-walk
     else:
         verdicts = _verdicts()
         rows = []
@@ -523,6 +659,13 @@ def death_row():
             rows.append({**r, "rejected_files": files, "rejected_bytes": nbytes})
         rows.sort(key=lambda r: (-r["rejected"], r["id"]))
         _death_row_cache = (key, rows)
+        ghosts = _death_ghosts(verdicts, idx)
+    # Ghost annotation (2026-10-09f): honest on-disk counts per family (all
+    # members, not just the still-rejected ones the byte walk stats).
+    for r in rows:
+        g = ghosts.get(r["id"], {})
+        r["on_disk"] = g.get("on_disk", 0)
+        r["archived"] = r["on_disk"] == 0
     return {
         "items": rows,
         "families": len(rows),
@@ -623,6 +766,12 @@ def family_detail(fid: str):
                 v["thumb"] = None
                 v["exists"] = False
         members.append(v)
+    # Ghost states (2026-10-09f): detail members carry their resolved state
+    # + historical verdict so chips render there too (read-only signals).
+    vmap = (verdicts.get(fid, {}).get("members") or {})
+    for v in members:
+        v["verdict"] = vmap.get(v["path"])
+        v["member_state"] = _member_state(v["path"], v["verdict"])
     fam_verdict = verdicts.get(fid, {})
     note = fam_verdict.get("note", "")
     if not note:
