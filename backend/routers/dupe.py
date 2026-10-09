@@ -20,6 +20,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -511,14 +512,88 @@ def _family_preview(fid: str) -> list[dict]:
     except (OSError, json.JSONDecodeError) as e:
         raise HTTPException(500, f"family unreadable: {e}")
     members = [_preview_member(m) for m in fam.get("members", [])[:6]]
+    # Straggler families (2026-10-09g): members with a library match get the
+    # ghost-chip shape (member_state='library' + the library rel path) so the
+    # client renders the existing read-only '✓ in Library' reference. The
+    # library file itself is never served or touched.
+    if fam.get("source") == "straggler-scan":
+        by_path = {m.get("path"): m for m in fam.get("members", [])}
+        for v in members:
+            ref = (by_path.get(v["path"]) or {}).get("library_match")
+            if ref:
+                v["member_state"] = "library"
+                v["library_path"] = ref.get("library_path", "")
     _preview_cache[fid] = (mt, time.time(), members)
     return [dict(m) for m in members]
+
+
+# ------------------------------------------------ straggler scan (2026-10-09g)
+# Import front door: near-dupe families from files the canonical scan never
+# indexed. Engine lives in backend/dupe_scan.py; this router owns the HTTP
+# surface: a POST that runs inline (probe/tests, small roots) or in a
+# background thread (the real 6k+ /mnt pool), a status endpoint, and the
+# 'source' filter on /families. The ledger stays read-only from the scan.
+
+_straggler_lock = threading.Lock()
+_straggler_state: dict = {"running": False, "progress": None, "last": None}
+
+
+class StragglerBody(BaseModel):
+    background: bool = False
+    roots: list[str] | None = None          # default: DupeReview + gather staging
+    library_limit: int = 0                  # probe knob: cap library hashing
+
+
+@router.post("/scan-stragglers")
+def scan_stragglers_ep(body: StragglerBody):
+    from backend import dupe_scan as engine
+    from .library import LIBRARY_ROOT
+    if not _straggler_lock.acquire(blocking=False):
+        raise HTTPException(409, "a straggler scan is already running")
+    _straggler_lock.release()
+    if _straggler_state["running"]:
+        raise HTTPException(409, "a straggler scan is already running")
+    roots = ([{"label": f"root{i}", "root": r} for i, r in enumerate(body.roots)]
+             if body.roots else [
+                 {"label": "dupe", "root": str(DUPE_ROOT),
+                  "exclude_dirs": {".dupes"}},
+                 {"label": "gather", "root": engine.DEFAULT_GATHER_ROOT}])
+
+    def run():
+        _straggler_state.update(running=True, progress=None, last=None)
+        try:
+            summary = engine.scan_stragglers(
+                roots, DUPE_ROOT, DUPE_DATA, LEDGER, Path(LIBRARY_ROOT),
+                library_limit=body.library_limit,
+                progress=lambda p: _straggler_state.update(progress=p))
+            _straggler_state["last"] = summary
+        except Exception as e:
+            log.exception("straggler scan failed")
+            _straggler_state["last"] = {"error": str(e)}
+        finally:
+            _straggler_state["running"] = False
+            _straggler_state["progress"] = None
+
+    if body.background:
+        threading.Thread(target=run, daemon=True, name="straggler-scan").start()
+        return {"started": True, "background": True,
+                "status": "/api/dupe/scan-stragglers/status"}
+    run()
+    last = _straggler_state["last"] or {}
+    if "error" in last:
+        raise HTTPException(500, f"straggler scan failed: {last['error']}")
+    return {"started": False, "summary": last}
+
+
+@router.get("/scan-stragglers/status")
+def scan_stragglers_status():
+    return dict(_straggler_state)
 
 
 @router.get("/families")
 def families(state: str = "unresolved", cursor: str = "",
              offset: int = 0, limit: int = 0,
-             include_archived: int = 0):
+             include_archived: int = 0, source: str = ""):
     if state not in ("unresolved", "resolved", "all"):
         raise HTTPException(400, "state must be unresolved|resolved|all")
     idx = _index()
@@ -534,6 +609,11 @@ def families(state: str = "unresolved", cursor: str = "",
             "tiers": f.get("tiers", []),
             "first_member": f.get("first_member", ""),
             "state": st,
+            # straggler provenance (2026-10-09g): import-batch families
+            # carry source + a library-match count for the '✓ in Library'
+            # reference chip (reference only — never a member).
+            "source": f.get("source", ""),
+            "library_matches": f.get("library_matches", 0),
             # Signal-conflict flag (2026-10-08d): the latest verdict SPLITS
             # members (kept AND rejected) while the index tier list claims a
             # strict near-identity tier exists in the family. O(1) per card
@@ -569,6 +649,13 @@ def families(state: str = "unresolved", cursor: str = "",
             dh = [r for r in dh if not r["archived"]]
         rows = rows + dh
         rehydrated = len(dh)
+    # Straggler import-batch filter (2026-10-09g): source=straggler narrows
+    # to provenance-marked families before pagination/death-row handling.
+    # 'straggler' is accepted as the client shorthand for the full marker.
+    if source == "straggler":
+        source = "straggler-scan"
+    if source:
+        rows = [r for r in rows if r.get("source") == source]
     start = 0
     if cursor:
         try:
@@ -600,9 +687,15 @@ def families(state: str = "unresolved", cursor: str = "",
             for m in r["members"]:
                 m["verdict"] = vmap.get(m["path"])
                 m["member_state"] = states.get(m["path"], "disk")
+    total_all = len(idx["families"])
+    if source:
+        total_all = sum(1 for f in idx["families"]
+                        if f.get("source", "") == source)
     next_cursor = page[-1]["id"] if page and start + size < len(rows) else None
     counts = {"unresolved": 0, "resolved": 0}
     for f in idx["families"]:
+        if source and f.get("source", "") != source:
+            continue
         counts[_family_state(f["id"], verdicts)] += 1
     # Cache key (2026-10-08n): index+ledger mtimes. Clients hold the listing
     # in memory keyed by this and skip the refetch on tab return when both
@@ -616,7 +709,7 @@ def families(state: str = "unresolved", cursor: str = "",
     except OSError:
         key = f"{idx_mt}:0.0"
     return {"items": page, "next_cursor": next_cursor,
-            "counts": counts, "total": len(idx["families"]), "key": key,
+            "counts": counts, "total": total_all, "key": key,
             "rehydrated": rehydrated, "archived_hidden": archived_hidden}
 
 
