@@ -15,6 +15,10 @@ GALLERY_ROOT = Path(os.environ.get("ELLIEEDIT_GALLERY_ROOT", "/mnt/e/comfyui/out
 MANIFEST = Path(__file__).resolve().parents[1] / ".pending-delete.json"
 os.makedirs(".probes", exist_ok=True)
 
+# Page errors (JS exceptions + console.error) collected during the probe run;
+# dumped by descend_to's diagnostic on a navigation timeout.
+PAGE_ERRORS: list = []
+
 probe_dir = GALLERY_ROOT / f"probe-del-{os.getpid()}"
 probe_dir.mkdir(exist_ok=True)
 probe_files = []
@@ -28,9 +32,20 @@ async def descend_to(pg, folder_name):
     """2026-10-09e: folder navigation is breadcrumb/folder-card based — click
     the folder card for `folder_name`. /mnt listings can be slow, so wait
     for the card instead of a fixed sleep."""
-    await pg.wait_for_function(
-        """(name) => [...document.querySelectorAll('.gal-cell.folder')]
-          .some(c => c.dataset.folder === name)""", arg=folder_name, timeout=30000)
+    try:
+        await pg.wait_for_function(
+            """(name) => [...document.querySelectorAll('.gal-cell.folder')]
+              .some(c => c.dataset.folder === name)""", arg=folder_name, timeout=120000)
+    except Exception:
+        state = await pg.evaluate(
+            """() => ({nfolders: document.querySelectorAll('.gal-cell.folder').length,
+                      folderNames: [...document.querySelectorAll('.gal-cell.folder')].map(c => c.dataset.folder).slice(0, 30),
+                      cells: document.querySelectorAll('.gal-cell').length,
+                      status: document.querySelector('[data-id=status]')?.textContent,
+                      want: %s})""" % json.dumps(folder_name))
+        state["pageErrors"] = PAGE_ERRORS[:6]
+        print("DESCEND TIMEOUT — page state:", state)
+        raise
     await pg.evaluate(
         """(name) => { const c = [...document.querySelectorAll('.gal-cell.folder')]
           .find(c => c.dataset.folder === name); c.click(); }""", folder_name)
@@ -57,6 +72,9 @@ async def main():
         async with async_playwright() as p:
             b = await p.chromium.launch()
             pg = await b.new_page(viewport={"width": 900, "height": 700})
+            pg.on('pageerror', lambda e: PAGE_ERRORS.append(str(e)))
+            pg.on('console', lambda m: PAGE_ERRORS.append('console: ' + m.text)
+                  if m.type == 'error' else None)
             await pg.goto(BASE + "/", wait_until="networkidle")
             await pg.wait_for_timeout(1200)
             report = {"build": await pg.evaluate(

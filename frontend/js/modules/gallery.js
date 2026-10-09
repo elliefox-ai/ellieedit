@@ -265,6 +265,7 @@ export class Gallery {
     this.bindCrossModule();
     this.renderCrumbs();
     this.syncManifest();
+    this.reload();  // initial listing — never rely on syncManifest's changed-path
   }
 
   fileUrl(path) { return `/api/gallery/file?path=${encodeURIComponent(path)}`; }
