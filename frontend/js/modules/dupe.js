@@ -286,6 +286,10 @@ registerModule({
         padding:8px 12px calc(8px + env(safe-area-inset-bottom));
         background:rgba(16,16,28,0.94); border-top:1px solid #6a2f2f; }
       .dupe-death-note { flex:1; min-width:200px; font-size:12px; color:#8a8aaa; }
+      .ghost-chip { display:inline-block; font-size:10px; padding:1px 7px;
+        border-radius:8px; margin-left:5px; }
+      .ghost-chip.lib { background:rgba(70,140,90,0.25); color:#9fd0ae; }
+      .ghost-chip.gone { background:rgba(120,120,140,0.2); color:#9a9ab2; }
       .dupe-deathbar .ss-reject { font-weight:600; }
       .kbd-legend { position:absolute; z-index:60; right:12px; top:46px;
                     background:#1d1d33; border:1px solid #4a4a6c; border-radius:10px;
@@ -309,6 +313,8 @@ registerModule({
         <span class="pill" data-f="unresolved">Unresolved</span>
         <span class="pill" data-f="resolved">Resolved</span>
         <span class="pill" data-f="all">All</span>
+        <label class="arch-toggle" id="dupe-arch-label" style="font-size:11px;color:#8a8aaa;display:flex;align-items:center;gap:4px;cursor:pointer">
+          <input type="checkbox" id="dupe-archived"> archived</label>
         <span class="status" id="dupe-status"></span>
       </div>
       <div class="dupe-scroll" id="dupe-scroll">
@@ -332,6 +338,7 @@ registerModule({
 
     const el = {
       pills: [...panel.querySelectorAll('.dupe-top .pill')],
+      archived: panel.querySelector('#dupe-archived'),
       status: panel.querySelector('#dupe-status'),
       list: panel.querySelector('#fam-list'),
       count: panel.querySelector('#dupe-count'),
@@ -348,6 +355,9 @@ registerModule({
       deathNote: panel.querySelector('#dupe-death-note'),
     };
     let filter = 'unresolved';
+    // include-archived query param (2026-10-09f): '1' reveals ghost death-row
+    // families whose members have all left the dupe roots.
+    const archQ = () => (el.archived && el.archived.checked) ? '1' : '0';
     let cursor = '';
     let exhausted = false;
     let current = null;        // detail family (API shape)
@@ -415,6 +425,14 @@ registerModule({
       filter = p.dataset.f;
       renderList();
     }));
+    // include-archived toggle (2026-10-09f): reveal death-row families whose
+    // members are all gone from disk. Bypasses the list cache — the toggle
+    // changes the query, not the data.
+    el.archived.addEventListener('change', () => {
+      listDirty = true;
+      listCache.delete(filter);
+      renderList();
+    });
     el.loadmore.addEventListener('click', () => renderList(cursor));
 
     function skeletons(n = 6) {
@@ -463,12 +481,24 @@ registerModule({
       }
       const meta = document.createElement('div');
       meta.className = 'fam-meta';
+      // Ghost chips (2026-10-09f): historical members resolve their current
+      // state — kept+promoted → '✓ in Library', vanished → 'already
+      // deleted'. Only on-disk members get thumbs (above) and stay
+      // actionable; ghosts never enter the rehydrate marking queue.
+      let ghostChips = '';
+      if (f.rehydrated) {
+        const inLib = (f.members || []).filter(m => m.member_state === 'library');
+        const gone = (f.members || []).filter(m => m.member_state === 'deleted');
+        if (inLib.length) ghostChips += `<span class="ghost-chip lib" title="kept member now lives in the Library">✓ in Library ×${inLib.length}</span>`;
+        if (gone.length) ghostChips += `<span class="ghost-chip gone" title="member file already deleted">already deleted ×${gone.length}</span>`;
+      }
       meta.innerHTML =
         `<span>${f.id}</span><span>${f.size} members</span>` +
         (f.tiers || []).map(t => `<span class="tier-badge ${t}">${t}</span>`).join('') +
         (f.conflict ? '<span class="sig-flag" title="signal conflict — prior verdict splits members the hashes call near-identical">⚡</span>' : '') +
         (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '') +
-        (f.rehydrated ? `<span class="verdict-tag rejected" title="pre-marked draft from the prior verdict — nothing is committed until you commit it again">death row · ${f.rejected} rejected</span>` : '');
+        (f.rehydrated ? `<span class="verdict-tag rejected" title="pre-marked draft from the prior verdict — nothing is committed until you commit it again">death row · ${f.rejected} rejected${f.archived ? ' · archived' : ''}</span>` : '') +
+        ghostChips;
       card.append(strip, meta);
       card.addEventListener('click', () => renderDetail(f.id));
       return card;
@@ -518,7 +548,7 @@ registerModule({
       try {
         const [s, data] = await Promise.all([
           api('/status'),
-          api(`/families?state=${filter}&cursor=`),
+          api(`/families?state=${filter}&cursor=&include_archived=${archQ()}`),
         ]);
         if (seq !== viewSeq) return;      // user did something since — drop
         const freshKey = s.key || null;
@@ -578,7 +608,7 @@ registerModule({
       }
       job(firstPage ? 'loading families…' : 'loading more…');
       try {
-        const data = await api(`/families?state=${filter}&cursor=${encodeURIComponent(nextCursor)}`);
+        const data = await api(`/families?state=${filter}&cursor=${encodeURIComponent(nextCursor)}&include_archived=${archQ()}`);
         if (seq !== viewSeq) { trace(`renderList(${seq}) stale — a newer render won`); return; }
         if (data.key) listKey = data.key;
         if (firstPage) listDirty = false;
