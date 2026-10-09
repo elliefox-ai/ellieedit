@@ -23,7 +23,7 @@
 import { registerModule } from '../shell.js';
 import { sigIsOverride, sigChipText } from './dupe-signals.js';
 import { zoomMembers, orderBySimilarity, twinInfo, nextUnhandled,
-         TWIN_NEAR } from './dupe-view.js';
+         TWIN_NEAR, listCacheDecision } from './dupe-view.js';
 
 const api = (p, opts) => fetch(`/api/dupe${p}`, opts).then(r => {
   if (!r.ok) return r.json().then(e => Promise.reject(new Error(e.detail || r.status)));
@@ -91,6 +91,7 @@ registerModule({
       .sig-mini.reject { color:#e87a7a; } .sig-mini.keep { color:#7de08a; }
       .verdict-tag.melded { background:#1d2a3a; color:#7ab8e8; }
       .dupe-more { display:flex; justify-content:center; padding:12px; }
+      .dupe-count { text-align:center; font-size:11px; color:#8a8aaa; padding:2px 0 8px; }
       .fam-card.skel { opacity:0.5; pointer-events:none; }
       .skel .fam-strip img { background:#22223a; }
       .rel-links a { color:#7ab8e8; cursor:pointer; text-decoration:underline; font-size:11px; }
@@ -104,6 +105,10 @@ registerModule({
          once and iPad Safari showed the list instead of the detail
          (2026-10-07z bugfix). Keep it adjacent to the detail rules. */
       .fam-list.open { display:none; }
+      /* count line + load-more are list-chrome: hidden whenever the detail
+         is open (the .fam-list.open marker), so they can't push the detail
+         out of the iPad viewport (2026-10-08n). */
+      .fam-list.open ~ .dupe-count { display:none; }
       .ss-header { display:flex; gap:10px; align-items:center; flex-wrap:wrap;
                    padding:8px 12px; border-bottom:1px solid #2a2a44; flex-shrink:0;
                    font-size:12px; color:#8a8aaa; }
@@ -298,6 +303,7 @@ registerModule({
       </div>
       <div class="dupe-scroll" id="dupe-scroll">
         <div class="fam-list" id="fam-list"></div>
+        <div class="dupe-count" id="dupe-count"></div>
         <div class="dupe-more" id="dupe-more" style="display:none">
           <button class="ee-btn" id="dupe-loadmore">Load more</button>
         </div>
@@ -314,6 +320,7 @@ registerModule({
       pills: [...panel.querySelectorAll('.dupe-top .pill')],
       status: panel.querySelector('#dupe-status'),
       list: panel.querySelector('#fam-list'),
+      count: panel.querySelector('#dupe-count'),
       more: panel.querySelector('#dupe-more'),
       loadmore: panel.querySelector('#dupe-loadmore'),
       detail: panel.querySelector('#dupe-detail'),
@@ -362,6 +369,15 @@ registerModule({
     let twinMap = new Map();
     // families deferred this session — skipped by Commit & next (step 4)
     const deferredFamilies = new Set();
+    // LIST CACHE (2026-10-08n): rendered listing payloads held in memory,
+    // keyed by the index:ledger mtime key the server exposes on /status and
+    // /families. Returning from a family (or re-activating the tab) with an
+    // unchanged key re-renders from this cache — zero fetches. A commit
+    // sets listDirty so the next render refetches for real.
+    let listKey = null;                 // last server key seen
+    let listDirty = false;              // a commit landed → refetch next time
+    let detailPending = false;          // a renderDetail is in flight
+    const listCache = new Map();        // filter -> {items, next_cursor, counts, total}
 
     function job(text, cls = '') {
       jobbar.querySelectorAll('.badge.dupe').forEach(b => b.remove());
@@ -436,6 +452,69 @@ registerModule({
       return card;
     }
 
+    function renderCountLine(shown, data) {
+      // "showing 40 of 627 families" (2026-10-08n pagination UI)
+      const target = filter === 'all' ? data.total
+        : (data.counts ? data.counts[filter] : null);
+      el.count.textContent = (target != null && target !== shown)
+        ? `showing ${shown} of ${target} families`
+        : (shown ? `showing ${shown} families` : '');
+    }
+
+    function renderCards(items, data, append) {
+      let grid = el.list.querySelector('.fam-grid');
+      if (!append || !grid) {
+        el.list.innerHTML = '';
+        grid = document.createElement('div');
+        grid.className = 'fam-grid';
+        el.list.appendChild(grid);
+      }
+      for (const f of items) {
+        try {
+          grid.appendChild(cardFor(f));
+        } catch (cardErr) {
+          const ec = document.createElement('div');
+          ec.className = 'fam-card';
+          ec.style.color = '#e87a7a';
+          ec.textContent = `card error (${f.id}): ${cardErr.message}`;
+          grid.appendChild(ec);
+          console.error('dupe card render failed', f.id, cardErr);
+        }
+      }
+      el.pills[0].textContent = `Unresolved (${data.counts.unresolved})`;
+      el.pills[1].textContent = `Resolved (${data.counts.resolved})`;
+      el.pills[2].textContent = `All (${data.total})`;
+      renderCountLine(grid.children.length, data);
+    }
+
+    async function backgroundRefresh(seq) {
+      // Silent revalidation for the cache-hit path: checks the index:ledger
+      // key and, if it moved, refreshes the current filter's cache. NEVER
+      // bumps viewSeq and never touches the DOM while a detail is open or a
+      // renderDetail is in flight — a plain renderList() here races the
+      // user's next card tap and cancels the detail render (2026-10-08n).
+      try {
+        const [s, data] = await Promise.all([
+          api('/status'),
+          api(`/families?state=${filter}&cursor=`),
+        ]);
+        if (seq !== viewSeq) return;      // user did something since — drop
+        const freshKey = s.key || null;
+        if (!freshKey || !listKey || freshKey === listKey) return;
+        listKey = freshKey;
+        listCache.set(filter, { items: data.items,
+          next_cursor: data.next_cursor || '',
+          counts: data.counts, total: data.total });
+        if (!current && !detailPending &&
+            !el.detail.classList.contains('open')) {
+          renderCards(data.items, data, false);
+          cursor = data.next_cursor || '';
+          exhausted = !data.next_cursor;
+          el.more.style.display = exhausted ? 'none' : 'flex';
+        }
+      } catch (_) { /* stale cache is fine until the next real render */ }
+    }
+
     async function renderList(nextCursor = '') {
       const seq = ++viewSeq;
       trace(`renderList(seq=${seq})`);
@@ -454,32 +533,40 @@ registerModule({
       // list mode shows the grid; '.open' hides it via the .fam-list.open rule
       el.list.classList.remove('open');
       el.more.style.display = 'none';
+      // Cache path (2026-10-08n): first page with an unchanged index:ledger
+      // key re-renders from the in-memory payload — INSTANT tab returns (no
+      // blocking /status call; a key change costs a 4s freshness walk there,
+      // which must never sit in front of the paint). Revalidation runs in
+      // the background: unchanged key → nothing; changed key → refetch.
+      if (firstPage) {
+        const cached = listCache.get(filter);
+        if (cached && listCacheDecision(listKey, listKey, listDirty) === 'reuse') {
+          trace('renderList: cache hit');
+          renderCards(cached.items, cached, false);
+          cursor = cached.next_cursor || '';
+          exhausted = !cached.next_cursor;
+          el.more.style.display = exhausted ? 'none' : 'flex';
+          job('');
+          const mySeq = seq;
+          backgroundRefresh(mySeq);
+          return;
+        }
+      }
       job(firstPage ? 'loading families…' : 'loading more…');
       try {
         const data = await api(`/families?state=${filter}&cursor=${encodeURIComponent(nextCursor)}`);
         if (seq !== viewSeq) { trace(`renderList(${seq}) stale — a newer render won`); return; }
-        el.pills[0].textContent = `Unresolved (${data.counts.unresolved})`;
-        el.pills[1].textContent = `Resolved (${data.counts.resolved})`;
-        el.pills[2].textContent = `All (${data.total})`;
-        let grid = el.list.querySelector('.fam-grid');
-        if (firstPage || !grid) {
-          el.list.innerHTML = '';
-          grid = document.createElement('div');
-          grid.className = 'fam-grid';
-          el.list.appendChild(grid);
-        }
-        for (const f of data.items) {
-          try {
-            grid.appendChild(cardFor(f));
-          } catch (cardErr) {
-            const ec = document.createElement('div');
-            ec.className = 'fam-card';
-            ec.style.color = '#e87a7a';
-            ec.textContent = `card error (${f.id}): ${cardErr.message}`;
-            grid.appendChild(ec);
-            console.error('dupe card render failed', f.id, cardErr);
-          }
-        }
+        if (data.key) listKey = data.key;
+        if (firstPage) listDirty = false;
+        const cached = listCache.get(filter) ||
+          { items: [], next_cursor: '', counts: data.counts, total: data.total };
+        if (firstPage) cached.items = [];
+        cached.items = cached.items.concat(data.items);
+        cached.next_cursor = data.next_cursor || '';
+        cached.counts = data.counts;
+        cached.total = data.total;
+        listCache.set(filter, cached);
+        renderCards(data.items, data, !firstPage);
         cursor = data.next_cursor || '';
         exhausted = !data.next_cursor;
         el.more.style.display = exhausted ? 'none' : 'flex';
@@ -1866,11 +1953,12 @@ registerModule({
 
     async function renderDetail(fid) {
       const seq = ++viewSeq;
+      detailPending = true;   // background list revalidation must not race us
       trace(`renderDetail(${fid}, seq=${seq})`);
       job('loading family…');
       try {
         const f = await api(`/families/${fid}`);
-        if (seq !== viewSeq) { trace(`renderDetail(${fid}) stale — a newer render won`); return; }
+        if (seq !== viewSeq) { trace(`renderDetail(${fid}) stale — a newer render won`); detailPending = false; return; }
         current = f;
         committed = false;
         commitSummary = null;
@@ -1923,6 +2011,7 @@ registerModule({
       } catch (e) {
         trace(`renderDetail(${fid}) failed: ${e.message}`);
         job(`dupe: ${e.message}`, 'err');
+        detailPending = false;
       }
     }
 
@@ -1967,6 +2056,7 @@ registerModule({
           window.dispatchEvent(new CustomEvent('ellieedit:pending-changed'));
         }
         committed = true;
+        listDirty = true;   // listing state changed — next render refetches
         commitSummary = `${pendingNote} · ${keeps} picked · ${melds} melded · ${rejects} rejected`;
         renderCommitted(commitSummary);
         job(`committed — ${pendingNote}`, 'ok');
@@ -2038,6 +2128,7 @@ registerModule({
     window.addEventListener('ellieedit:dupe-meld-saved', e => {
       const fid = e.detail?.family;
       if (!fid) return;
+      listDirty = true;   // ledger + manifest changed server-side
       // Save back returns to the Dupe module with the family's detail shown,
       // meld result in place of the group, ACCEPTED in the ledger. The
       // detail may have been torn down while FaceCycle was active

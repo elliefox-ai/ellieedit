@@ -298,12 +298,15 @@ export class Gallery {
 
   async syncManifest() {
     try {
-      const j = await fetch('/api/pending').then(r => r.json());
-      const fresh = new Set(j.items.map(i => i.path));
+      // Cheap badge source (2026-10-08n): manifest keys only — no per-entry
+      // stats on every Gallery activation. Bytes load lazily when the
+      // Deletion view actually opens (ensurePdBytes).
+      const j = await fetch('/api/pending/count').then(r => r.json());
+      const fresh = new Set(j.paths || []);
       const changed = fresh.size !== this.pendingSet.size ||
         [...fresh].some(p => !this.pendingSet.has(p));
       this.pendingSet = fresh;
-      this.pdBytes = j.bytes;
+      this.pdBytes = null;      // unknown until the Deletion view opens
       this.el.pendingCount.textContent = j.count;
       if (changed) {
         if (this.viewFilter === 'all') this.applyBadges();
@@ -322,15 +325,30 @@ export class Gallery {
     this.updatePendingBar();
   }
 
+  async ensurePdBytes() {
+    // Bytes/sizes cost a stat per manifest entry on /mnt — pay only when
+    // the Deletion view (or its confirm step) actually needs them.
+    if (this.pdBytes != null || this.pdFetching) return;
+    this.pdFetching = true;
+    try {
+      const j = await fetch('/api/pending').then(r => r.json());
+      this.pdBytes = j.bytes;
+      if (this.viewFilter === 'pending') this.updatePendingBar();
+    } catch { /* leave unknown */ }
+    finally { this.pdFetching = false; }
+  }
+
   updatePendingBar() {
     const on = this.viewFilter === 'pending';
     this.el.pendingBar.classList.toggle('on', on);
     if (!on) return;
     const n = this.pendingSet.size;
+    const bytes = this.pdBytes == null ? '' : ` · ${fmtBytes(this.pdBytes)}`;
     this.el.pdMsg.textContent = n
-      ? `Deletion queue — ${n} image${n === 1 ? '' : 's'} · ${fmtBytes(this.pdBytes)}. Nothing is deleted until you confirm.`
+      ? `Deletion queue — ${n} image${n === 1 ? '' : 's'}${bytes}. Nothing is deleted until you confirm.`
       : 'Deletion queue — nothing marked.';
     this.el.pdDeleteAll.style.display = n ? '' : 'none';
+    if (n) this.ensurePdBytes();
   }
 
   pdDisarm() {
@@ -457,12 +475,14 @@ export class Gallery {
   // ---- pending delete manifest -------------------------------------------
   // Manifest state lives in this.pendingSet (kept fresh by syncManifest).
 
-  pdConfirmStep() {
+  async pdConfirmStep() {
     // Two-step confirm: first tap arms the button with the real cost.
     if (!this.el.pendingBar.classList.contains('confirming')) {
+      await this.ensurePdBytes();
       this.el.pendingBar.classList.add('confirming');
+      const bytes = this.pdBytes == null ? 'sizes loading' : fmtBytes(this.pdBytes);
       this.el.pdDeleteAll.textContent =
-        `Really delete ${this.pendingSet.size} images (${fmtBytes(this.pdBytes)})? This cannot be undone.`;
+        `Really delete ${this.pendingSet.size} images (${bytes})? This cannot be undone.`;
       return;
     }
     this.pdConfirmExecute();

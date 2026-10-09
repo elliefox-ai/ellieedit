@@ -143,3 +143,13 @@ export function zoomMembers(members, verdicts, mode = "all") {
   return (members || []).filter(m =>
     zoomModeMatches(mode, (verdicts || {})[m.path] || null));
 }
+
+// Dupe list cache decision (2026-10-08n): pure cache-key logic so the
+// client-side families-list cache is unit-testable. 'reuse' only when a
+// cached key exists, the server key is known, and nothing dirtyied the
+// cache since (a commit). Anything unknown refetches — fail open.
+export function listCacheDecision(cachedKey, freshKey, dirty) {
+  if (dirty) return "refetch";
+  if (!cachedKey || !freshKey) return "refetch";
+  return cachedKey === freshKey ? "reuse" : "refetch";
+}
