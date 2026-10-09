@@ -126,6 +126,20 @@ async def main():
               }
             }""")
             await pg.wait_for_timeout(3000)
+            # ZOOM-FIRST ENTRY (2026-10-08p): opening a family lands
+            # directly in the working zoom view — no survey/thumbnail
+            # intermediate. Dismiss to the spread for this section's
+            # spread-level assertions.
+            zf = await pg.evaluate("""() => ({
+              zoom: !!document.querySelector('#ss-zoom'),
+              spread_beneath: !!document.querySelector('.ss-header'),
+              survey_required: !!document.querySelector('#ss-survey'),
+            })""")
+            report["zoom_first_entry"] = zf
+            assert zf["zoom"] and zf["spread_beneath"] and not zf["survey_required"], \
+                f"family entry is not zoom-first: {zf}"
+            await pg.evaluate("() => document.querySelector('#ss-zoom-back').click()")
+            await pg.wait_for_timeout(600)
             ss = await pg.evaluate("""() => ({
               header: !!document.querySelector('.ss-header'),
               champion: (() => { const c = document.querySelector('.ss-champ');
@@ -224,6 +238,10 @@ async def main():
                 })""")
                 assert reopen["detail_open"] and reopen["header"] and \
                     reopen["list_display"] == "none", f"re-open broken: {reopen}"
+                # zoom-first: dismiss the auto-opened zoom so later
+                # tap-based spread interactions hit the spread
+                await pg.evaluate("() => document.querySelector('#ss-zoom-back')?.click()")
+                await pg.wait_for_timeout(600)
             report["reopen_x2"] = "ok"
             report["after_reopen"] = await pg.evaluate(
                 "() => ({chips: document.querySelectorAll('.ss-pick-chip').length,"
@@ -615,37 +633,61 @@ async def main():
             assert back["sift_gone"] and back["header"] and back["chips"] == 2 \
                 and back["dead"] == sift_fam["size"] - 2, \
                 f"sift exit did not carry draft to spread: {back} (size {sift_fam['size']})"
-            # COMMIT the sift family → ledger entry with ranks + pending rejects
+            # COMMIT the sift family → commit&next (2026-10-08p): visible
+            # flash on the bottom-right button, then the next unresolved
+            # family opens automatically.
             await pg.evaluate("() => document.querySelector('#dupe-commit').click()")
-            await pg.wait_for_timeout(3000)
-            sift_committed = await pg.evaluate(
-                "() => (document.querySelector('.ss-committed .big')||{}).textContent || null")
-            report["sift_committed"] = sift_committed
-            assert sift_committed and "committed" in sift_committed, \
-                f"sift family commit did not land: {sift_committed}"
-            await pg.screenshot(path=".probes/ss-11-sift-committed.png")
+            await pg.wait_for_timeout(400)
+            sift_flash = await pg.evaluate(
+                "() => document.querySelector('#dupe-commit').textContent")
+            report["sift_commit_flash"] = sift_flash
+            assert "committed" in sift_flash.lower(), \
+                f"no commit flash after commit: {sift_flash}"
+            await pg.wait_for_timeout(2500)
+            sift_advanced = await pg.evaluate("""() => ({
+              fam: (document.querySelector('.ss-header .fam-id')||{}).textContent || null,
+              detail_open: document.querySelector('#dupe-detail').classList.contains('open'),
+              from: {sift_id: 1} && null,
+            })""")
+            sift_advanced["from"] = sift_fam["id"]
+            report["sift_commit_next"] = sift_advanced
+            assert sift_advanced["detail_open"] and \
+                sift_advanced["fam"] != sift_fam["id"], \
+                f"commit&next did not advance past the sift family: {sift_advanced}"
+            await pg.screenshot(path=".probes/ss-11-sift-committed-advanced.png")
             # back to families for the remaining sections
             await pg.evaluate("() => document.querySelector('#dupe-back').click()")
-            await pg.wait_for_timeout(1500)
+            await wait_grid_ready(pg)
 
-            # ── 7. Commit → verdict + pending manifest ───────────────
+            # ── 7. Commit → verdict + pending manifest + AUTO-ADVANCE ─
+            # (2026-10-08p commit&next: flash, then the next unresolved
+            # family opens; the committed family flips to resolved.)
             counts = await pg.evaluate("""() =>
               (document.querySelector('.ss-header')||{textContent:''}).textContent""")
             report["pre_commit_header"] = counts
+            from_fid = await pg.evaluate(
+                "() => (document.querySelector('.ss-header .fam-id')||{}).textContent || null")
             await pg.evaluate("() => document.querySelector('#dupe-commit').click()")
-            await pg.wait_for_timeout(3000)
-            committed = await pg.evaluate("""() => ({
-              banner: (document.querySelector('.ss-committed .big')||{}).textContent || null,
-              badge: (document.querySelector('.ss-badge.committed')||{}).textContent || null,
-              summary: (document.querySelector('.ss-committed .sum')||{}).textContent || null,
-            })""")
+            await pg.wait_for_timeout(400)
+            flash = await pg.evaluate(
+                "() => document.querySelector('#dupe-commit').textContent")
+            committed = {"flash": flash, "from": from_fid}
             report["committed"] = committed
-            assert committed["banner"] and "committed" in committed["banner"], \
-                f"no committed state rendered: {committed}"
-            await pg.screenshot(path=".probes/ss-06-committed.png")
+            assert "committed" in flash.lower(), \
+                f"no commit flash on the bottom-right button: {flash}"
+            await pg.screenshot(path=".probes/ss-06-commit-flash.png")
+            await pg.wait_for_timeout(2500)
+            advanced = await pg.evaluate("""() => ({
+              fam: (document.querySelector('.ss-header .fam-id')||{}).textContent || null,
+              detail_open: document.querySelector('#dupe-detail').classList.contains('open'),
+              zoom: !!document.querySelector('#ss-zoom'),
+            })""")
+            report["commit_next_advanced"] = advanced
+            assert advanced["detail_open"] and advanced["fam"] != from_fid, \
+                f"commit&next did not advance: {advanced} (from {from_fid})"
 
-            # ── 7b. Esc at committed view → back to families ─────────
-            await pg.keyboard.press("Escape")
+            # ── 7b. Return to families (secondary control) ─────────
+            await pg.evaluate("() => document.querySelector('#dupe-back').click()")
             await pg.wait_for_timeout(1200)
             esc_fam = await pg.evaluate("""() => ({
               detail_closed: !document.querySelector('#dupe-detail')
@@ -655,7 +697,7 @@ async def main():
             })""")
             report["kbd_esc_to_families"] = esc_fam
             assert esc_fam["detail_closed"] and esc_fam["grid_back"], \
-                f"Esc did not step back to families: {esc_fam}"
+                f"return-to-families did not land on the grid: {esc_fam}"
 
             m = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {}
             report["manifest_added"] = [k for k in m if k not in
@@ -1321,16 +1363,147 @@ async def main():
             await pg.wait_for_timeout(4000)
             next_state = await pg.evaluate("""() => ({
               fam: (document.querySelector('.ss-header .fam-id')||{}).textContent || null,
-              zoom_gone: !document.querySelector('#ss-zoom'),
+              zoom: !!document.querySelector('#ss-zoom'),
             })""")
             report["twin_commit_next"] = {**next_state, "from": tl_id}
             assert next_state["fam"] and next_state["fam"] != tl_id \
-                and next_state["zoom_gone"], \
-                f"commit & next did not open the next family: {next_state}"
+                and next_state["zoom"], \
+                f"commit & next did not open the next family (zoom-first): {next_state}"
             await pg.screenshot(path=".probes/ss-24-twin-next-family.png")
             # back out; the committed family flips to resolved in the grid
             await pg.evaluate("() => document.querySelector('#dupe-back').click()")
             await wait_grid_ready(pg)
+
+            # ── 13. ZOOM-FIRST + COMMIT-ADVANCE UNIFICATION (2026-10-08p)
+            # Family entry lands in zoom (no survey intermediate); survey is
+            # an in-zoom toggle; the bottom-right button and the C shortcut
+            # run the SAME commitAndNext (flash → advance only on 2xx).
+            # find a fresh unresolved family (no preloaded verdicts)
+            zf_fam = await pg.evaluate("""async () => {
+              let cursor = '';
+              for (let page = 0; page < 20; page++) {
+                const d = await fetch('/api/dupe/families?state=unresolved&cursor='
+                  + encodeURIComponent(cursor)).then(r => r.json());
+                for (const it of d.items) {
+                  if (it.size < 1) continue;
+                  const det = await fetch('/api/dupe/families/' + it.id)
+                    .then(r => r.json());
+                  if (!Object.values(det.verdict || {}).filter(Boolean).length)
+                    return it;
+                }
+                if (!d.next_cursor) break;
+                cursor = d.next_cursor;
+              }
+              return null;
+            }""")
+            assert zf_fam, "no fresh unresolved family for the zoom-first section"
+            report["zf_family"] = {k: zf_fam[k] for k in ("id", "size")}
+            await pg.evaluate(f"""() => [...document.querySelectorAll('.fam-card')]
+              .find(c => c.textContent.includes('{zf_fam["id"]}'))?.click()""")
+            await pg.wait_for_timeout(2500)
+            zf_entry = await pg.evaluate("""() => ({
+              zoom: !!document.querySelector('#ss-zoom'),
+              survey_intermediate: !!document.querySelector('#ss-survey'),
+              spread_beneath: !!document.querySelector('.ss-header'),
+              survey_toggle: !!document.querySelector('#ss-zoom-survey'),
+              toggle_44: (() => { const b = document.querySelector('#ss-zoom-survey');
+                const r = b && b.getBoundingClientRect();
+                return r && r.height >= 44; })(),
+              commit_btn_44: (() => { const b = document.querySelector('#dupe-commit');
+                const r = b && b.getBoundingClientRect();
+                return r && r.height >= 44; })(),
+              commit_bottom_right: (() => { const b = document.querySelector('#dupe-commit');
+                const r = b && b.getBoundingClientRect();
+                return r && r.right > innerWidth * 0.6 && r.bottom > innerHeight * 0.6
+                  && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1; })(),
+            })""")
+            report["zf_entry"] = zf_entry
+            assert zf_entry["zoom"] and not zf_entry["survey_intermediate"] \
+                and zf_entry["spread_beneath"], \
+                f"zoom-first entry broken: {zf_entry}"
+            assert zf_entry["survey_toggle"] and zf_entry["toggle_44"], \
+                f"in-zoom survey toggle missing or under 44px: {zf_entry}"
+            # iPad 1024x768: the primary action is bottom-right, thumb-reachable
+            assert zf_entry["commit_btn_44"] and zf_entry["commit_bottom_right"], \
+                f"commit button not bottom-right / under 44px: {zf_entry}"
+            await pg.screenshot(path=".probes/ss-25-zoom-first-entry.png")
+            # survey toggle: zoom → survey (secondary view), back to stack →
+            # spread, then ⤢ re-enters zoom and Esc steps back out
+            await pg.evaluate("() => document.querySelector('#ss-zoom-survey').click()")
+            await pg.wait_for_timeout(1500)
+            tog = await pg.evaluate("""() => ({
+              survey: !!document.querySelector('#ss-survey'),
+              zoom_gone: !document.querySelector('#ss-zoom'),
+            })""")
+            report["zf_survey_toggle"] = tog
+            assert tog["survey"] and tog["zoom_gone"], \
+                f"survey toggle did not land in survey: {tog}"
+            await pg.evaluate("() => [...document.querySelectorAll('#ss-survey .ss-ov-top .ee-btn')]"
+                ".find(b => b.textContent.includes('Back to stack')).click()")
+            await pg.wait_for_timeout(1200)
+            at_spread = await pg.evaluate(
+                "() => !!document.querySelector('.ss-header') && !document.querySelector('#ss-survey')")
+            assert at_spread, "survey 'Back to stack' did not reach the spread"
+            await pg.evaluate("() => document.querySelector('#ss-survey-btn').click()")
+            await pg.wait_for_timeout(1200)
+            await pg.evaluate("() => [...document.querySelectorAll('#ss-survey .ss-ov-top .ee-btn')]"
+                ".find(b => b.textContent.includes('Back to stack')).click()")
+            await pg.wait_for_timeout(1200)
+            # FAILURE BEHAVIOR: an empty draft must NOT advance — a screen
+            # that doesn't advance reads as not-committed.
+            await pg.evaluate("() => document.querySelector('#dupe-commit').click()")
+            await pg.wait_for_timeout(1500)
+            no_adv = await pg.evaluate("""() => ({
+              fam: (document.querySelector('.ss-header .fam-id')||{}).textContent || null,
+              err: document.querySelector('#dupe-status')?.textContent || '',
+            })""")
+            no_adv["expected"] = zf_fam["id"]
+            report["zf_commit_empty_no_advance"] = no_adv
+            assert no_adv["fam"] == zf_fam["id"], \
+                f"empty-draft commit advanced — violates not-committed contract: {no_adv}"
+            # C-shortcut parity at SPREAD level (same commitAndNext path):
+            # pick via A first so the commit can succeed, then C → flash →
+            # advance to a different family.
+            await pg.keyboard.press("a")
+            await pg.wait_for_timeout(400)
+            await pg.keyboard.press("c")
+            await pg.wait_for_timeout(400)
+            c_flash = await pg.evaluate(
+                "() => document.querySelector('#dupe-commit').textContent")
+            report["zf_c_flash"] = c_flash
+            assert "committed" in c_flash.lower(), \
+                f"spread-level C produced no commit flash: {c_flash}"
+            await pg.wait_for_timeout(2500)
+            c_next = await pg.evaluate("""() => ({
+              fam: (document.querySelector('.ss-header .fam-id')||{}).textContent || null,
+              detail_open: document.querySelector('#dupe-detail').classList.contains('open'),
+              zoom: !!document.querySelector('#ss-zoom'),
+            })""")
+            report["zf_c_next"] = c_next
+            assert c_next["detail_open"] and c_next["fam"] != zf_fam["id"], \
+                f"spread-level C did not advance to the next family: {c_next}"
+            await pg.screenshot(path=".probes/ss-26-zoom-first-advanced.png")
+            # bottom-right button parity: on the NEW family, #dupe-commit
+            # drives the same action (empty draft → stays; pick+click →
+            # flash → advance)
+            await pg.keyboard.press("a")
+            await pg.wait_for_timeout(400)
+            await pg.evaluate("() => document.querySelector('#dupe-commit').click()")
+            await pg.wait_for_timeout(400)
+            btn_flash = await pg.evaluate(
+                "() => document.querySelector('#dupe-commit').textContent")
+            report["zf_btn_flash"] = btn_flash
+            assert "committed" in btn_flash.lower(), \
+                f"bottom-right button produced no flash: {btn_flash}"
+            await pg.wait_for_timeout(2500)
+            btn_next = await pg.evaluate(
+                "() => (document.querySelector('.ss-header .fam-id')||{}).textContent || null")
+            report["zf_btn_next"] = btn_next
+            assert btn_next and btn_next != c_next["fam"], \
+                f"bottom-right button did not advance: {btn_next} vs {c_next['fam']}"
+            await pg.evaluate("() => document.querySelector('#dupe-back').click()")
+            await wait_grid_ready(pg)
+
             assert not console_errors, f"console errors: {console_errors}"
             print(json.dumps(report, indent=1))
 
