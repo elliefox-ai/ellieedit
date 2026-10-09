@@ -861,14 +861,6 @@ export class Gallery {
     act('next').addEventListener('click', () => this.nav(1));
     act('viewer-promote').addEventListener('click', () => this.promoteFromViewer());
     act('viewer-delete').addEventListener('click', () => this.armViewerDelete());
-    act('to-facecycle').addEventListener('click', () => {
-      const item = this.items[this.viewIdx];
-      if (!item) return;
-      const url = this.fileUrl(item.path);
-      window.dispatchEvent(new CustomEvent('ellieedit:open-in-facecycle',
-        { detail: { url, name: item.name } }));
-      this.closeViewer();
-    });
     act('to-update').addEventListener('click', () => {
       const item = this.items[this.viewIdx];
       if (!item) return;

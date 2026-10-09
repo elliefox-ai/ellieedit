@@ -24,6 +24,19 @@ for i, color in enumerate([(180, 40, 40), (40, 140, 200), (60, 170, 90), (220, 1
     probe_files.append(p)
 
 
+async def descend_to(pg, folder_name):
+    """2026-10-09e: folder navigation is breadcrumb/folder-card based — click
+    the folder card for `folder_name`. /mnt listings can be slow, so wait
+    for the card instead of a fixed sleep."""
+    await pg.wait_for_function(
+        """(name) => [...document.querySelectorAll('.gal-cell.folder')]
+          .some(c => c.dataset.folder === name)""", arg=folder_name, timeout=30000)
+    await pg.evaluate(
+        """(name) => { const c = [...document.querySelectorAll('.gal-cell.folder')]
+          .find(c => c.dataset.folder === name); c.click(); }""", folder_name)
+    await pg.wait_for_timeout(1200)
+
+
 async def click_btn(pg, pattern, scope=""):
     return await pg.evaluate(
         """([pattern, scope]) => {
@@ -51,8 +64,9 @@ async def main():
 
             # ── 1. Gallery multi-select over the probe subdir ──────────────
             subdir = probe_dir.name
-            await pg.select_option('[data-id="dir-select"]', subdir)
-            await pg.wait_for_timeout(1200)
+            await descend_to(pg, subdir)
+            report["crumbs"] = await pg.evaluate(
+                "() => [...document.querySelectorAll('.gal-crumbs .crumb')].map(b => b.textContent)")
             await pg.evaluate("() => document.querySelector('[data-act=select-mode]').click()")
             await pg.evaluate("() => [...document.querySelectorAll('.gal-cell')].slice(0, 4).forEach(c => c.click())")
             await pg.wait_for_timeout(500)
@@ -188,8 +202,7 @@ async def main():
             # ── 6. Post-delete grid (probe files gone) ─────────────────────
             await pg.click('.tab[data-name="gallery"]')
             await pg.wait_for_timeout(300)
-            await pg.select_option('[data-id="dir-select"]', subdir)
-            await pg.wait_for_timeout(1200)
+            await descend_to(pg, subdir)
             report["postDeleteGrid"] = await pg.evaluate(
                 "() => ({cells: document.querySelectorAll('.gal-cell').length,"
                 " status: document.querySelector('[data-id=status]').textContent})")
@@ -241,8 +254,7 @@ async def main():
             Image.new("RGB", (300, 200), (20, 120, 200)).save(sel_dir / "s1.png")
             await pg.reload(wait_until="networkidle")
             await pg.wait_for_timeout(1200)
-            await pg.select_option('[data-id="dir-select"]', sel_dir.name)
-            await pg.wait_for_timeout(1200)
+            await descend_to(pg, sel_dir.name)
             await pg.evaluate("() => document.querySelector('[data-act=select-mode]').click()")
             await pg.wait_for_timeout(300)
             await pg.evaluate("() => [...document.querySelectorAll('.gal-cell')].slice(0, 2).forEach(c => c.click())")
@@ -280,8 +292,7 @@ async def main():
                 # picks it up in the dropdown.
                 await pg.reload(wait_until="networkidle")
                 await pg.wait_for_timeout(1200)
-                await pg.select_option('[data-id="dir-select"]', fc_dir.name)
-                await pg.wait_for_timeout(1200)
+                await descend_to(pg, fc_dir.name)
                 await pg.evaluate("() => document.querySelector('[data-act=select-mode]').click()")
                 await pg.evaluate("() => [...document.querySelectorAll('.gal-cell')].slice(0, 3).forEach(c => c.click())")
                 await pg.wait_for_timeout(400)
@@ -339,7 +350,7 @@ async def main():
             try:
                 await pg.reload(wait_until="networkidle")
                 await pg.wait_for_timeout(800)
-                await pg.select_option('[data-id="dir-select"]', mk_dir.name)
+                await descend_to(pg, mk_dir.name)
                 # Skeletons first: cells exist but thumbs not yet revealed.
                 report["asyncSkeletons"] = await pg.evaluate(
                     "() => ({cells: document.querySelectorAll('.gal-cell').length,"
