@@ -22,6 +22,7 @@ import re
 import subprocess
 import threading
 import time
+from urllib.parse import quote
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +37,17 @@ log = __import__("logging").getLogger("ellieedit.dupe")
 
 DUPE_ROOT = Path(os.environ.get(
     "ELLIEEDIT_DUPE_ROOT", "/mnt/shared/_Incoming/DupeReview"))
+# Member-root allowlist (2026-10-09h): straggler-scan families link members
+# OUTSIDE the dupe root (e.g. /mnt/shared/_DupeGatherer/staging/...). The
+# jail accepts absolute paths resolving under any of these realpaths only;
+# env override ELLIEEDIT_DUPE_EXTRA_ROOTS (os.pathsep-separated) extends or
+# replaces the two defaults. Strict allowlist — everything else is 400.
+DUPE_MEMBER_ROOTS: list[Path] = [DUPE_ROOT] + [
+    Path(p) for p in os.environ.get(
+        "ELLIEEDIT_DUPE_EXTRA_ROOTS",
+        os.pathsep.join(["/mnt/shared/_DupeGatherer",
+                         "/mnt/shared/_Incoming"]),
+    ).split(os.pathsep) if p.strip()]
 DUPE_DATA = Path(os.environ.get(
     "ELLIEEDIT_DUPE_DATA", str(DUPE_ROOT / ".dupes")))
 # Ledger lives in the ellieedit repo dir (append-only JSONL, latest wins).
@@ -223,16 +235,27 @@ router = APIRouter(prefix="/api/dupe", tags=["dupe"])
 
 
 def jailed(rel: str) -> Path:
-    """DUPE_ROOT jail — mirrors gallery.jailed (no absolute, ~, .., symlink
-    escapes, directories)."""
+    """Allowlist jail (2026-10-09h): relative paths resolve under DUPE_ROOT
+    (as before — no absolute, ~, .., symlink escapes, directories). Absolute
+    paths are accepted ONLY if they resolve under one of the DUPE_MEMBER_ROOTS
+    realpaths — straggler-scan families link members outside the dupe root.
+    Symlinks are resolved before the containment check, so a link escaping an
+    allowlisted root is rejected. """
     rel = (rel or "").replace("\\", "/")  # family files store windows-ish paths
-    if not rel or Path(rel).is_absolute() or rel.startswith("~"):
+    if not rel or rel.startswith("~") or ".." in rel.split("/"):
         raise HTTPException(400, "path escapes dupe root")
-    root_real = DUPE_ROOT.resolve()
-    candidate = (DUPE_ROOT / rel.lstrip("/")).resolve()
-    if candidate == root_real or root_real not in candidate.parents:
-        raise HTTPException(400, "path escapes dupe root")
-    return candidate
+    if not Path(rel).is_absolute():
+        # relative: old behavior — must physically resolve under DUPE_ROOT
+        candidate = (DUPE_ROOT / rel.lstrip("/")).resolve()
+        roots = [DUPE_ROOT]
+    else:
+        candidate = Path(rel).resolve()
+        roots = [r for r in DUPE_MEMBER_ROOTS if r != DUPE_ROOT] + [DUPE_ROOT]
+    for r in roots:
+        root_real = r.resolve()
+        if candidate != root_real and root_real in candidate.parents:
+            return candidate
+    raise HTTPException(400, "path escapes dupe root")
 
 
 # ---------------------------------------------------------------- index load
@@ -331,7 +354,7 @@ def _member_view(m: dict) -> dict:
         "mtime": m.get("mtime"),
         "dhash": m.get("dhash"),
         "phash": m.get("phash"),
-        "thumb": f"/api/dupe/thumb?path={rel}",
+        "thumb": f"/api/dupe/thumb?path={quote(rel, safe='')}",
     }
 
 
@@ -393,8 +416,16 @@ def _jailed_cheap(rel: str) -> bool:
     hit = _jail_cache.get(rel)
     if hit is not None:
         return hit
-    bad = (not rel or rel.startswith("/") or rel.startswith("~")
-           or ".." in rel.split("/"))
+    if not rel or rel.startswith("~") or ".." in rel.split("/"):
+        bad = True
+    elif rel.startswith("/"):
+        # absolute: allowlisted member roots only (string-prefix fast path;
+        # the full resolve-based jail stays in jailed())
+        bad = not any(
+            rel == str(r) or rel.startswith(str(r).rstrip("/") + "/")
+            for r in DUPE_MEMBER_ROOTS)
+    else:
+        bad = False
     _jail_cache[rel] = bad
     return bad
 

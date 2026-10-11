@@ -1161,3 +1161,87 @@ def test_deathrow_ghost_states_resolved(env, client, monkeypatch):
     # rendering wrote NOTHING to the ledger
     n_after = len(before_ledger.read_text().splitlines())
     assert n_after == n_before
+
+
+# ------------------------------------------------- member-root jail (09h)
+
+def _jailed_env(env, monkeypatch):
+    """env fixture + cleared jail/preview caches for allowlist tests."""
+    root, secret, tmp = env
+    dupe_mod._jail_cache.clear()
+    dupe_mod._preview_cache.clear()
+    return root, secret, tmp
+
+
+def test_jail_accepts_member_under_each_allowlisted_root(env, monkeypatch, client):
+    root, secret, tmp = env
+    extra_a, extra_b = tmp / "gatherer", tmp / "incoming"
+    monkeypatch.setattr(dupe_mod, "DUPE_MEMBER_ROOTS",
+                        [root, extra_a, extra_b])
+    for base in (extra_a, extra_b):
+        (base / "staging").mkdir(parents=True)
+    a, b = extra_a / "staging" / "x.png", extra_b / "y.png"
+    for p in (a, b):
+        _png(p, (10, 200, 10))
+    # direct jail calls
+    assert dupe_mod.jailed(str(a)) == a.resolve()
+    assert dupe_mod.jailed(str(b)) == b.resolve()
+    assert dupe_mod.jailed(str(root / "a.png")) == (root / "a.png").resolve()
+    # through the live endpoint (absolute paths in the URL)
+    r = client.get("/api/dupe/thumb", params={"path": str(a)})
+    assert r.status_code == 200 and r.headers["content-type"] == "image/webp"
+    r = client.get("/api/dupe/file", params={"path": str(b)})
+    assert r.status_code == 200 and "image/png" in r.headers["content-type"]
+
+
+def test_jail_rejects_traversal_and_foreign_roots(env, monkeypatch, client):
+    root, secret, tmp = env
+    monkeypatch.setattr(dupe_mod, "DUPE_MEMBER_ROOTS", [root])
+    for p in ("../secret.png", str(tmp / "secret.png"), "/etc/passwd",
+              str(root / ".." / "secret.png"), "~/x.png", "/mnt/e/x.png"):
+        r = client.get("/api/dupe/thumb", params={"path": p})
+        assert r.status_code == 400, f"{p} -> {r.status_code}"
+    # relative escape still rejected, extension whitelist unchanged
+    r = client.get("/api/dupe/file", params={"path": str(tmp / "secret.png")})
+    assert r.status_code == 400
+
+
+def test_jail_rejects_symlink_escaping_allowlisted_root(env, monkeypatch, client):
+    root, secret, tmp = env
+    extra = tmp / "gatherer"
+    (extra / "staging").mkdir(parents=True)
+    link = extra / "staging" / "escape.png"
+    link.symlink_to(secret)  # secret.png lives OUTSIDE the allowlist
+    monkeypatch.setattr(dupe_mod, "DUPE_MEMBER_ROOTS", [root, extra])
+    r = client.get("/api/dupe/thumb", params={"path": str(link)})
+    assert r.status_code == 400
+
+
+def test_serializer_thumb_urls_roundtrip_jail_for_out_of_root_members(
+        env, monkeypatch, client):
+    from urllib.parse import parse_qs, urlparse
+    root, secret, tmp = env
+    extra = tmp / "gatherer"
+    (extra / "staging").mkdir(parents=True)
+    img = extra / "staging" / "img_0105.png"
+    _png(img, (10, 200, 10))
+    monkeypatch.setattr(dupe_mod, "DUPE_MEMBER_ROOTS", [root, extra])
+    dupe_mod._preview_cache.clear()
+    fam = {"path": str(img), "size": 1, "mtime": 1,
+           "dhash": "0" * 16, "phash": "0" * 16}
+    v = dupe_mod._member_view(fam)
+    q = parse_qs(urlparse(v["thumb"]).query)["path"][0]
+    assert dupe_mod.jailed(q) == img.resolve()   # URL round-trips through jail
+    # inject into the indexed family so the listing emits a real URL
+    fam_path = dupe_mod.DUPE_DATA / "families" / "fam-aaaaaaaaaaaa.json"
+    famd = json.loads(fam_path.read_text())
+    famd["members"].append(fam)
+    fam_path.write_text(json.dumps(famd))
+    dupe_mod._preview_cache.clear()
+    # through the family listing: thumb survives (not jailed-flagged) and
+    # the endpoint it points at serves the bytes
+    lst = client.get("/api/dupe/families").json()
+    members = [m for f in lst["items"] for m in f["members"]]
+    mine = next(m for m in members if m["path"] == str(img))
+    assert mine.get("jailed") is not True and mine["thumb"]
+    assert client.get(mine["thumb"]).status_code == 200
