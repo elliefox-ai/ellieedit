@@ -1245,3 +1245,135 @@ def test_serializer_thumb_urls_roundtrip_jail_for_out_of_root_members(
     mine = next(m for m in members if m["path"] == str(img))
     assert mine.get("jailed") is not True and mine["thumb"]
     assert client.get(mine["thumb"]).status_code == 200
+
+
+# ------------------------------------- Task 4: death-row retirement + lifecycle
+
+def _ledger_lines(tmp):
+    return (tmp / "verdicts.jsonl").read_text().splitlines()
+
+
+def test_deathrow_zero_file_rows_hidden_by_default(env, client):
+    """Rows with no rejected files left are residue: hidden by default,
+    revealed by include_archived=1; totals only count shown rows."""
+    root, _, _ = env
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    (root / "b.png").unlink()
+    (root / "sub" / "c.png").unlink()
+    dupe_mod._death_row_cache = None
+    s = client.get("/api/dupe/death-row").json()
+    assert s["items"] == [] and s["hidden_zero_file"] == 1
+    assert s["total_files"] == 0
+    full = client.get("/api/dupe/death-row?include_archived=1").json()
+    assert [r["id"] for r in full["items"]] == ["fam-aaaaaaaaaaaa"]
+    assert full["items"][0]["rejected_files"] == 0
+    assert full["hidden_zero_file"] == 0
+    assert "walk_ms" in s and s["cached"] is False
+    assert client.get("/api/dupe/death-row").json()["cached"] is True
+
+
+def test_dismiss_hides_row_and_survives_rehydration(env, client):
+    root, _, tmp = env
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    n0 = len(_ledger_lines(tmp))
+    r = client.post("/api/dupe/death-row/dismiss",
+                    json={"families": ["fam-aaaaaaaaaaaa"]})
+    assert r.status_code == 200 and r.json() == {"dismissed": 1}
+    assert len(_ledger_lines(tmp)) == n0 + 1        # append-only
+    assert client.get("/api/dupe/death-row?include_archived=1"
+                      ).json()["items"] == []
+    lst = client.get("/api/dupe/families?state=unresolved").json()
+    assert "fam-aaaaaaaaaaaa" not in [i["id"] for i in lst["items"]]
+    # history intact: still committed with the SAME verdict map
+    v = dupe_mod._verdicts()["fam-aaaaaaaaaaaa"]
+    assert v["death_row_dismissed"] is True
+    assert sum(1 for x in v["members"].values() if x == "rejected") == 2
+    det = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
+    assert det["state"] == "resolved" and det["dismissed"] is True
+    assert det["rehydrated"] is False
+    assert client.get("/api/dupe/families?state=committed"
+                      ).json()["counts"]["resolved"] == 1
+    # survives a cold start (caches cleared == server restart)
+    dupe_mod._death_row_cache = None
+    dupe_mod._ghost_cache = None
+    assert client.get("/api/dupe/death-row?include_archived=1"
+                      ).json()["items"] == []
+    # a later real commit revives it (tombstone is latest-wins superseded)
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    assert [r["id"] for r in client.get(
+        "/api/dupe/death-row").json()["items"]] == ["fam-aaaaaaaaaaaa"]
+
+
+def test_dismiss_validation_and_zero_file_bulk(env, client):
+    root, _, tmp = env
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    assert client.post("/api/dupe/death-row/dismiss",
+                       json={"families": []}).status_code == 400
+    assert client.post("/api/dupe/death-row/dismiss",
+                       json={"families": ["nope"]}).status_code == 400
+    # real family id but NOT on death row -> 400
+    assert client.post("/api/dupe/death-row/dismiss",
+                       json={"families": ["fam-cccccccccccc"]}).status_code == 400
+    n = len(_ledger_lines(tmp))
+    assert len(_ledger_lines(tmp)) == n              # failures wrote nothing
+    # zero_file bulk skips rows that still have files
+    r = client.post("/api/dupe/death-row/dismiss", json={"zero_file": True})
+    assert r.json() == {"dismissed": 0}
+    (root / "b.png").unlink()
+    (root / "sub" / "c.png").unlink()
+    dupe_mod._death_row_cache = None
+    r = client.post("/api/dupe/death-row/dismiss", json={"zero_file": True})
+    assert r.json() == {"dismissed": 1}
+
+
+def test_dismiss_never_touches_files_or_manifest(env, client):
+    root, _, tmp = env
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    client.post("/api/dupe/death-row/dismiss",
+                json={"families": ["fam-aaaaaaaaaaaa"]})
+    assert (root / "b.png").exists() and (root / "sub" / "c.png").exists()
+    assert pending_mod.load_manifest() == {}
+
+
+def test_state_filter_counts_match_ledger_and_default(env, client):
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    d = client.get("/api/dupe/families").json()       # default = unresolved
+    assert all(i["state"] == "unresolved" for i in d["items"])
+    com = client.get("/api/dupe/families?state=committed").json()
+    res = client.get("/api/dupe/families?state=resolved").json()
+    assert [i["id"] for i in com["items"]] == [i["id"] for i in res["items"]]
+    assert [i["id"] for i in com["items"]] == ["fam-aaaaaaaaaaaa"]
+    assert com["counts"] == {"unresolved": 2, "resolved": 1}
+    assert len(client.get("/api/dupe/families?state=all").json()["items"]) == 3
+    assert client.get("/api/dupe/families?state=bogus").status_code == 400
+
+
+def test_reopen_flips_to_unresolved_without_mutating_history(env, client):
+    root, _, tmp = env
+    members = _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    before = _ledger_lines(tmp)
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/reopen")
+    assert r.status_code == 200 and r.json()["state"] == "unresolved"
+    after = _ledger_lines(tmp)
+    assert after[:len(before)] == before and len(after) == len(before) + 1
+    assert json.loads(after[-1])["reopened"] is True
+    lst = client.get("/api/dupe/families?state=unresolved").json()
+    assert "fam-aaaaaaaaaaaa" in [i["id"] for i in lst["items"]]
+    assert not any(i.get("rehydrated") for i in lst["items"])
+    det = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
+    assert det["state"] == "unresolved" and det["reopened"] is True
+    assert det["prior_verdicts"] == members
+    # re-open of a family that is not committed -> 409; unknown -> 404
+    assert client.post(
+        "/api/dupe/families/fam-aaaaaaaaaaaa/reopen").status_code == 409
+    assert client.post(
+        "/api/dupe/families/fam-ffffffffffff/reopen").status_code == 404
+
+
+def test_committed_detail_carries_frozen_verdicts(env, client):
+    members = _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    client.post("/api/dupe/death-row/dismiss",
+                json={"families": ["fam-aaaaaaaaaaaa"]})
+    det = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
+    assert det["state"] == "resolved"
+    assert {p: v for p, v in det["verdicts"].items() if v} == members

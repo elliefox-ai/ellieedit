@@ -92,8 +92,8 @@ def _death_row_rows(verdicts: dict | None = None,
     rows = []
     for f in fams:
         v = verdicts.get(f["id"])
-        if not v:
-            continue
+        if not v or v.get("death_row_dismissed"):
+            continue   # dismissed tombstone retires the row (Task 4)
         kept = rejected = 0
         for val in (v.get("members") or {}).values():
             if val == "kept":
@@ -326,7 +326,17 @@ def _verdicts() -> dict:
                 except json.JSONDecodeError:
                     continue  # torn last line: ignore, keep going
                 if isinstance(e, dict) and e.get("family"):
-                    out[e["family"]] = e
+                    fam = e["family"]
+                    if (e.get("death_row_dismissed") and not e.get("members")
+                            and fam in out):
+                        # Dismissal tombstone (Task 4): carries NO verdict
+                        # map, so it must not replace the real latest
+                        # verdict — it only flags it. The next real entry
+                        # (commit / re-open) replaces the whole record and
+                        # the flag with it.
+                        out[fam] = {**out[fam], "death_row_dismissed": True}
+                    else:
+                        out[fam] = e
     except FileNotFoundError:
         pass
     except OSError as e:
@@ -339,8 +349,10 @@ def _family_state(fid: str, verdicts: dict | None = None) -> str:
     if not v:
         return "unresolved"
     members = v.get("members") or {}
-    if members and all(x == "deferred" for x in members.values()):
-        return "unresolved"  # deferral is a note, not a decision
+    if not members or all(x == "deferred" for x in members.values()):
+        # deferral is a note, not a decision; an empty map is a re-open
+        # draft entry (Task 4) — the family is back in the review queue
+        return "unresolved"
     return "resolved"
 
 
@@ -625,8 +637,11 @@ def scan_stragglers_status():
 def families(state: str = "unresolved", cursor: str = "",
              offset: int = 0, limit: int = 0,
              include_archived: int = 0, source: str = ""):
+    if state == "committed":
+        state = "resolved"   # lifecycle-view name for the same ledger state
     if state not in ("unresolved", "resolved", "all"):
-        raise HTTPException(400, "state must be unresolved|resolved|all")
+        raise HTTPException(
+            400, "state must be unresolved|committed|resolved|all")
     idx = _index()
     verdicts = _verdicts()
     rows = []
@@ -744,14 +759,11 @@ def families(state: str = "unresolved", cursor: str = "",
             "rehydrated": rehydrated, "archived_hidden": archived_hidden}
 
 
-@router.get("/death-row")
-def death_row():
-    """Mass-commit summary: every majority-rejected resolved family with
-    honest rejected-file counts AND bytes (stat of each rejected member
-    still on disk — same size source the deletion view shows). Cached on
-    the index:ledger key; the first walk after a change stats /mnt."""
+def _death_row_stats(idx: dict) -> tuple[list[dict], dict, float, bool]:
+    """(rows with rejected_files/bytes, ghosts, walk_ms, cached). The first
+    call after an index/ledger change stats every rejected member on /mnt;
+    walk_ms/stat count are logged and surfaced so that cost is visible."""
     global _death_row_cache
-    idx = _index()
     try:
         idx_mt = (DUPE_DATA / "index.json").stat().st_mtime
     except OSError:
@@ -761,41 +773,99 @@ def death_row():
     except OSError:
         key = f"{idx_mt}:0.0"
     if _death_row_cache and _death_row_cache[0] == key:
-        rows = _death_row_cache[1]
-        ghosts = _death_ghosts(_verdicts(), idx)   # cache-hit read, no re-walk
-    else:
-        verdicts = _verdicts()
-        rows = []
-        for r in _death_row_rows(verdicts, idx):
-            fam_verdict = (verdicts.get(r["id"], {}).get("members") or {})
-            rejected = [p for p, v in fam_verdict.items() if v == "rejected"]
-            files = 0
-            nbytes = 0
-            for rel in rejected:
-                try:
-                    p = jailed(rel)
-                    if not p.is_file():
-                        continue
-                    files += 1
-                    nbytes += p.stat().st_size
-                except HTTPException:
+        return (_death_row_cache[1], _death_ghosts(_verdicts(), idx),
+                0.0, True)          # cache-hit read, no re-walk
+    t0 = time.monotonic()
+    stats = 0
+    verdicts = _verdicts()
+    rows = []
+    for r in _death_row_rows(verdicts, idx):
+        fam_verdict = (verdicts.get(r["id"], {}).get("members") or {})
+        rejected = [p for p, v in fam_verdict.items() if v == "rejected"]
+        files = 0
+        nbytes = 0
+        for rel in rejected:
+            try:
+                p = jailed(rel)
+                stats += 1
+                if not p.is_file():
                     continue
-            rows.append({**r, "rejected_files": files, "rejected_bytes": nbytes})
-        rows.sort(key=lambda r: (-r["rejected"], r["id"]))
-        _death_row_cache = (key, rows)
-        ghosts = _death_ghosts(verdicts, idx)
+                files += 1
+                nbytes += p.stat().st_size
+            except HTTPException:
+                continue
+        rows.append({**r, "rejected_files": files, "rejected_bytes": nbytes})
+    rows.sort(key=lambda r: (-r["rejected"], r["id"]))
+    _death_row_cache = (key, rows)
+    ghosts = _death_ghosts(verdicts, idx)
+    walk_ms = (time.monotonic() - t0) * 1000.0
+    log.info("death-row walk: %d rows, %d member stats, %.0f ms",
+             len(rows), stats, walk_ms)
+    return rows, ghosts, walk_ms, False
+
+
+@router.get("/death-row")
+def death_row(include_archived: int = 0):
+    """Mass-commit summary: every majority-rejected resolved family with
+    honest rejected-file counts AND bytes (stat of each rejected member
+    still on disk — same size source the deletion view shows). Cached on
+    the index:ledger key; the first walk after a change stats /mnt.
+    Rows with ZERO rejected files left on disk are residue: hidden unless
+    include_archived=1 (mirrors /families). Dismissed rows never list."""
+    idx = _index()
+    rows, ghosts, walk_ms, cached = _death_row_stats(idx)
     # Ghost annotation (2026-10-09f): honest on-disk counts per family (all
     # members, not just the still-rejected ones the byte walk stats).
     for r in rows:
         g = ghosts.get(r["id"], {})
         r["on_disk"] = g.get("on_disk", 0)
         r["archived"] = r["on_disk"] == 0
+    shown = rows if include_archived else [
+        r for r in rows if r["rejected_files"] > 0]
     return {
-        "items": rows,
-        "families": len(rows),
-        "total_files": sum(r["rejected_files"] for r in rows),
-        "total_bytes": sum(r["rejected_bytes"] for r in rows),
+        "items": shown,
+        "families": len(shown),
+        "total_files": sum(r["rejected_files"] for r in shown),
+        "total_bytes": sum(r["rejected_bytes"] for r in shown),
+        "hidden_zero_file": len(rows) - len(shown),
+        "walk_ms": round(walk_ms, 1),
+        "cached": cached,
     }
+
+
+class DismissBody(BaseModel):
+    families: list[str] = []
+    zero_file: bool = False     # also dismiss every row with no files left
+
+
+@router.post("/death-row/dismiss")
+def death_row_dismiss(body: DismissBody):
+    """Retire death-row rows (bookkeeping only — nothing unlinks, no
+    manifest writes). One append-only ledger tombstone per family; the
+    latest-wins reader flags the real latest verdict (see _verdicts), so
+    history survives and the next real verdict/re-open revives the family.
+    Ids are validated against live death-row membership like commit."""
+    live = {r["id"]: r for r in _death_row_stats(_index())[0]}
+    targets = list(dict.fromkeys(body.families))
+    if not targets and not body.zero_file:
+        raise HTTPException(400, "no families")
+    bad = [f for f in targets if not FAMILY_ID_RE.match(f) or f not in live]
+    if bad:
+        raise HTTPException(400, f"not death-row families: {bad[:3]}")
+    if body.zero_file:
+        targets += [fid for fid, r in live.items()
+                    if r["rejected_files"] == 0 and fid not in targets]
+    if not targets:
+        return {"dismissed": 0}
+    ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    lines = "".join(json.dumps(
+        {"ts": ts, "family": fid, "death_row_dismissed": True,
+         "signal": "dismissed"}, ensure_ascii=False) + "\n"
+        for fid in targets)
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    with LEDGER.open("a") as fh:            # append-only by design
+        fh.write(lines)
+    return {"dismissed": len(targets)}
 
 
 class DeathRowBody(BaseModel):
@@ -918,6 +988,12 @@ def family_detail(fid: str):
         # verdict map as the CURRENT UNCOMMITTED DRAFT (normal zoom/commit
         # flow) instead of the read-only committed view.
         "rehydrated": fid in {r["id"] for r in _death_row_rows(verdicts)},
+        # Lifecycle (Task 4): tombstone flag + re-open draft marker; a
+        # re-opened family hands back the last DECIDED verdict map so the
+        # client can seed the new draft (history itself is never edited).
+        "dismissed": bool(fam_verdict.get("death_row_dismissed")),
+        "reopened": bool(fam_verdict.get("reopened")),
+        "prior_verdicts": _prior_decided(fid) if fam_verdict.get("reopened") else {},
         "members": [{k: v for k, v in m.items() if k != "_p"} for m in members],
         "edges": fam.get("edges", []),
         "related": [
@@ -931,6 +1007,35 @@ def family_detail(fid: str):
         "verdicts": {m["path"]: fam_verdict.get("members", {}).get(m["path"])
                      for m in members},
     }
+
+
+def _prior_decided(fid: str) -> dict:
+    """members map of the newest ledger entry that actually decided
+    something (kept/rejected) — what a re-opened family was committed as."""
+    for e in reversed(_history().get(fid, [])):
+        m = e.get("members") or {}
+        if any(v in ("kept", "rejected") for v in m.values()):
+            return m
+    return {}
+
+
+@router.post("/families/{fid}/reopen")
+def reopen_family(fid: str):
+    """Re-open a committed family for review: appends ONE new draft entry
+    (empty verdict map, reopened flag). Ledger stays append-only — the old
+    verdict entries are untouched and still readable; latest-wins puts the
+    family back in the unresolved queue."""
+    _load_family(fid)  # 400/404
+    if _family_state(fid) != "resolved":
+        raise HTTPException(409, "family is not committed")
+    entry = {
+        "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "family": fid, "members": {}, "reopened": True,
+    }
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    with LEDGER.open("a") as fh:            # append-only by design
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return {"ok": True, "state": _family_state(fid)}
 
 
 STRICT_TIERS = {"exact", "pixel-identical", "near-identical"}

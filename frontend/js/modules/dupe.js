@@ -313,11 +313,13 @@ registerModule({
     <div class="dupe-wrap">
       <div class="dupe-top">
         <span class="pill" data-f="unresolved">Unresolved</span>
-        <span class="pill" data-f="resolved">Resolved</span>
+        <span class="pill" data-f="resolved" title="committed families — browse read-only, or re-open for review">Committed</span>
         <span class="pill" data-f="all">All</span>
         <span class="pill" data-f="straggler" title="import batch — files the original scan never indexed, found by the straggler scan">Stragglers</span>
         <label class="arch-toggle" id="dupe-arch-label" style="font-size:11px;color:#8a8aaa;display:flex;align-items:center;gap:4px;cursor:pointer">
           <input type="checkbox" id="dupe-archived"> archived</label>
+        <button class="ee-btn" id="dupe-dismiss-zero" style="display:none;min-height:36px"
+          title="retire every death-row row with no files left — bookkeeping only, nothing is deleted">Dismiss all with no files</button>
         <span class="status" id="dupe-status"></span>
       </div>
       <div class="dupe-scroll" id="dupe-scroll">
@@ -342,6 +344,7 @@ registerModule({
     const el = {
       pills: [...panel.querySelectorAll('.dupe-top .pill')],
       archived: panel.querySelector('#dupe-archived'),
+      dismissZero: panel.querySelector('#dupe-dismiss-zero'),
       status: panel.querySelector('#dupe-status'),
       list: panel.querySelector('#fam-list'),
       count: panel.querySelector('#dupe-count'),
@@ -530,8 +533,42 @@ registerModule({
         (f.rehydrated ? `<span class="verdict-tag rejected" title="pre-marked draft from the prior verdict — nothing is committed until you commit it again">death row · ${f.rejected} rejected${f.archived ? ' · archived' : ''}</span>` : '') +
         ghostChips;
       card.append(strip, meta);
+      if (f.rehydrated) {
+        const x = document.createElement('button');
+        x.className = 'ee-btn';
+        x.textContent = '✕';
+        x.title = 'dismiss this death-row row (bookkeeping only — nothing is deleted)';
+        x.style.cssText = 'min-height:36px;min-width:36px;margin-left:auto';
+        x.addEventListener('click', e => { e.stopPropagation(); dismissRows([f.id]); });
+        meta.appendChild(x);
+      }
       card.addEventListener('click', () => renderDetail(f.id));
       return card;
+    }
+
+    // Death-row dismissal (Task 4): tombstone only — no unlink, no manifest.
+    async function dismissRows(ids, zeroFile = false) {
+      try {
+        const r = await api('/death-row/dismiss', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ families: ids, zero_file: zeroFile }),
+        });
+        (ids || []).forEach(id => rehydrateQueue.delete(id));
+        if (zeroFile) rehydrateQueue.clear();
+        deathSummary = null;
+        listDirty = true;
+        job(`death row: ${r.dismissed} dismissed`, 'ok');
+        renderList();            // refetch — rows disappear without a reload
+      } catch (e) { job(`dismiss: ${e.message}`, 'err'); }
+    }
+    el.dismissZero.addEventListener('click', () => {
+      if (!window.confirm('Retire every death-row row with no files left on disk? ' +
+        'Nothing is deleted — the rows just stop listing.')) return;
+      dismissRows([], true);
+    });
+    function paintDismissZero() {
+      el.dismissZero.style.display =
+        (el.archived.checked && filter === 'unresolved') ? '' : 'none';
     }
 
     function renderCountLine(shown, data) {
@@ -564,7 +601,7 @@ registerModule({
         }
       }
       el.pills[0].textContent = `Unresolved (${data.counts.unresolved})`;
-      el.pills[1].textContent = `Resolved (${data.counts.resolved})`;
+      el.pills[1].textContent = `Committed (${data.counts.resolved})`;
       el.pills[2].textContent = `All (${data.total})`;
       if (el.pills[3]) el.pills[3].textContent = `Stragglers (${data.total})`;
       renderCountLine(grid.children.length, data);
@@ -603,6 +640,7 @@ registerModule({
       const seq = ++viewSeq;
       trace(`renderList(seq=${seq})`);
       el.pills.forEach(p => p.classList.toggle('active', p.dataset.f === filter));
+      paintDismissZero();
       el.detail.classList.remove('open');
       el.list.classList.remove('open');
       el.bottom.style.display = 'none';
@@ -2097,7 +2135,41 @@ registerModule({
       backBtn.className = 'ee-btn primary';
       backBtn.textContent = '← Back to families';
       backBtn.addEventListener('click', () => renderList());
-      box.append(big, sum, row, backBtn);
+      // Frozen verdict badges (Task 4): read-only thumbs, verdict source =
+      // the latest ledger entry (draft.verdicts was preloaded from it).
+      const frozen = document.createElement('div');
+      frozen.className = 'ss-survey-grid';
+      frozen.style.cssText = 'flex:0 1 auto;max-height:46vh;width:100%';
+      for (const m of current.members) {
+        const v = draft.verdicts[m.path];
+        const cell = document.createElement('div');
+        cell.className = 'ss-cell' + (v ? ` ${DRAFT_CLASSES[v] || ''}` : '');
+        cell.style.cursor = 'default';
+        const img = document.createElement('img');
+        setImg(img, m);
+        const nm = document.createElement('div');
+        nm.className = 'nm';
+        const glyph = v === 'kept' ? '✓ ' : v === 'rejected' ? '✗ '
+          : v === 'melded' ? '⑂ ' : v === 'deferred' ? '… ' : '';
+        nm.textContent = glyph + m.name;
+        cell.append(img, nm);
+        frozen.appendChild(cell);
+      }
+      const reopen = document.createElement('button');
+      reopen.className = 'ee-btn';
+      reopen.id = 'ss-reopen';
+      reopen.style.minHeight = '44px';
+      reopen.textContent = '↺ Re-open for review';
+      reopen.title = 'appends a new draft entry — old verdict history is never rewritten';
+      reopen.addEventListener('click', async () => {
+        try {
+          await api(`/families/${current.id}/reopen`, { method: 'POST' });
+          listDirty = true;
+          window.dispatchEvent(new CustomEvent('ellieedit:pending-changed'));
+          renderDetail(current.id);
+        } catch (e) { job(`re-open: ${e.message}`, 'err'); }
+      });
+      box.append(big, sum, row, frozen, reopen, backBtn);
       // Meld result in place of the melded group (Save back flow): the
       // blend itself + which components collapsed into it.
       if (current.meld) {
@@ -2148,6 +2220,15 @@ registerModule({
         }
         el.note.value = f.note || '';
         championIdx = 0;
+        if (f.reopened && f.prior_verdicts) {
+          // Re-opened for review (Task 4): the last committed verdicts seed a
+          // fresh UNCOMMITTED draft; nothing is written until Commit.
+          for (const [p, v] of Object.entries(f.prior_verdicts)) {
+            if (v && !draft.verdicts[p]) draft.verdicts[p] = v;
+            if (v === 'kept' && !draft.picks.includes(p)) draft.picks.push(p);
+          }
+          job('re-opened — prior verdicts loaded as a draft · flip or commit');
+        }
         if (f.state === 'resolved' && !f.rehydrated) {
           committed = true;
           const vs = draft.verdicts;
