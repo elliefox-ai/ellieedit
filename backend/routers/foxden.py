@@ -215,6 +215,14 @@ def apply_edits(wf: dict, prompt: str, seed: int, width=None, height=None,
                               "strength_model": float(lo.strength_model)}}
         prev = [nid, 0]
     wf[s["guider"]]["inputs"]["model"] = prev
+    # Baselines exported from the UI carry PreviewImage (temp outputs), which
+    # ComfyUI purges and our status filter rightly ignores. Inject a real
+    # SaveImage so renders persist as type=output (2026-10-14 inaugural).
+    if not any(n["class_type"] == "SaveImage" for n in wf.values()):
+        vae = _only(wf, "VAEDecode")
+        wf[str(nxt)] = {"class_type": "SaveImage",
+                        "inputs": {"images": [vae, 0],
+                                   "filename_prefix": "foxden"}}
     validate_graph(wf)
     return wf
 

@@ -106,7 +106,8 @@ def test_size_requires_both_and_snaps():
 @pytest.mark.parametrize("g", graphs())
 def test_single_lora_splice(g):
     wf = foxden.apply_edits(g, "x", 1, loras=[L("a.safetensors", 0.7)])
-    new = [k for k in wf if k not in g]
+    new = [k for k, v in wf.items() if k not in g
+           and v["class_type"] == "LoraLoaderModelOnly"]
     assert len(new) == 1
     n = wf[new[0]]
     assert n["class_type"] == "LoraLoaderModelOnly"
@@ -119,7 +120,8 @@ def test_single_lora_splice(g):
 @pytest.mark.parametrize("g", graphs())
 def test_chained_multi_lora_edges(g):
     wf = foxden.apply_edits(g, "x", 1, loras=[L("a"), L("b"), L("c")])
-    new = sorted((k for k in wf if k not in g), key=int)
+    new = sorted((k for k, v in wf.items() if k not in g
+                  and v["class_type"] == "LoraLoaderModelOnly"), key=int)
     assert len(new) == 3
     assert wf[new[0]]["inputs"]["model"] == ["743", 0]
     assert wf[new[1]]["inputs"]["model"] == [new[0], 0]
@@ -318,3 +320,19 @@ def test_view_proxy_and_jail(client, monkeypatch):
     for bad in ({"filename": "../x.png"}, {"filename": "x.png", "subfolder": "../.."},
                 {"filename": "x.png", "type": "weird"}, {"filename": "a/b.png"}):
         assert client.get("/api/foxden/view", params=bad).status_code == 400
+
+
+def test_injects_saveimage_for_preview_only_graphs():
+    """UI-exported baselines carry PreviewImage (temp outputs) — FoxDen must
+    inject a real SaveImage so renders persist as type=output (2026-10-14)."""
+    import copy
+    g = copy.deepcopy(KLEIN)
+    for k in [k for k, v in g.items() if v["class_type"] == "SaveImage"]:
+        del g[k]
+    g["738"] = {"class_type": "PreviewImage", "inputs": {"images": ["734", 0]}}
+    wf = foxden.apply_edits(g, "x", 1)
+    saves = [k for k, v in wf.items() if v["class_type"] == "SaveImage"]
+    assert len(saves) == 1
+    assert wf[saves[0]]["inputs"]["images"] == ["734", 0]
+    assert wf[saves[0]]["inputs"]["filename_prefix"] == "foxden"
+    foxden.validate_graph(wf)
