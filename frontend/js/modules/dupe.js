@@ -406,6 +406,7 @@ registerModule({
     // UNCOMMITTED this session — the mass "send all" action covers exactly
     // these; any family he re-commits via Enter drops out automatically.
     const rehydrateQueue = new Set();
+    let lastDeathRow = 0;   // rehydrated drafts seen on the last unresolved listing
     // LIST CACHE (2026-10-08n): rendered listing payloads held in memory,
     // keyed by the index:ledger mtime key the server exposes on /status and
     // /families. Returning from a family (or re-activating the tab) with an
@@ -575,9 +576,13 @@ registerModule({
       // "showing 40 of 627 families" (2026-10-08n pagination UI)
       const target = (filter === 'all' || filter === 'straggler') ? data.total
         : (data.counts ? data.counts[filter] : null);
-      el.count.textContent = (target != null && target !== shown)
-        ? `showing ${shown} of ${target} families`
-        : (shown ? `showing ${shown} families` : '');
+      const dr = (filter === 'unresolved' && data.rehydrated) ? data.rehydrated : 0;
+      const real = shown - dr;           // list rows minus death-row drafts
+      el.count.textContent = dr
+        ? `${real} unresolved + ${dr} death-row drafts`
+        : (target != null && target !== shown)
+          ? `showing ${shown} of ${target} families`
+          : (shown ? `showing ${shown} families` : '');
     }
 
     function renderCards(items, data, append) {
@@ -590,6 +595,18 @@ registerModule({
       }
       for (const f of items) {
         try {
+          // Rehydrated death-row drafts are NOT part of the unresolved count:
+          // give them a labeled section so the queue never inflates silently
+          // (shadow-queue fix, 2026-10-13).
+          if (f.rehydrated && !grid.querySelector('.dr-section')) {
+            const hd = document.createElement('div');
+            hd.className = 'dr-section';
+            hd.style.cssText = 'grid-column:1/-1;padding:8px 4px;font-size:12px;' +
+              'color:#e8c37a;border-top:1px solid #7a5f1e';
+            hd.textContent = `Death row — ${data.rehydrated || ''} pre-marked drafts ` +
+              '(separate from the Unresolved count · nothing commits until you commit it)';
+            grid.appendChild(hd);
+          }
           grid.appendChild(cardFor(f));
         } catch (cardErr) {
           const ec = document.createElement('div');
@@ -600,7 +617,9 @@ registerModule({
           console.error('dupe card render failed', f.id, cardErr);
         }
       }
-      el.pills[0].textContent = `Unresolved (${data.counts.unresolved})`;
+      if (filter === 'unresolved') lastDeathRow = data.rehydrated || 0;
+      el.pills[0].textContent = `Unresolved (${data.counts.unresolved})` +
+        (lastDeathRow ? ` +${lastDeathRow} death row` : '');
       el.pills[1].textContent = `Committed (${data.counts.resolved})`;
       el.pills[2].textContent = `All (${data.total})`;
       if (el.pills[3]) el.pills[3].textContent = `Stragglers (${data.total})`;

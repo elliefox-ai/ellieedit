@@ -1377,3 +1377,22 @@ def test_committed_detail_carries_frozen_verdicts(env, client):
     det = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
     assert det["state"] == "resolved"
     assert {p: v for p, v in det["verdicts"].items() if v} == members
+
+
+def test_rehydrated_rows_reported_separately_from_unresolved_count(env, client):
+    """Shadow-queue contract (2026-10-13): counts.unresolved never includes
+    death-row drafts, and the response says exactly how many extra
+    rehydrated rows ride the list so the client can label them."""
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    d = client.get("/api/dupe/families?state=unresolved").json()
+    reh = [i for i in d["items"] if i.get("rehydrated")]
+    real = [i for i in d["items"] if not i.get("rehydrated")]
+    assert d["rehydrated"] == len(reh) == 1
+    assert len(real) == d["counts"]["unresolved"] == 2
+    assert len(d["items"]) == d["counts"]["unresolved"] + d["rehydrated"]
+    # dismissed -> the shadow row is gone; list and count agree exactly
+    client.post("/api/dupe/death-row/dismiss",
+                json={"families": ["fam-aaaaaaaaaaaa"]})
+    d2 = client.get("/api/dupe/families?state=unresolved").json()
+    assert d2["rehydrated"] == 0
+    assert len(d2["items"]) == d2["counts"]["unresolved"]

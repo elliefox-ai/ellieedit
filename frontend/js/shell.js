@@ -5,7 +5,7 @@
 
 // Bump on every deploy — shown in the job bar so a stale-cache client is
 // instantly visible.
-const BUILD = '2026-10-13a';
+const BUILD = '2026-10-14a';
 
 const registry = [];
 const mounted = new Map(); // name -> { panelEl }
@@ -76,6 +76,7 @@ Promise.all([
   import(`./modules/facecycle.js?v=${BUILD}`),
   import(`./modules/review.js?v=${BUILD}`),
   import(`./modules/dupe.js?v=${BUILD}`),
+  import(`./modules/foxden.js?v=${BUILD}`),
   import(`./modules/library.js?v=${BUILD}`),
   import(`./modules/update.js?v=${BUILD}`),
 ]).then(() => {
