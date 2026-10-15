@@ -9,9 +9,10 @@ import hashlib
 import io
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response as FResponse
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 
@@ -36,6 +37,24 @@ PAGE_SIZE = 100
 EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 router = APIRouter(prefix="/api/gallery", tags=["gallery"])
+
+# ---- listing caches (2026-10-15) -------------------------------------------
+# /mnt/e is slow per syscall, and every page request used to re-list the whole
+# folder, stat every image, and open 100 files for dimensions. Two in-memory
+# caches make paging cheap; both are pure accelerators (a miss just does the
+# old work) and are safe to lose on restart.
+#   _DIR_INDEX: folder -> {filename: mtime}. Each request does ONE readdir and
+#     stats only names it hasn't seen; vanished names drop out, new files
+#     appear. The newest RECENT_RESTAT files are re-stat'ed on a fresh listing
+#     (no cursor) so an in-place overwrite of recent work re-sorts. Older
+#     in-place rewrites are picked up by ?refresh=true (or a restart).
+#   _DIMS: (path, mtime) -> (w, h).
+_DIR_INDEX: dict[str, dict[str, int]] = {}
+DIR_INDEX_MAX = 64
+RECENT_RESTAT = 200
+_DIMS: dict[tuple[str, int], tuple[int, int]] = {}
+DIMS_MAX = 100_000
+_dims_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="gal-dims")
 
 
 def jailed(rel: str) -> Path:
@@ -85,14 +104,119 @@ def get_thumbnail(src: Path) -> Path:
     return tp
 
 
+def _entry_mtime(entry) -> int:
+    return int(entry.stat().st_mtime)
+
+
+def _path_mtime(path: str) -> int:
+    return int(os.stat(path).st_mtime)
+
+
+def _scan_dir(base: Path, root_real: Path, fresh: bool, refresh: bool):
+    """One readdir + stats for unseen names only.
+    -> (files [(mtime, name)] newest-first, subdirs [name], cold: bool)"""
+    key = str(base)
+    prev = {} if refresh else _DIR_INDEX.get(key, {})
+    cur: dict[str, int] = {}
+    subdirs: list[str] = []
+    cold = False
+    with os.scandir(base) as it:
+        for entry in it:
+            name = entry.name
+            if name.startswith(".") or entry.is_symlink():
+                continue
+            if entry.is_dir():
+                if name in TEMP_DIRS and base == root_real:
+                    continue  # intermediates, not gallery content
+                subdirs.append(name)
+            elif os.path.splitext(name)[1].lower() in EXTS:
+                m = prev.get(name)
+                if m is None:
+                    try:
+                        m = _entry_mtime(entry)
+                    except OSError:
+                        continue
+                    cold = True
+                cur[name] = m
+    if fresh and prev and not refresh:
+        # Fresh listing: re-check the newest files so an in-place overwrite of
+        # recent work re-sorts. Paging requests (cursor) skip this.
+        newest = sorted(cur, key=lambda n: (cur[n], n), reverse=True)[:RECENT_RESTAT]
+        for n in newest:
+            try:
+                cur[n] = _path_mtime(os.path.join(key, n))
+            except OSError:
+                cur.pop(n, None)
+    if len(_DIR_INDEX) >= DIR_INDEX_MAX and key not in _DIR_INDEX:
+        _DIR_INDEX.pop(next(iter(_DIR_INDEX)))
+    _DIR_INDEX[key] = cur
+    subdirs.sort()
+    files = sorted(((m, n) for n, m in cur.items()), reverse=True)  # newest first
+    return files, subdirs, cold
+
+
+def _cursor_start(keys: list, cursor: str) -> int:
+    """Index of the first key strictly AFTER the cursor in a newest-first list
+    of (mtime, name, ...). Tolerant: the cursor item itself may be gone (it was
+    marked pending, deleted, or returned since the last page) — we still resume
+    at the right spot instead of failing with 400."""
+    try:
+        cm, cn = cursor.split(":", 1)
+        target = (int(cm), cn)
+    except ValueError:
+        raise HTTPException(400, "bad cursor")
+    lo, hi = 0, len(keys)
+    while lo < hi:                       # newest-first: predicate is monotone
+        mid = (lo + hi) // 2
+        if tuple(keys[mid][:2]) < target:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
+def _read_dims(path: str):
+    try:
+        with Image.open(path) as im:
+            return im.size  # cheap header read
+    except Exception:
+        return None
+
+
+def _dims_many(files: list[tuple[str, int]]) -> list:
+    """[(abs_path, mtime)] -> [(w,h) | None], cached; misses read in parallel
+    (the header reads are IO-bound on /mnt)."""
+    out = [None] * len(files)
+    todo = []
+    for i, key in enumerate(files):
+        hit = _DIMS.get(key)
+        if hit:
+            out[i] = hit
+        else:
+            todo.append(i)
+    if todo:
+        res = list(_dims_pool.map(_read_dims, [files[i][0] for i in todo]))
+        for i, r in zip(todo, res):
+            out[i] = r
+            if r:
+                if len(_DIMS) >= DIMS_MAX:
+                    _DIMS.clear()
+                _DIMS[files[i]] = r
+    return out
+
+
 @router.get("/list")
-def list_images(dir: str = "", cursor: str = "", pending: str = "all"):
+def list_images(response: FResponse, dir: str = "", cursor: str = "",
+                pending: str = "all", refresh: bool = False):
     """pending filter (default 'all' = everything, backward compatible):
       active  — exclude every path in the pending-delete manifest
       pending — only manifest paths
     Every item is tagged `pending: bool` so an 'All' client view can badge
     manifest images without a second fetch. Filtering happens BEFORE cursor
-    resolution, so pagination is correct within each filtered view."""
+    resolution, so pagination is correct within each filtered view.
+    `refresh=true` drops this folder's cached index (re-stats everything).
+    Server-Timing reports where the time went (walk / dims / total)."""
+    t0 = time.perf_counter()
     if pending not in ("all", "active", "pending"):
         raise HTTPException(400, "pending must be all|active|pending")
     from .pending import load_manifest  # lazy: pending.py imports this module
@@ -111,62 +235,46 @@ def list_images(dir: str = "", cursor: str = "", pending: str = "all"):
         # Pending is a GLOBAL inbox: it must not depend on the folder walk at
         # all (the walk is per-folder and non-recursive, so manifest images in
         # other folders would be invisible). List manifest paths directly.
-        return _pending_listing(pending_set, cursor, root_real)
+        out = _pending_listing(pending_set, cursor, root_real)
+        response.headers["Server-Timing"] = \
+            f"total;dur={(time.perf_counter() - t0) * 1000:.1f}"
+        return out
 
-    files = []
-    subdirs = []
-    for entry in sorted(base.iterdir()):
-        if entry.name.startswith(".") or entry.is_symlink():
-            continue
-        if entry.is_dir() and entry.name in TEMP_DIRS and base == root_real:
-            continue  # intermediates, not gallery content
-        if entry.is_dir():
-            subdirs.append(entry.name)
-        elif entry.suffix.lower() in EXTS:
-            try:
-                st = entry.stat()
-                files.append((int(st.st_mtime), entry))
-            except OSError:
-                continue
-    files.sort(reverse=True)  # newest first
+    files, subdirs, cold = _scan_dir(base, root_real, fresh=not cursor,
+                                     refresh=refresh)
+    t_walk = time.perf_counter()
+
+    def rel_of(name: str) -> str:
+        return (base / name).relative_to(root_real).as_posix()
 
     # Pending filter applies before cursoring so cursors stay per-view correct.
     if pending != "all":
-        files = [(m, e) for (m, e) in files
-                 if (e.relative_to(root_real).as_posix() in pending_set)
-                 == (pending == "pending")]
+        files = [(m, n) for (m, n) in files
+                 if (rel_of(n) in pending_set) == (pending == "pending")]
 
-    start = 0
-    if cursor:
-        # Opaque cursor: "mtime:name" of the last item on the previous page.
-        try:
-            cm, cn = cursor.split(":", 1)
-            cm = int(cm)
-            start = next((i + 1 for i, (m, e) in enumerate(files)
-                          if m == cm and e.name == cn), None)
-            if start is None:
-                raise ValueError
-        except ValueError:
-            raise HTTPException(400, "bad cursor")
-
+    start = _cursor_start(files, cursor) if cursor else 0
     page = files[start:start + PAGE_SIZE]
+    dims = _dims_many([(str(base / n), m) for m, n in page])
+    t_dims = time.perf_counter()
     items = []
-    for mtime, f in page:
-        try:
-            with Image.open(f) as im:
-                w, h = im.size  # cheap header read
-        except Exception:
+    for (mtime, name), wh in zip(page, dims):
+        if not wh:
             continue
-        rel = f.relative_to(root_real).as_posix()
+        w, h = wh
+        rel = rel_of(name)
         items.append({
-            "name": f.name,
+            "name": name,
             "path": rel,
             "mtime": int(mtime),
             "width": w, "height": h,
             "thumb": True,  # generated lazily by /thumb
             "pending": rel in pending_set,
         })
-    next_cursor = f"{page[-1][0]}:{page[-1][1].name}" if page and start + PAGE_SIZE < len(files) else None
+    next_cursor = f"{page[-1][0]}:{page[-1][1]}" if page and start + PAGE_SIZE < len(files) else None
+    response.headers["Server-Timing"] = (
+        f'walk;dur={(t_walk - t0) * 1000:.1f};desc="{"cold" if cold else "warm"}", '
+        f"dims;dur={(t_dims - t_walk) * 1000:.1f}, "
+        f"total;dur={(time.perf_counter() - t0) * 1000:.1f}")
     return {"items": items, "subdirs": subdirs, "next_cursor": next_cursor,
             "root": str(root_real)}
 
@@ -182,34 +290,23 @@ def _pending_listing(pending_set: set, cursor: str, root_real: Path) -> dict:
             st = f.stat()
             if f.suffix.lower() not in EXTS:
                 continue
-            files.append((int(st.st_mtime), f, rel))
+            files.append((int(st.st_mtime), f.name, rel, f))
         except (HTTPException, OSError):
             continue  # vanished or jailed under both roots: skip in the grid
     files.sort(reverse=True)
-    start = 0
-    if cursor:
-        try:
-            cm, cn = cursor.split(":", 1)
-            cm = int(cm)
-            start = next((i + 1 for i, (m, e, _r) in enumerate(files)
-                          if m == cm and e.name == cn), None)
-            if start is None:
-                raise ValueError
-        except ValueError:
-            raise HTTPException(400, "bad cursor")
+    start = _cursor_start(files, cursor) if cursor else 0
     page = files[start:start + PAGE_SIZE]
+    dims = _dims_many([(str(f), m) for m, _n, _r, f in page])
     items = []
-    for mtime, f, rel in page:
-        try:
-            with Image.open(f) as im:
-                w, h = im.size
-        except Exception:
+    for (mtime, name, rel, _f), wh in zip(page, dims):
+        if not wh:
             continue
+        w, h = wh
         # path stays the manifest key (gallery- or dupe-relative); the media
         # endpoints resolve through the same flexible jail.
-        items.append({"name": f.name, "path": rel, "mtime": int(mtime),
+        items.append({"name": name, "path": rel, "mtime": int(mtime),
                       "width": w, "height": h, "thumb": True, "pending": True})
-    next_cursor = f"{page[-1][0]}:{page[-1][1].name}" if page and start + PAGE_SIZE < len(files) else None
+    next_cursor = f"{page[-1][0]}:{page[-1][1]}" if page and start + PAGE_SIZE < len(files) else None
     return {"items": items, "subdirs": [], "next_cursor": next_cursor,
             "root": str(root_real)}
 
