@@ -13,6 +13,7 @@ import { registerModule } from '../shell.js';
 import { planFaceCycleHandoff } from '../handoff.js';
 import { planMarkBatch } from './marking-batch.js';
 import { crumbsFor, joinDir, isBrowsableDir } from './gallery-path.js';
+import { diffManifest, planManifestChange, pickSurvivor, scrollDeltaFor } from './gallery-scroll.js';
 
 function panelHTML() {
   return `
@@ -244,6 +245,10 @@ export class Gallery {
     this.pdBytes = 0;
     this.championPath = null;      // last ladder champion, for Gallery highlight
     this.loading = false;
+    this.gen = 0;                 // bumps on reload: in-flight loadMore results from an older view are dropped
+    this.anchor = null;           // {path, off, top}: where the user is, tracked while the tab is visible
+    this.anchorRaf = 0;
+    this.championPending = false; // flash/scroll to the champion once per Ladder round
     this.selectMode = false;
     this.deleteMode = false;
     this.selected = new Map();  // path -> item (ladder/blend selection)
@@ -258,7 +263,9 @@ export class Gallery {
       }
     }, { rootMargin: '300px' });
     this.el.grid.addEventListener('scroll', () => {
-      if (this.el.grid.scrollTop + this.el.grid.clientHeight >= this.el.grid.scrollHeight - 200) this.loadMore();
+      // Prefetch ~1.5 screens ahead so the next page is usually in before you get there.
+      if (this.el.grid.scrollTop + this.el.grid.clientHeight >= this.el.grid.scrollHeight - 1500) this.loadMore();
+      this.noteScroll();
     });
     this.bindChrome();
     this.bindViewer();
@@ -317,11 +324,15 @@ export class Gallery {
   bindCrossModule() {
     window.addEventListener('ellieedit:tab-activated', e => {
       if (e.detail?.name !== 'gallery') return;
-      this.syncManifest().then(() => this.flashChampion());
+      // Inactive tabs are display:none, which resets the grid's scroll to 0.
+      // Put the user back on the image they were looking at BEFORE anything async.
+      this.restoreAnchor(this.anchor);
+      this.syncManifest().then(() => { this.flashChampion(); this.maybeFill(); });
     });
     window.addEventListener('ellieedit:pending-changed', () => this.syncManifest());
     window.addEventListener('ellieedit:ladder-complete', e => {
       this.championPath = e.detail?.champion?.path || null;
+      this.championPending = !!this.championPath;
       this.applyChampion();
     });
   }
@@ -333,19 +344,112 @@ export class Gallery {
       // Deletion view actually opens (ensurePdBytes).
       const j = await fetch('/api/pending/count').then(r => r.json());
       const fresh = new Set(j.paths || []);
-      const changed = fresh.size !== this.pendingSet.size ||
-        [...fresh].some(p => !this.pendingSet.has(p));
+      const diff = diffManifest(this.pendingSet, fresh);
       this.pendingSet = fresh;
       this.pdBytes = null;      // unknown until the Deletion view opens
       this.el.pendingCount.textContent = j.count;
-      if (changed) {
-        if (this.viewFilter === 'all') this.applyBadges();
-        else this.reload();  // active/pending views are server-filtered: refetch
-      } else {
-        this.applyBadges();
-      }
+      // 2026-10-15: no more wipe-and-refetch on every manifest change. Images
+      // that just went pending leave the grid in place (scroll anchored);
+      // only an image that came BACK needs a refetch, and that one keeps the
+      // user's place too.
+      const plan = planManifestChange(this.viewFilter, diff);
+      if (plan.removeLocal.size) this.removeCells(plan.removeLocal);
+      if (plan.reload) await this.reload({ keepPosition: true });
+      else this.applyBadges();
       this.updatePendingBar();
     } catch { /* backend unavailable: leave as-is */ }
+  }
+
+  // ---- place-keeping ------------------------------------------------------
+  isVisible() {
+    return this.panel.classList.contains('active') && this.el.grid.clientHeight > 0;
+  }
+
+  // Remember the image at the top of the viewport (by path, so it survives
+  // removals and column-count changes) plus the raw offset as a fallback.
+  captureAnchor() {
+    const g = this.el.grid, gr = g.getBoundingClientRect();
+    for (const dy of [12, 48, 96]) {
+      for (const fx of [0.5, 0.2, 0.8]) {
+        const hit = document.elementFromPoint(gr.left + gr.width * fx, gr.top + dy);
+        const cell = hit && hit.closest ? hit.closest('.gal-cell') : null;
+        if (cell && cell.dataset.path && g.contains(cell)) {
+          return { path: cell.dataset.path, off: cell.getBoundingClientRect().top - gr.top, top: g.scrollTop };
+        }
+      }
+    }
+    return { path: null, off: 0, top: g.scrollTop };
+  }
+
+  noteScroll() {
+    if (this.anchorRaf || !this.isVisible()) return;
+    this.anchorRaf = requestAnimationFrame(() => {
+      this.anchorRaf = 0;
+      if (this.isVisible()) this.anchor = this.captureAnchor();
+    });
+  }
+
+  currentAnchor() { return this.isVisible() ? this.captureAnchor() : this.anchor; }
+
+  restoreAnchor(a) {
+    if (!a || !this.isVisible()) return;   // hidden: keep the stored anchor for activation
+    const g = this.el.grid;
+    const cell = a.path ? [...g.children].find(c => c.dataset.path === a.path) : null;
+    if (cell) {
+      g.scrollTop += scrollDeltaFor(cell.getBoundingClientRect().top, g.getBoundingClientRect().top, a.off);
+    } else {
+      g.scrollTop = a.top;
+    }
+  }
+
+  // Remove cells for `set` (paths) without touching anything else, and keep
+  // the user's place. Server cursors tolerate the removed items, so paging
+  // simply continues from the last loaded image.
+  removeCells(set) {
+    if (!set.size) return;
+    const g = this.el.grid;
+    const visible = this.isVisible();
+    let anchor = this.currentAnchor();
+    if (anchor && anchor.path && set.has(anchor.path)) {
+      const alt = pickSurvivor([...g.children].map(c => c.dataset.path || null), anchor.path, set);
+      anchor = { path: alt, off: alt ? anchor.off : 0, top: anchor.top };
+    }
+    const viewing = this.el.viewer.style.display === 'flex' ? this.items[this.viewIdx] : null;
+    for (const cell of [...g.children]) {
+      if (cell.dataset.path && set.has(cell.dataset.path)) cell.remove();
+    }
+    this.items = this.items.filter(i => !set.has(i.path));
+    for (const p of set) this.selected.delete(p);
+    if (viewing) {
+      if (!set.has(viewing.path)) this.viewIdx = this.items.indexOf(viewing);
+      else if (!this.items.length) this.closeViewer();
+      else this.openViewer(Math.min(this.viewIdx, this.items.length - 1));
+    }
+    if (anchor) { if (visible) this.restoreAnchor(anchor); else this.anchor = anchor; }
+    this.updateStatus();
+    this.applyBadges();
+    this.updateActionBars();
+    this.updateMarkCount();
+    this.maybeFill();
+  }
+
+  // After removals the grid may no longer reach the prefetch threshold (and
+  // then no scroll event would ever fire): top it up.
+  async maybeFill() {
+    const g = this.el.grid;
+    while (this.cursor && !this.loading && this.isVisible() &&
+           g.scrollHeight - g.scrollTop - g.clientHeight < 1500) {
+      const before = this.items.length;
+      await this.loadMore();
+      if (this.items.length === before) break;
+    }
+  }
+
+  updateStatus() {
+    this.el.status.textContent =
+      `${this.items.length} images${this.cursor ? ' +' : ''}` +
+      (this.viewFilter === 'all' && this.pendingSet.size
+        ? ` · ${this.pendingSet.size} pending` : '');
   }
 
   applyBadges() {
@@ -672,10 +776,16 @@ export class Gallery {
   }
 
   flashChampion() {
-    if (!this.championPath) return;
+    // Once per Ladder round — otherwise every tab switch would yank the grid
+    // back to the champion and fight place-keeping.
+    if (!this.championPath || !this.championPending) return;
+    this.championPending = false;
     const cell = [...this.el.grid.children].find(c => c.dataset.path === this.championPath);
     if (!cell) return;
-    cell.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const gr = this.el.grid.getBoundingClientRect(), cr = cell.getBoundingClientRect();
+    if (cr.bottom < gr.top || cr.top > gr.bottom) {      // only travel if it's off-screen
+      cell.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
     cell.classList.remove('flash');
     requestAnimationFrame(() => cell.classList.add('flash'));
   }
@@ -705,11 +815,27 @@ export class Gallery {
     this.reload();
   }
 
-  async reload() {
+  // keepPosition: refetch as many pages as were loaded and put the user back
+  // on the image they were looking at (used for manifest changes). A plain
+  // reload() is a deliberate "new view" (folder / filter change): top of list.
+  async reload(opts = {}) {
+    const keep = opts.keepPosition
+      ? { n: this.items.length, a: this.currentAnchor() } : null;
+    this.gen++;                  // drop any in-flight page from the old view
+    this.loading = false;
+    if (!keep) this.anchor = null;
     this.el.grid.innerHTML = '';
     this.items = []; this.cursor = null;
     this.selected.clear();
     await this.loadMore();
+    if (keep) {
+      while (this.cursor && this.items.length < keep.n) {
+        const before = this.items.length;
+        await this.loadMore();
+        if (this.items.length === before) break;
+      }
+      this.restoreAnchor(keep.a);
+    }
     this.updateActionBars();
     this.updateMarkCount();
   }
@@ -717,6 +843,7 @@ export class Gallery {
   async loadMore() {
     if (this.loading || (this.cursor === null && this.items.length)) return;
     this.loading = true;
+    const gen = this.gen;
     try {
       // Pending is a GLOBAL inbox: always list the whole manifest regardless of
       // the folder dropdown, so status count and grid count agree by
@@ -727,6 +854,7 @@ export class Gallery {
       const r = await fetch('/api/gallery/list?' + p);
       if (!r.ok) throw new Error(r.status);
       const data = await r.json();
+      if (gen !== this.gen) return;   // view was reloaded while this page was in flight
       const start = this.items.length;
       this.items.push(...data.items);
       this.cursor = data.next_cursor;
@@ -740,13 +868,11 @@ export class Gallery {
           this.addFolderCell(d);
         }
       }
-      this.el.status.textContent =
-        `${this.items.length} images${data.next_cursor ? ' +' : ''}` +
-        (this.viewFilter === 'all' && this.pendingSet.size
-          ? ` · ${this.pendingSet.size} pending` : '');
+      this.updateStatus();
       this.applyBadges();
       this.applyChampion();
     } catch (err) {
+      if (gen !== this.gen) return;
       this.el.status.textContent = 'Load failed: ' + err.message;
     }
     this.loading = false;
@@ -825,7 +951,9 @@ export class Gallery {
         this.updateActionBars();
         return;
       }
-      this.openViewer(idx);
+      // Index at click time: removals shift positions, a captured idx would go stale.
+      const at = this.items.indexOf(item);
+      if (at >= 0) this.openViewer(at);
     });
     this.el.grid.appendChild(cell);
     this.io.observe(cell);
