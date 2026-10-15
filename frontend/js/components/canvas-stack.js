@@ -116,15 +116,7 @@ export class CanvasStack {
     const rect = this.canvas.getBoundingClientRect();
     const sx = this.canvas.width / rect.width;
     const sy = this.canvas.height / rect.height;
-    const wx = (e.clientX - rect.left) * sx, wy = (e.clientY - rect.top) * sy;
-    // TEMP DIAGNOSTIC 2026-10-15: capture rect + computed world for first 40 mouse moves.
-    if (typeof window !== 'undefined' && e.pointerType === 'mouse') {
-      window.__prect = window.__prect || [];
-      if (window.__prect.length < 40) {
-        window.__prect.push({ cx: +e.clientX.toFixed(1), cy: +e.clientY.toFixed(1), rl: +rect.left.toFixed(1), rt: +rect.top.toFixed(1), rw: +rect.width.toFixed(1), rh: +rect.height.toFixed(1), cw: this.canvas.width, ch: this.canvas.height, wx: +wx.toFixed(1), wy: +wy.toFixed(1) });
-      }
-    }
-    return { x: wx, y: wy };
+    return { x: (e.clientX - rect.left) * sx, y: (e.clientY - rect.top) * sy };
   }
 
   // ── Full stack render ──
@@ -154,14 +146,6 @@ export class CanvasStack {
     });
 
     cv.addEventListener('pointermove', e => {
-      // TEMP DIAGNOSTIC 2026-10-15: first-drag-after-load yanks to 0,0 (mouse only).
-      // Records the first raw moves so we can see any phantom (0,0) sample.
-      if (typeof window !== 'undefined') {
-        window.__ptrace = window.__ptrace || [];
-        if (window.__ptrace.length < 40) {
-          window.__ptrace.push({ t: e.type, x: e.clientX, y: e.clientY, p: e.pointerType, prim: e.isPrimary, btn: e.buttons });
-        }
-      }
       pendingMove = e;
       if (moveRaf) return;
       moveRaf = true;
@@ -171,9 +155,15 @@ export class CanvasStack {
         pendingMove = null;
         if (!ev || !ev.isPrimary) return;
         if (this.opts.onPointerMove) {
-          // Coalesced pen samples: strokes get every sample, not just frame-rate samples.
-          const evts = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [ev];
-          const pts = evts.map(ce => this.eventToWorld(ce));
+          // Coalesced samples give strokes every sub-frame sample — but Chromium
+          // sometimes returns coalesced events with clientX/clientY = 0 (observed
+          // 2026-10-15: drags yanked to the canvas origin on desktop mouse).
+          // Drop zero-coordinate samples and always append the real event last,
+          // so the drag's final position is the browser's actual pointer spot.
+          const ce = ev.getCoalescedEvents ? ev.getCoalescedEvents() : [];
+          const evts = ce.filter(s => s.clientX !== 0 || s.clientY !== 0);
+          evts.push(ev);
+          const pts = evts.map(sample => this.eventToWorld(sample));
           this.opts.onPointerMove(ev, pts);
         }
       });
