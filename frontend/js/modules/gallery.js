@@ -261,7 +261,7 @@ export class Gallery {
         if (img && img.dataset.src) { img.src = img.dataset.src; delete img.dataset.src; }
         this.io.unobserve(e.target);
       }
-    }, { rootMargin: '300px' });
+    }, { rootMargin: '900px' });   // thumbs are warmed server-side: ask a few rows early
     this.el.grid.addEventListener('scroll', () => {
       // Prefetch ~1.5 screens ahead so the next page is usually in before you get there.
       if (this.el.grid.scrollTop + this.el.grid.clientHeight >= this.el.grid.scrollHeight - 1500) this.loadMore();

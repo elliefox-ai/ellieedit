@@ -8,6 +8,7 @@ the real path escapes it (symlinks included).
 import hashlib
 import io
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -56,6 +57,19 @@ _DIMS: dict[tuple[str, int], tuple[int, int]] = {}
 DIMS_MAX = 100_000
 _dims_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="gal-dims")
 
+# ---- thumbnail warming (2026-10-15) ----------------------------------------
+# Thumbnails are generated lazily, and the browser only asks for the ones near
+# the viewport — so scrolling into never-viewed territory paid a cold full-size
+# decode per image. After serving a listing page we now generate that page's
+# thumbnails plus the NEXT page's in a small background pool, so scrolling
+# finds them ready. Pure accelerator: a miss just falls back to on-demand.
+THUMB_WARM = os.environ.get("ELLIEEDIT_THUMB_WARM", "1") != "0"
+WARM_MAX_INFLIGHT = 400          # queued+running cap; the rest are skipped
+_warm_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gal-thumb")
+_warm_inflight: set[str] = set()
+_thumb_locks: dict[str, threading.Lock] = {}
+_state_guard = threading.Lock()
+
 
 def jailed(rel: str) -> Path:
     """Resolve rel under GALLERY_ROOT; reject escapes (../, absolute, symlinks)."""
@@ -92,16 +106,61 @@ def _thumb_path(src: Path) -> Path:
 
 
 def get_thumbnail(src: Path) -> Path:
+    """Cached thumbnail path, generating it if needed. One generation per
+    thumbnail at a time (concurrent requests and the warm pool wait for it
+    instead of racing on the same temp file), written atomically."""
     tp = _thumb_path(src)
     if tp.exists():
         return tp
-    THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = tp.with_suffix(".tmp")
-    with Image.open(src) as im:
-        im.thumbnail((THUMB_SIZE, THUMB_SIZE))
-        im.save(tmp, "WEBP", quality=80)
-    tmp.rename(tp)
+    with _state_guard:
+        lock = _thumb_locks.setdefault(tp.name, threading.Lock())
+    try:
+        with lock:
+            if tp.exists():          # someone else finished while we waited
+                return tp
+            THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = tp.with_name(f"{tp.stem}.{os.getpid()}-{threading.get_ident()}.tmp")
+            try:
+                with Image.open(src) as im:
+                    if im.format == "JPEG":
+                        im.draft("RGB", (THUMB_SIZE * 2, THUMB_SIZE * 2))  # decode at reduced scale
+                    im.thumbnail((THUMB_SIZE, THUMB_SIZE))
+                    im.save(tmp, "WEBP", quality=80)
+                tmp.replace(tp)
+            finally:
+                tmp.unlink(missing_ok=True)
+    finally:
+        with _state_guard:
+            _thumb_locks.pop(tp.name, None)
     return tp
+
+
+def _warm_one(path: str) -> None:
+    try:
+        get_thumbnail(Path(path))
+    except Exception:
+        log.debug("thumb warm failed for %s", path, exc_info=True)
+    finally:
+        with _state_guard:
+            _warm_inflight.discard(path)
+
+
+def warm_thumbs(paths: list[str]) -> list:
+    """Queue background thumbnail generation, in the given order (current page
+    first, then the next). Never blocks, never raises; already-queued paths
+    are skipped. Returns the futures (tests wait on them)."""
+    if not THUMB_WARM:
+        return []
+    futs = []
+    with _state_guard:
+        for p in paths:
+            if p in _warm_inflight:
+                continue
+            if len(_warm_inflight) >= WARM_MAX_INFLIGHT:
+                break
+            _warm_inflight.add(p)
+            futs.append(_warm_pool.submit(_warm_one, p))
+    return futs
 
 
 def _entry_mtime(entry) -> int:
@@ -271,6 +330,8 @@ def list_images(response: FResponse, dir: str = "", cursor: str = "",
             "pending": rel in pending_set,
         })
     next_cursor = f"{page[-1][0]}:{page[-1][1]}" if page and start + PAGE_SIZE < len(files) else None
+    ahead = files[start + PAGE_SIZE:start + 2 * PAGE_SIZE]
+    warm_thumbs([str(base / n) for _m, n in page] + [str(base / n) for _m, n in ahead])
     response.headers["Server-Timing"] = (
         f'walk;dur={(t_walk - t0) * 1000:.1f};desc="{"cold" if cold else "warm"}", '
         f"dims;dur={(t_dims - t_walk) * 1000:.1f}, "
@@ -307,6 +368,8 @@ def _pending_listing(pending_set: set, cursor: str, root_real: Path) -> dict:
         items.append({"name": name, "path": rel, "mtime": int(mtime),
                       "width": w, "height": h, "thumb": True, "pending": True})
     next_cursor = f"{page[-1][0]}:{page[-1][1]}" if page and start + PAGE_SIZE < len(files) else None
+    warm_thumbs([str(f) for _m, _n, _r, f in page]
+                + [str(f) for _m, _n, _r, f in files[start + PAGE_SIZE:start + 2 * PAGE_SIZE]])
     return {"items": items, "subdirs": [], "next_cursor": next_cursor,
             "root": str(root_real)}
 
