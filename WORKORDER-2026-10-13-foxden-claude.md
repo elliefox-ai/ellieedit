@@ -129,3 +129,7 @@ Operator goal: more visibility of the working image. A tall portrait shrinks int
 3. Suggested mechanism: set canvas.style.maxWidth/maxHeight = 'none' when zoom > fit, drive explicit CSS px width/height = fitSize × zoom on both canvases; fit = current behavior (max 100%). Avoid transform:scale — it does not expand scrollable overflow, so panning breaks.
 4. Touch: canvas has touch-action:none (paint priority). Panning while zoomed: container scroll via scrollbar/edges is poor on tablet — consider two-finger pan on the wrap (second non-primary pointer already ignored by the paint path) as the pan gesture; document the choice in the verify file.
 5. Tests: pointer invariant test (above), zoom persistence, fit-button reset, overlay/canvas lockstep at zoom extremes.
+
+### Task 7 (added 2026-10-15 09:23, operator request) — FaceCycle: Advanced controls submenu
+
+Operator rarely uses: Diff sensitivity slider (threshold, line ~82), min region / max region inputs, and 🔍 Detect Faces (~line 85). Move them into a collapsed "⚙ Advanced" disclosure (details/summary or toggle button) so the main band carries only the everyday controls. Keep data-ids unchanged (tests/keys reference them), persist open/closed in localStorage, 44px touch targets, defaults closed. No behavior changes to the controls themselves. Tests: presence + toggle contract via existing frontend wrapper patterns.
