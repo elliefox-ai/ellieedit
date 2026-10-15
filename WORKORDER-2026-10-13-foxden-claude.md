@@ -165,3 +165,6 @@ When the working set has provenance (handed off from Gallery folder or Dupe fami
 3. No provenance → action hidden or disabled with a hint (nowhere to save back to).
 4. DISCOVERY: trace the handoff payload — does it record source folder paths and/or family id? The status bar already prints provenance ("handed off from Dupe family"), so the data exists client-side; verify what survives server-side.
 5. Tests: save lands in source folder with non-clobbering name; death-row/pending offers hit existing endpoints; no-provenance path disabled.
+
+### Task 10 (added 2026-10-15 09:50, operator request) — kept gens share the layers row
+A kept repaint generation currently adds its own bar below the canvas, compressing the main image's vertical space further. Change: kept-gen actions join the EXISTING layers row (the keep/discard/undo/layer-toggle band), right-aligned — no new bar, zero added height. Same data-ids/handlers, layout-only change. Tests: presence in the row; no additional block element; canvas-wrap height unchanged when a gen is kept (wrapper geometry assertion).
