@@ -146,6 +146,14 @@ export class CanvasStack {
     });
 
     cv.addEventListener('pointermove', e => {
+      // TEMP DIAGNOSTIC 2026-10-15: first-drag-after-load yanks to 0,0 (mouse only).
+      // Records the first raw moves so we can see any phantom (0,0) sample.
+      if (typeof window !== 'undefined') {
+        window.__ptrace = window.__ptrace || [];
+        if (window.__ptrace.length < 40) {
+          window.__ptrace.push({ t: e.type, x: e.clientX, y: e.clientY, p: e.pointerType, prim: e.isPrimary, btn: e.buttons });
+        }
+      }
       pendingMove = e;
       if (moveRaf) return;
       moveRaf = true;
