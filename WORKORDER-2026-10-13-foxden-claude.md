@@ -133,3 +133,20 @@ Operator goal: more visibility of the working image. A tall portrait shrinks int
 ### Task 7 (added 2026-10-15 09:23, operator request) — FaceCycle: Advanced controls submenu
 
 Operator rarely uses: Diff sensitivity slider (threshold, line ~82), min region / max region inputs, and 🔍 Detect Faces (~line 85). Move them into a collapsed "⚙ Advanced" disclosure (details/summary or toggle button) so the main band carries only the everyday controls. Keep data-ids unchanged (tests/keys reference them), persist open/closed in localStorage, 44px touch targets, defaults closed. No behavior changes to the controls themselves. Tests: presence + toggle contract via existing frontend wrapper patterns.
+
+### Task 7 revision (2026-10-15 09:32, operator + Ellie design session) — full FaceCycle menu segmentation
+Task 7 grows from "one Advanced drawer" into a proper information architecture pass. Principle: **the canvas and its paint tools are the product; everything else is configuration and should live one level down.**
+
+- **Main band (always visible):** draw box (B), mask brush, erase, undo, Generate. The everyday loop.
+- **🖌 Repaint modal:** prompt box, saved prompts, repaint-specific options (prompt replace flow).
+- **🔍 Detect modal:** auto face detection + its options + the "add to regions" box (operator says likely outdated — park it here, do not delete; removal is a later decision with usage evidence).
+- **⚙ Advanced modal:** diff sensitivity slider, min/max region (operator: rarely used).
+- Modals on tablet (bottom-sheet style preferred over centered dialogs), every control keeps its data-id and keyboard shortcut, modal open/close must not disturb canvas state or in-flight generations.
+- Tests: each control's presence + reachability in its modal; canvas state survives open/close; existing data-id references untouched.
+
+### Task 8 (added 2026-10-15 09:32) — FaceCycle: champion promote (supersedes the standalone-Meld work order)
+Operator clarification: the standalone Meld app is NOT the going-forward blend surface — FaceCycle effectively IS the meld tool now (and the Ladder has its own meld option that should eventually be extracted into FaceCycle). So the champion button lives in FaceCycle:
+1. A **👑 Champion** action on the current generation output. When the working set was handed off from a **Dupe family** (the handoff already tracks source), promoting sets that family's champion in the dupe-review ladder — same semantics as the Ladder promote — and offers to send the family's other candidates to the death row queue (existing endpoints; two-step confirm; never outright delete).
+2. If the working set has no dupe-family provenance (handoff from Gallery, FoxDen, fresh upload), Champion promotes within FaceCycle only (marks the generation as the session champion in the gens strip) and the death-row offer is absent.
+3. DISCOVERY STEP: find how the dupe→FaceCycle handoff records family/source (status bar says "handed off from Dupe family" — trace the payload), and the champion-set + death-row endpoints in the dupe router. If a champion-set endpoint doesn't exist, STOP and report — do not invent an API.
+4. Tests: promote with family provenance hits the right endpoint with the right family id; no-provenance path is session-local; confirm-step contract.
