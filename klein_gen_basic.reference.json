@@ -1,0 +1,185 @@
+{
+  "86": {
+    "inputs": {
+      "images": [
+        "728",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "668": {
+    "inputs": {
+      "string": "Tracking shot from behind. A digital fox is padding through a broad real world cityscape looking up and around at the sights to see."
+    },
+    "class_type": "YANC.MultilineString",
+    "_meta": {
+      "title": "Multiline String"
+    }
+  },
+  "726": {
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "727": {
+    "inputs": {
+      "noise": [
+        "730",
+        0
+      ],
+      "guider": [
+        "735",
+        0
+      ],
+      "sampler": [
+        "726",
+        0
+      ],
+      "sigmas": [
+        "731",
+        0
+      ],
+      "latent_image": [
+        "729",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "728": {
+    "inputs": {
+      "samples": [
+        "727",
+        0
+      ],
+      "vae": [
+        "732",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "729": {
+    "inputs": {
+      "width": 1024,
+      "height": 576,
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "Empty Flux 2 Latent"
+    }
+  },
+  "730": {
+    "inputs": {
+      "noise_seed": 146816402604316
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "731": {
+    "inputs": {
+      "steps": 6,
+      "width": 1024,
+      "height": 576
+    },
+    "class_type": "Flux2Scheduler",
+    "_meta": {
+      "title": "Flux2Scheduler"
+    }
+  },
+  "732": {
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "735": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "743",
+        0
+      ],
+      "positive": [
+        "737",
+        0
+      ],
+      "negative": [
+        "736",
+        0
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFGGuider"
+    }
+  },
+  "736": {
+    "inputs": {
+      "conditioning": [
+        "737",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "ConditioningZeroOut"
+    }
+  },
+  "737": {
+    "inputs": {
+      "text": [
+        "668",
+        0
+      ],
+      "clip": [
+        "744",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "743": {
+    "inputs": {
+      "gguf_name": "_Flux\\flux-2-klein-9b-Q8_0.gguf"
+    },
+    "class_type": "LoaderGGUF",
+    "_meta": {
+      "title": "GGUF Loader"
+    }
+  },
+  "744": {
+    "inputs": {
+      "clip_name": "Qwen3-8B-Q8_0.gguf",
+      "type": "stable_diffusion",
+      "device": "default"
+    },
+    "class_type": "ClipLoaderGGUF",
+    "_meta": {
+      "title": "GGUF CLIP Loader"
+    }
+  }
+}
