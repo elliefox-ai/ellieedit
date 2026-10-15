@@ -88,3 +88,32 @@ The JSON is **API/prompt format**: a flat dict keyed by node-id string, each nod
 - 744 `ClipLoaderGGUF` = `Qwen3-8B-Q8_0.gguf` ✓ — leave alone.
 - Batch size lives in 729 (`batch_size`).
 The staged copy in _Outgoing matches /mnt/e/comfyui/user/default/workflows/klein_gen_basic.json (verified 2026-10-13 20:31).
+
+---
+
+## Task 5 (added 2026-10-14, operator-found during first real couch session) — FoxDen recent integrity + delivery
+
+Operator's first personal render never appeared in the recent strip. Root cause: recent.jsonl writes only happen as a side effect of `/status/{id}` polling — if no client is polling at the exact moment ComfyUI finishes (tab navigated away, device slept), the completion is never observed and the render is orphaned. A one-off backfill rescued the render; make it structural:
+
+1. **Reconcile in `/recent`** (or a `/recent/reconcile` the frontend calls on load): fetch ComfyUI `/history`, find entries whose outputs contain `filename_prefix == "foxden"` (or filename starting `foxden_`) with `type=="output"` not yet in recent.jsonl, append them (metadata best-effort: unknown fields null, prompt "(reconciled)"). Must be tolerant of LARGE history JSON (ours is 50MB+ — stream or fetch with a long timeout; do not parse per-request on every /recent call — reconcile on tab activation or explicit refresh only).
+2. **Frontend refresh button** at the left of the recent strip (⟳ icon, 44px touch target): calls reconcile + reloads strip.
+3. **Collapsible recent strip**: chevron/tap-to-collapse; remembers state (localStorage); collapsed shows just a thin bar with count.
+4. **Delivery folder**: on reconcile AND on normal done, copy output images to `/mnt/shared/_FoxDen/` (create if missing; config override `ELLIEEDIT_FOXDEN_DELIVERY_DIR`). Copy, never move — ComfyUI's output dir stays authoritative. Filename: keep ComfyUI's, prefix collisions fine. This makes couch renders visible on the Windows/TV side automatically.
+5. Tests: reconcile picks up orphaned history entries and skips known ones; delivery copy lands (tmp-dir based); refresh endpoint contract; reconcile survives huge-history mocking (chunked/body ≥ mock size).
+
+Context: the one-off backfill (2026-10-14) worked — render `foxden_00002_.png` rescued. This task makes that automatic.
+
+### Task 5 addendum (2026-10-14 14:39, operator requests from first couch session)
+
+5. **Input images + denoise (this IS the deferred v2 img2img — now in scope):**
+   - The FoxDen page gets an input-image section: pick from the existing `/inputs` listing and/or upload via the existing `/upload` (thumbnail chips, tap to select/deselect, multiple allowed = last-selected wins for v1 unless trivially multi).
+   - Backend `/generate` accepts `input_image` (name from upload/inputs). When present, edit the graph: LoadImage (or reuse the upstream chain feeding the existing workflow if it has one — klein does NOT, so inject: LoadImage → VAEEncode → SamplerCustomAdvanced's `latent_image` input, replacing the EmptyFlux2LatentImage link). Width/height literals are ignored in img2img (image is the latent source) — disable/gray the aspect buttons client-side when an input is set.
+   - **Denoise control**: `Flux2Scheduler` may not expose a `denoise` input — verify against the real node defs (`/object_info/Flux2Scheduler`, `/object_info/BasicScheduler`). If absent, the standard approach: compute the step subset that corresponds to the denoise strength (skip the first ceil(steps × (1−denoise)) sigma entries) or swap to a denoise-capable scheduler node. Whichever path, denoise slider 0.1–1.0, default 1.0 (= current txt2img behavior).
+   - Tests: img2img graph edits (LoadImage+VAEEncode injected, latent rewired), denoise step-trim math, txt2img unchanged when no input, input+loras compose.
+6. **LoRA pinned-chips UX:** active LoRAs render as compact pinned chips JUST ABOVE the scrollable list (name + strength + two buttons: ✕ remove, ⏸ suspend). Suspend parks the chip in a collapsed "suspended (N)" tray — restore by tap — so you can A/B a render with/without without losing the strength value. Filter box filters the list, never the pins. `Reuse settings` restores pins+suspended state faithfully.
+
+### Task 5 addendum 2 (2026-10-14 14:44, operator request) — workspace save/restore presets
+
+7. **Named presets**: save the complete FoxDen form state under a user-chosen name — prompt, workflow, aspect (or input image), seed (optional: save seed or leave random — checkbox "lock seed"), steps, denoise, LoRA pins + suspended tray with strengths, input image reference. Server-backed: `GET/POST/DELETE /api/foxden/presets` storing JSON at `data/foxden/presets.json` (same dir as recent.jsonl). Frontend: preset picker (dropdown or chip row) + 💾 save button prompting for name; applying a preset restores the full form; delete with confirm. Tablet-first: no hover, 44px targets.
+8. **Auto-remember last state**: the form persists itself (server-side same store, key `_last`, or localStorage with server sync) — reload/sleep/crash restores the in-progress composition instead of a blank form. Recent's `Reuse settings` remains the per-render shortcut; presets are the deliberate bookmarks.
+9. Tests: preset CRUD round-trip, apply restores every field incl. suspended tray and input image ref, auto-remember survives a fresh client, delete-with-confirm contract.
