@@ -21,6 +21,8 @@ assert.equal(r.count, 0);
 r = planFaceCycleHandoff([{ path: 'out/x.png', name: 'x.png' }, { path: 'out/y.png' }]);
 assert.deepEqual(r.urls, ['/api/gallery/file?path=out%2Fx.png', '/api/gallery/file?path=out%2Fy.png']);
 assert.deepEqual(r.names, ['x.png', 'y.png']);
+// provenance carries the real paths for Replace sources
+assert.deepEqual(r.provenance, { kind: 'gallery', paths: ['out/x.png', 'out/y.png'] });
 
 // refusal: over cap
 const many = Array.from({ length: FACECYCLE_MAX + 1 }, (_, i) => ({ path: `out/${i}.png` }));

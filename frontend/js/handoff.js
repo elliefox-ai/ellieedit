@@ -25,5 +25,8 @@ export function planFaceCycleHandoff(items) {
   return {
     urls: clean.map(it => facecycleFileUrl(it.path)),
     names: clean.map(it => it.name || it.path.split('/').pop() || 'image.png'),
+    // Replace sources needs to know where each image came from: the receiver
+    // only gets blobs, so the real (jailed) paths travel alongside.
+    provenance: { kind: 'gallery', paths: clean.map(it => it.path) },
   };
 }

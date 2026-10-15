@@ -69,6 +69,15 @@ function panelHTML() {
     .fc-meld-bar { display:none; align-items:center; gap:10px; padding:8px 16px;
       background:#1d2438; border-top:1px solid #2f5a8a; }
     .fc-meld-bar .msg { font-size:12px; color:#7ab8e8; flex:1; }
+    /* Replace sources (work order 2026-10-13): result lands next to the BASE
+       image, every source goes to the deletion queue. */
+    .fc-replace-bar { display:none; align-items:center; gap:10px; padding:8px 16px;
+      background:#1f2a1f; border-top:1px solid #3d6a3d; }
+    .fc-replace-bar .msg { font-size:12px; color:#8ad08a; flex:1; }
+    .fc-replace-bar.disabled { background:#222; border-top-color:#444; }
+    .fc-replace-bar.disabled .msg { color:#888; }
+    .thumb .basetag { position:absolute; top:2px; left:2px; background:#7a6aaa; color:#fff;
+      font-size:9px; padding:1px 4px; border-radius:2px; font-family:monospace; }
   </style>
   <div class="fc-header">
     <div class="fc-row top">
@@ -118,6 +127,10 @@ function panelHTML() {
       <button class="ee-btn primary" data-act="meld-save" style="min-height:40px">💾 Save back → family</button>
       <button class="ee-btn" data-act="meld-cancel" style="min-height:40px">✕ Cancel</button>
     </div>
+    <div class="fc-replace-bar" data-id="replace-bar">
+      <span class="msg" data-id="replace-msg"></span>
+      <button class="ee-btn primary" data-act="replace-sources" style="min-height:40px">♻ Replace sources</button>
+    </div>
     <div class="fc-canvas-wrap" data-id="canvas-container"></div>
     <div class="fc-thumbs" data-id="thumbnail-strip"></div>
     <div class="fc-gens" data-id="gen-strip"></div>
@@ -136,6 +149,7 @@ export class FaceCycle {
       statusBar: $('status-bar'), exportBtn: act('export'), resetBtn: act('reset'),
       meldBar: $('meld-bar'), meldMsg: $('meld-msg'),
       meldSaveBtn: act('meld-save'), meldCancelBtn: act('meld-cancel'),
+      replaceBar: $('replace-bar'), replaceMsg: $('replace-msg'), replaceBtn: act('replace-sources'),
       removeAllBtn: act('remove-all'), detectBtn: act('detect'), clickAddBtn: act('click-add'),
       drawBoxBtn: act('draw-box'), drawMaskBtn: act('draw-mask'),
       brushControls: $('brush-controls'), brushSizeSlider: $('brush-size'),
@@ -267,6 +281,7 @@ export class FaceCycle {
     // ── Dupe→Meld explicit exits (2026-10-08g) ──────────────────────
     this.el.meldSaveBtn.addEventListener('click', () => this.meldSaveBack());
     this.el.meldCancelBtn.addEventListener('click', () => this.meldCancel());
+    this.el.replaceBtn.addEventListener('click', () => this.replaceSources());
     this.el.repaintPromptInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); this.generateRepaint(); }
     });
@@ -294,7 +309,7 @@ export class FaceCycle {
     //   Save back (write blend + collapse, server-side meld-save) or Cancel
     //   (return marking NOTHING — no manifest, no ledger writes).
     window.addEventListener('ellieedit:facecycle-handoff', this.onHandoffEvent = async e => {
-      const { urls, names, meld } = e.detail || {};
+      const { urls, names, meld, provenance } = e.detail || {};
       if (!Array.isArray(urls) || !urls.length) return;
       if (!this.panel.classList.contains('active')) return;
       try {
@@ -308,6 +323,13 @@ export class FaceCycle {
           return new File([blob], names[i] || `image-${i}.png`, { type: blob.type });
         }));
         await this.handleFiles(files);
+        // Remember where each image came from (same order as the stack) so
+        // Replace sources knows the base folder and what to retire.
+        if (provenance && Array.isArray(provenance.paths) && provenance.paths.length === files.length) {
+          this.prov = { kind: provenance.kind, family: provenance.family || null };
+          this.state.images.forEach((im, i) => { im.srcPath = provenance.paths[i]; });
+        }
+        this.paintReplaceBar();
         // Visible receipt: the status bar names exactly what was handed off.
         // Long names are middle-ellipsized so the band stays one line and the
         // canvas keeps its vertical space (operator feedback 2026-10-15).
@@ -345,6 +367,8 @@ export class FaceCycle {
     this.el.layerToggleBtn.classList.remove('active-toggle');
     this.nextRegionId = 0;
     this.selectedRegionId = null;
+    this.prov = null;
+    this.paintReplaceBar();
     this.el.thumbnailStrip.innerHTML = '';
     this.el.mainView.style.display = 'none';
     this.el.dropZone.style.display = 'flex';
@@ -450,6 +474,12 @@ export class FaceCycle {
       del.title = 'Remove this image';
       del.addEventListener('click', e => { e.stopPropagation(); this.removeImage(idx); });
       thumb.appendChild(im); thumb.appendChild(label); thumb.appendChild(del);
+      if (item.srcPath && this.state.images.length > 1 && idx === this.state.baseVariant) {
+        const tag = document.createElement('div');
+        tag.className = 'basetag'; tag.textContent = 'BASE';
+        tag.title = 'Replace sources writes the result into this image\'s folder';
+        thumb.appendChild(tag);
+      }
       thumb.addEventListener('click', () => {
         this.state.baseVariant = idx;
         this.renderThumbnails();
@@ -457,6 +487,7 @@ export class FaceCycle {
       });
       this.el.thumbnailStrip.appendChild(thumb);
     });
+    this.paintReplaceBar();
   }
 
   removeImage(index) {
@@ -2023,6 +2054,69 @@ export class FaceCycle {
         { detail: { family: ctx.family, saved_as: j.saved_as } }));
     } catch (err) {
       alert('Meld save-back failed: ' + err.message);
+    }
+  }
+
+  // ── Replace sources (work order 2026-10-13, Task 8/9 revision) ───────
+  // Final image -> the BASE image's folder; every source image with a known
+  // path -> the existing deletion queue. No confirm step: the queue is the
+  // safety net. Hidden-with-hint when the stack has no provenance.
+  replaceInfo() {
+    const imgs = this.state.images;
+    const base = imgs[this.state.baseVariant];
+    const srcs = imgs.filter(im => im.srcPath).map(im => im.srcPath);
+    if (!this.prov || !srcs.length) return { ok: false, hint: 'Replace sources is available for images handed off from Gallery or a Dupe family.' };
+    if (!base || !base.srcPath) return { ok: false, hint: 'Click a thumbnail that came from Gallery/Dupe to make it the base.' };
+    const folder = base.srcPath.includes('/') ? base.srcPath.slice(0, base.srcPath.lastIndexOf('/')) : '(root)';
+    return { ok: true, base, srcs, folder };
+  }
+
+  paintReplaceBar() {
+    if (!this.el.replaceBar) return;
+    const hasImages = this.state.images.length > 0;
+    this.el.replaceBar.style.display = hasImages ? 'flex' : 'none';
+    if (!hasImages) return;
+    const info = this.replaceInfo();
+    this.el.replaceBar.classList.toggle('disabled', !info.ok);
+    this.el.replaceBtn.disabled = !info.ok;
+    this.el.replaceMsg.textContent = info.ok
+      ? `♻ Result → ${info.folder}/ (next to base ${info.base.name}). ${info.srcs.length} source${info.srcs.length !== 1 ? 's' : ''} → deletion queue.`
+      : info.hint;
+  }
+
+  async replaceSources() {
+    const info = this.replaceInfo();
+    if (!info.ok) return;
+    this.el.replaceBtn.disabled = true;
+    try {
+      const blob = await this.exportBlob();
+      if (!blob) throw new Error('nothing to save');
+      const b64 = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result.split(',')[1]);
+        fr.onerror = () => rej(new Error('blob read failed'));
+        fr.readAsDataURL(blob);
+      });
+      const kind = this.prov.kind, family = this.prov.family;
+      const r = await fetch('/api/facecycle/replace-sources', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_b64: b64, kind, family, base: info.base.srcPath, sources: info.srcs }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+      const j = await r.json();
+      this.meldCtx = null;
+      this.resetAll();
+      if (kind === 'dupe' && family) {
+        window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'dupe' } }));
+        window.dispatchEvent(new CustomEvent('ellieedit:dupe-meld-saved',
+          { detail: { family, saved_as: j.saved_as } }));
+      } else {
+        this.el.statusBar.textContent = `♻ Saved ${j.saved_as} · ${j.pending_added} source${j.pending_added !== 1 ? 's' : ''} queued for deletion`;
+        alert(`Saved ${j.saved_as}\n${j.pending_added} source image${j.pending_added !== 1 ? 's' : ''} sent to the deletion queue.`);
+      }
+    } catch (err) {
+      alert('Replace sources failed: ' + err.message);
+      this.paintReplaceBar();
     }
   }
 

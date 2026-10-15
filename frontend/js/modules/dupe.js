@@ -1616,6 +1616,7 @@ registerModule({
           urls: members.map(m => `/api/dupe/file?path=${encodeURIComponent(m.path)}`),
           names: members.map(m => m.name),
           meld: { family: familyId, members: memberPaths },
+          provenance: { kind: 'dupe', family: familyId, paths: memberPaths },
         },
       }));
     }

@@ -603,7 +603,7 @@ export class Gallery {
     if (plan.error) { this.toast(plan.error, true); return; }
     window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'facecycle' } }));
     window.dispatchEvent(new CustomEvent('ellieedit:facecycle-handoff',
-      { detail: { urls: plan.urls, names: plan.names } }));
+      { detail: { urls: plan.urls, names: plan.names, provenance: plan.provenance } }));
   }
 
   // ---- pending delete manifest -------------------------------------------
