@@ -168,3 +168,13 @@ When the working set has provenance (handed off from Gallery folder or Dupe fami
 
 ### Task 10 (added 2026-10-15 09:50, operator request) — kept gens share the layers row
 A kept repaint generation currently adds its own bar below the canvas, compressing the main image's vertical space further. Change: kept-gen actions join the EXISTING layers row (the keep/discard/undo/layer-toggle band), right-aligned — no new bar, zero added height. Same data-ids/handlers, layout-only change. Tests: presence in the row; no additional block element; canvas-wrap height unchanged when a gen is kept (wrapper geometry assertion).
+
+### Task 8/9 revision (2026-10-15 11:15, operator clarification) — supersedes champion/replace wording above
+- **The Ladder is NOT touched.** Champion-in-Ladder stays as-is; it's the preferred interface for pure image-to-image tests. This revision removes the champion framing entirely.
+- FaceCycle gets **one new method: "Replace sources"** (exact label TBD, something unambiguous):
+  1. Writes the current final output image into **the directory of the selected base image** (the working set may contain images from MULTIPLE folders — the base image designation decides where the result lands; make the base-image selection explicit in the UI so multi-folder sets are unambiguous).
+  2. Sends the source images to the appropriate deletion queue (existing endpoints only — death row for dupe-family provenance, pending/deletion view for gallery provenance).
+  3. **NO two-step confirm** — operator decision: the deletion queue itself is the safety mechanism; don't complicate the flow.
+  4. **Workflow metadata transfer is best-effort, not critical:** if embedding generation metadata into the output PNG is cheap (e.g., tEXt chunk with the handoff source + generation params), do it; if it turns out to need new plumbing, skip and note in the verify file.
+  5. No dupe-family/gallery provenance at all → method hidden or disabled with a hint (nowhere to return the result).
+- Tests: result lands in base image's folder with non-clobbering name; sources hit the correct queue per provenance type; multi-folder set uses base image's folder; no-confirm contract; metadata presence if implemented.
