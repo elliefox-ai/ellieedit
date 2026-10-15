@@ -150,3 +150,18 @@ Operator clarification: the standalone Meld app is NOT the going-forward blend s
 2. If the working set has no dupe-family provenance (handoff from Gallery, FoxDen, fresh upload), Champion promotes within FaceCycle only (marks the generation as the session champion in the gens strip) and the death-row offer is absent.
 3. DISCOVERY STEP: find how the dupe→FaceCycle handoff records family/source (status bar says "handed off from Dupe family" — trace the payload), and the champion-set + death-row endpoints in the dupe router. If a champion-set endpoint doesn't exist, STOP and report — do not invent an API.
 4. Tests: promote with family provenance hits the right endpoint with the right family id; no-provenance path is session-local; confirm-step contract.
+
+### Task 7 revision 2 (2026-10-15 09:44, operator decision) — three surfaces, not four
+The separate ⚙ Advanced modal is DROPPED. Final IA:
+- **Main band:** draw box (B), mask brush, erase, undo, Generate (operator confirmed: quick-click regenerate on the main band is the hot loop; the Repaint modal may ALSO carry its own Generate for the modal flow — same handler, both are fine).
+- **🖌 Repaint modal:** prompt, saved prompts, repaint options.
+- **🔍 Detect modal:** face detection + add-to-regions (parked, do not delete) + diff sensitivity slider + min/max region (operator: intrinsically linked with detection — they tune the same diff engine).
+All prior constraints hold: data-ids/shortcuts unchanged, bottom sheets on tablet, canvas state survives open/close.
+
+### Task 9 (added 2026-10-15 09:44, operator: MOST CRITICAL) — save result back to source folder + sources to delete queue
+When the working set has provenance (handed off from Gallery folder or Dupe family), FaceCycle needs a **"Save & retire"** action:
+1. Saves the current final output (kept generation / current stack render) back to the ORIGINAL folder of the base image — the folder the handoff came from, not a scratch dir. Filename: base name of the primary source with a distinguishing suffix (avoid clobber; exact scheme = discovery: see how Gallery promote names things and match that convention).
+2. Offers (two-step confirm) to send the component/source images to the delete queue — death row for dupe families, pending/deletion view for gallery items (existing endpoints only).
+3. No provenance → action hidden or disabled with a hint (nowhere to save back to).
+4. DISCOVERY: trace the handoff payload — does it record source folder paths and/or family id? The status bar already prints provenance ("handed off from Dupe family"), so the data exists client-side; verify what survives server-side.
+5. Tests: save lands in source folder with non-clobbering name; death-row/pending offers hit existing endpoints; no-provenance path disabled.
