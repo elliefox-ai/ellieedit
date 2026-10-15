@@ -116,7 +116,15 @@ export class CanvasStack {
     const rect = this.canvas.getBoundingClientRect();
     const sx = this.canvas.width / rect.width;
     const sy = this.canvas.height / rect.height;
-    return { x: (e.clientX - rect.left) * sx, y: (e.clientY - rect.top) * sy };
+    const wx = (e.clientX - rect.left) * sx, wy = (e.clientY - rect.top) * sy;
+    // TEMP DIAGNOSTIC 2026-10-15: capture rect + computed world for first 40 mouse moves.
+    if (typeof window !== 'undefined' && e.pointerType === 'mouse') {
+      window.__prect = window.__prect || [];
+      if (window.__prect.length < 40) {
+        window.__prect.push({ cx: +e.clientX.toFixed(1), cy: +e.clientY.toFixed(1), rl: +rect.left.toFixed(1), rt: +rect.top.toFixed(1), rw: +rect.width.toFixed(1), rh: +rect.height.toFixed(1), cw: this.canvas.width, ch: this.canvas.height, wx: +wx.toFixed(1), wy: +wy.toFixed(1) });
+      }
+    }
+    return { x: wx, y: wy };
   }
 
   // ── Full stack render ──
