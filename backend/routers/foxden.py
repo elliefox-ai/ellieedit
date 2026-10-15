@@ -19,13 +19,14 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -43,6 +44,11 @@ UPLOAD_MAX = 25 * 1024 * 1024
 RECENT_MAX = 200
 _pending_meta: dict[str, dict] = {}     # prompt_id -> submission meta
 _logged: set[str] = set()               # prompt_ids already in recent.jsonl
+_delivered: set[str] = set()            # prompt_ids already copied to delivery
+_reconcile_lock = threading.Lock()
+_last_reconcile = 0.0                   # time of last successful reconcile
+RECONCILE_MIN_AGE = 30                  # non-forced calls inside this are no-ops
+DELIVER_BACKFILL = 50                   # known recent renders re-checked on reconcile
 
 
 # ------------------------------------------------------------ env-resolved
@@ -67,6 +73,12 @@ def data_dir() -> Path:
     return Path(os.environ.get(
         "ELLIEEDIT_FOXDEN_DATA",
         str(Path(__file__).resolve().parents[2] / "data" / "foxden")))
+
+
+def delivery_dir() -> Path:
+    """Copy target so couch renders show up on the Windows/TV side."""
+    return Path(os.environ.get("ELLIEEDIT_FOXDEN_DELIVERY_DIR",
+                               "/mnt/shared/_FoxDen"))
 
 
 # ------------------------------------------------------------------- HTTP
@@ -387,7 +399,7 @@ def normalize_status(pid: str, hist: dict | None, queue: dict | None) -> dict:
 
 
 @router.get("/status/{prompt_id}")
-def status(prompt_id: str):
+def status(prompt_id: str, background: BackgroundTasks):
     if not prompt_id.replace("-", "").isalnum():
         raise HTTPException(400, "bad prompt id")
     try:
@@ -408,6 +420,11 @@ def status(prompt_id: str):
     images = out.pop("_images", None)
     if out["state"] == "done" and images:
         _log_recent(prompt_id, images)
+        if prompt_id not in _delivered:       # once per render, off the poll path
+            if len(_delivered) > 1000:
+                _delivered.clear()
+            _delivered.add(prompt_id)
+            background.add_task(deliver_images, images)
     return out
 
 
@@ -433,9 +450,7 @@ def _log_recent(pid: str, images: list[dict]) -> None:
         log.warning("foxden recent log write failed", exc_info=True)
 
 
-@router.get("/recent")
-def recent(limit: int = 12):
-    limit = max(1, min(limit, 100))
+def _read_rows() -> list[dict]:
     rows = []
     try:
         for line in (data_dir() / "recent.jsonl").read_text().splitlines():
@@ -445,10 +460,176 @@ def recent(limit: int = 12):
                 continue
     except FileNotFoundError:
         pass
+    return rows
+
+
+@router.get("/recent")
+def recent(limit: int = 12):
+    limit = max(1, min(limit, 100))
+    rows = _read_rows()
+    # newest first by completion time (reconciled rows are appended late but
+    # carry their real ts); stable for rows without one
+    rows.sort(key=lambda r: r.get("ts") or 0)
     items = list(reversed(rows))[:limit]
     for it in items:
         it["urls"] = [view_url(o) for o in it.get("outputs", [])]
-    return {"items": items}
+    return {"items": items, "total": len(rows)}
+
+
+# ------------------------------------------------------------- delivery
+
+def deliver_images(images: list[dict]) -> int:
+    """COPY output images (fetched via ComfyUI /view) into the delivery
+    folder. Copy, never move — ComfyUI's output dir stays authoritative.
+    Idempotent: an existing file of the same name is left alone. Only the
+    `_FoxDen` leaf is created (its parent share must already exist, so a
+    missing mount can't silently fill the local disk). Never raises: delivery
+    is a convenience and must not break generation. Returns files written."""
+    d = delivery_dir()
+    try:
+        d.mkdir(exist_ok=True)
+    except OSError:
+        log.warning("foxden delivery dir unavailable: %s", d, exc_info=True)
+        return 0
+    n = 0
+    for im in images:
+        fn = im.get("filename") or ""
+        if (not fn or "/" in fn or "\\" in fn or fn.startswith(".")
+                or im.get("type", "output") != "output"):
+            continue
+        dest = d / fn
+        if dest.exists():
+            continue
+        q = urllib.parse.urlencode({"filename": fn,
+                                    "subfolder": im.get("subfolder", ""),
+                                    "type": "output"})
+        try:
+            st, body, _h = _comfy(f"/view?{q}", timeout=60)
+            if st != 200 or not body:
+                continue
+            tmp = d / (fn + ".part")
+            tmp.write_bytes(body)
+            tmp.replace(dest)
+            n += 1
+        except Exception:               # convenience path: never break callers
+            log.warning("foxden delivery failed for %s", fn, exc_info=True)
+    return n
+
+
+# ------------------------------------------------------------- reconcile
+
+def _foxden_images(entry: dict) -> list[dict]:
+    return [{"filename": im["filename"], "subfolder": im.get("subfolder", ""),
+             "type": "output"}
+            for node in (entry.get("outputs") or {}).values()
+            for im in node.get("images", [])
+            if im.get("type") == "output"
+            and str(im.get("filename", "")).startswith("foxden_")]
+
+
+def _meta_from_graph(graph) -> dict:
+    """Best-effort recovery of what was rendered from the graph ComfyUI kept
+    in history, so reconciled renders still support Reuse settings. Anything
+    unrecoverable stays None / '(reconciled)'."""
+    meta = {"prompt": "(reconciled)", "workflow": None, "seed": None,
+            "width": None, "height": None, "steps": None, "loras": []}
+    if not isinstance(graph, dict):
+        return meta
+    try:
+        sl = find_slots(graph)
+        pid, pkey = sl["prompt"]
+        text = graph[pid]["inputs"].get(pkey)
+        if isinstance(text, str) and text.strip():
+            meta["prompt"] = text
+        seed = graph[sl["seed"]]["inputs"].get("noise_seed")
+        if isinstance(seed, int):
+            meta["seed"] = seed
+        if sl["size"]:
+            ins = graph[sl["size"][0]]["inputs"]
+            meta["width"], meta["height"] = ins.get("width"), ins.get("height")
+        if sl["steps"]:
+            meta["steps"] = graph[sl["steps"][0]]["inputs"].get("steps")
+        for nid in sorted((k for k, n in graph.items() if k.isdigit()
+                           and n.get("class_type") == "LoraLoaderModelOnly"),
+                          key=int):
+            ins = graph[nid]["inputs"]
+            if isinstance(ins.get("lora_name"), str):
+                meta["loras"].append({"name": ins["lora_name"],
+                                      "strength_model": ins.get("strength_model", 1.0)})
+    except Exception:                       # unusual graph: keep what we have
+        log.debug("foxden meta recovery partial", exc_info=True)
+    return meta
+
+
+def _entry_ts(entry: dict) -> int:
+    best = None
+    for m in (entry.get("status") or {}).get("messages", []):
+        if (isinstance(m, list) and len(m) > 1 and isinstance(m[1], dict)
+                and m[0] in ("execution_start", "execution_success")
+                and isinstance(m[1].get("timestamp"), (int, float))):
+            best = int(m[1]["timestamp"] / 1000)
+            if m[0] == "execution_success":
+                break
+    return best or int(time.time())
+
+
+@router.post("/recent/reconcile")
+def reconcile(force: bool = False):
+    """Adopt renders ComfyUI finished that no client observed (tab left, device
+    asleep). Scans ComfyUI /history for foxden_* outputs not yet in
+    recent.jsonl, appends them, and copies them (plus the latest known renders)
+    to the delivery folder. History can be 50MB+, so this is NOT run per
+    /recent call: the frontend calls it on tab activation (throttled unless
+    force) and from the refresh button (force)."""
+    global _last_reconcile
+    if not _reconcile_lock.acquire(blocking=False):
+        return {"skipped": "busy", "added": 0, "delivered": 0}
+    try:
+        if not force and time.time() - _last_reconcile < RECONCILE_MIN_AGE:
+            return {"skipped": "recent", "added": 0, "delivered": 0}
+        cap = int(os.environ.get("ELLIEEDIT_FOXDEN_HISTORY_MAX", "500"))
+        try:
+            st, hist = _json(f"/history?max_items={cap}", timeout=180)
+        except ComfyDown as e:
+            raise _http_down(e)
+        if st != 200 or not isinstance(hist, dict):
+            raise HTTPException(502, f"ComfyUI history unavailable (HTTP {st})")
+        rows = _read_rows()
+        known_pids = {r.get("prompt_id") for r in rows} | _logged
+        known_files = {o.get("filename") for r in rows
+                       for o in r.get("outputs", [])}
+        fresh = []
+        for pid, entry in hist.items():
+            if not isinstance(entry, dict) or pid in known_pids:
+                continue
+            imgs = _foxden_images(entry)
+            if not imgs or any(i["filename"] in known_files for i in imgs):
+                continue
+            graph = (entry.get("prompt") or [None, None, None])[2:3]
+            row = _meta_from_graph(graph[0] if graph else None)
+            row.update(prompt_id=pid, ts=_entry_ts(entry), outputs=imgs,
+                       reconciled=True)
+            fresh.append(row)
+        fresh.sort(key=lambda r: r["ts"])
+        if fresh:
+            try:
+                d = data_dir()
+                d.mkdir(parents=True, exist_ok=True)
+                with (d / "recent.jsonl").open("a") as fh:
+                    for r in fresh:
+                        fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+            except OSError as e:
+                raise HTTPException(500, f"could not write recent log: {e}")
+            _logged.update(r["prompt_id"] for r in fresh)
+        deliver = [o for r in fresh for o in r["outputs"]]
+        deliver += [o for r in rows[-DELIVER_BACKFILL:]
+                    for o in r.get("outputs", [])]
+        delivered = deliver_images(deliver)
+        _last_reconcile = time.time()
+        return {"scanned": len(hist), "added": len(fresh),
+                "delivered": delivered, "delivery_dir": str(delivery_dir())}
+    finally:
+        _reconcile_lock.release()
 
 
 # ------------------------------------------------------- view / upload

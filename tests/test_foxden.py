@@ -59,8 +59,13 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("ELLIEEDIT_COMFY_LORAS_DIR", str(lo))
     monkeypatch.setenv("ELLIEEDIT_FOXDEN_DATA", str(tmp_path / "data"))
     monkeypatch.setenv("ELLIEEDIT_COMFY_LOG", str(tmp_path / "comfy.log"))
+    (tmp_path / "share").mkdir()                    # the parent share exists...
+    monkeypatch.setenv("ELLIEEDIT_FOXDEN_DELIVERY_DIR",
+                       str(tmp_path / "share" / "_FoxDen"))  # ...the leaf doesn't
     foxden._pending_meta.clear()
     foxden._logged.clear()
+    foxden._delivered.clear()
+    monkeypatch.setattr(foxden, "_last_reconcile", 0.0)
     return tmp_path
 
 
@@ -247,6 +252,7 @@ def test_status_endpoint_logs_recent_once(client, env, monkeypatch):
     fake_comfy(monkeypatch, {
         "/prompt": (200, {"prompt_id": "pid-9", "node_errors": {}}),
         "/history/pid-9": (200, {"pid-9": hist(outputs={"736": {"images": [IM]}})}),
+        "/view?": (200, b"PNGBYTES"),
     })
     client.post("/api/foxden/generate", json={"prompt": "a fox", "seed": 5})
     for _ in range(2):
@@ -336,3 +342,199 @@ def test_injects_saveimage_for_preview_only_graphs():
     assert wf[saves[0]]["inputs"]["images"] == ["734", 0]
     assert wf[saves[0]]["inputs"]["filename_prefix"] == "foxden"
     foxden.validate_graph(wf)
+
+
+# ------------------------------------------- Task 5: reconcile + delivery
+
+def orphan_entry(pid, fname, prompt="a fox", seed=11, ts_ms=1_760_000_000_000,
+                 loras=(), typ="output"):
+    """A ComfyUI /history entry as a finished-but-unobserved render leaves it:
+    the submitted graph rides along in entry['prompt'][2]."""
+    graph = foxden.apply_edits(KLEIN, prompt, seed, 576, 1024, list(loras), 6)
+    e = hist(outputs={"736": {"images": [{"filename": fname, "subfolder": "",
+                                          "type": typ}]}},
+             messages=[["execution_start", {"prompt_id": pid, "timestamp": ts_ms - 5000}],
+                       ["execution_success", {"prompt_id": pid, "timestamp": ts_ms}]])
+    e["prompt"] = [3, pid, graph, {}, ["736"]]
+    return e
+
+
+def seed_recent(env, *rows):
+    d = env / "data"
+    d.mkdir(parents=True, exist_ok=True)
+    with (d / "recent.jsonl").open("a") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+
+
+def fake_history(monkeypatch, hist_body, view_bytes=b"PNG", record=None):
+    """Mock _comfy for /history + /view, recording (path, timeout)."""
+    seen = record if record is not None else []
+
+    def f(path, data=None, headers=None, method=None, timeout=30):
+        seen.append((path, timeout))
+        if path.startswith("/history"):
+            return 200, json.dumps(hist_body).encode(), {}
+        if path.startswith("/view?"):
+            return 200, view_bytes, {}
+        raise AssertionError(f"unmocked {path}")
+    monkeypatch.setattr(foxden, "_comfy", f)
+    return seen
+
+
+def test_reconcile_adopts_orphans_and_skips_known(client, env, monkeypatch):
+    known = {"prompt_id": "pid-known", "ts": 1_759_000_000, "prompt": "old",
+             "outputs": [{"filename": "foxden_00001_.png", "subfolder": "", "type": "output"}]}
+    backfilled = {"prompt_id": "manual-backfill", "ts": 1_759_500_000, "prompt": "rescued",
+                  "outputs": [{"filename": "foxden_00002_.png", "subfolder": "", "type": "output"}]}
+    seed_recent(env, known, backfilled)
+    h = {
+        "pid-known": orphan_entry("pid-known", "foxden_00001_.png"),
+        "pid-rescued": orphan_entry("pid-rescued", "foxden_00002_.png"),  # same file, new pid
+        "pid-orphan": orphan_entry("pid-orphan", "foxden_00003_.png",
+                                   prompt="a fox in snow", seed=99,
+                                   loras=[L("a.safetensors", 0.6)]),
+        "pid-gallery": orphan_entry("pid-gallery", "ComfyUI_00007_.png"),   # not ours
+        "pid-temp": orphan_entry("pid-temp", "foxden_00004_.png", typ="temp"),
+        "pid-junk": {"status": {}, "outputs": {}},
+    }
+    fake_history(monkeypatch, h)
+    r = client.post("/api/foxden/recent/reconcile").json()
+    assert r["added"] == 1 and r["scanned"] == len(h)
+    rows = [json.loads(x) for x in (env / "data" / "recent.jsonl").read_text().splitlines()]
+    assert len(rows) == 3
+    new = rows[-1]
+    assert new["prompt_id"] == "pid-orphan" and new["reconciled"] is True
+    assert new["outputs"] == [{"filename": "foxden_00003_.png", "subfolder": "", "type": "output"}]
+    # metadata recovered from the graph ComfyUI kept, so Reuse settings works
+    assert new["prompt"] == "a fox in snow" and new["seed"] == 99
+    assert (new["width"], new["height"], new["steps"]) == (576, 1024, 6)
+    assert new["loras"] == [{"name": "a.safetensors", "strength_model": 0.6}]
+    assert new["ts"] == 1_760_000_000          # from execution_success, not "now"
+    # running it again adds nothing (known now), and /recent shows it newest-first
+    assert client.post("/api/foxden/recent/reconcile?force=true").json()["added"] == 0
+    items = client.get("/api/foxden/recent").json()
+    assert items["total"] == 3 and items["items"][0]["prompt_id"] == "pid-orphan"
+
+
+def test_reconcile_metadata_falls_back_when_graph_unrecognizable(client, env, monkeypatch):
+    e = orphan_entry("pid-x", "foxden_00009_.png")
+    e["prompt"] = [3, "pid-x", {"1": {"class_type": "Mystery", "inputs": {}}}, {}, []]
+    e2 = orphan_entry("pid-y", "foxden_00010_.png")
+    del e2["prompt"]
+    fake_history(monkeypatch, {"pid-x": e, "pid-y": e2})
+    assert client.post("/api/foxden/recent/reconcile").json()["added"] == 2
+    rows = [json.loads(x) for x in (env / "data" / "recent.jsonl").read_text().splitlines()]
+    for r in rows:
+        assert r["prompt"] == "(reconciled)" and r["seed"] is None and r["loras"] == []
+        assert r["workflow"] is None and r["outputs"]
+
+
+def test_reconcile_orders_by_completion_time_not_append_order(client, env, monkeypatch):
+    seed_recent(env, {"prompt_id": "mid", "ts": 1_760_000_500, "prompt": "mid",
+                      "outputs": [{"filename": "foxden_00005_.png", "subfolder": "", "type": "output"}]})
+    fake_history(monkeypatch, {
+        "late": orphan_entry("late", "foxden_00007_.png", ts_ms=1_760_001_000_000),
+        "early": orphan_entry("early", "foxden_00003_.png", ts_ms=1_760_000_000_000)})
+    client.post("/api/foxden/recent/reconcile")
+    order = [i["prompt_id"] for i in client.get("/api/foxden/recent").json()["items"]]
+    assert order == ["late", "mid", "early"]
+
+
+def test_reconcile_delivers_copies_and_never_overwrites(client, env, monkeypatch):
+    dest = env / "share" / "_FoxDen"
+    assert not dest.exists()
+    seed_recent(env, {"prompt_id": "k", "ts": 5, "prompt": "k",
+                      "outputs": [{"filename": "foxden_00001_.png", "subfolder": "", "type": "output"}]})
+    dest.mkdir()
+    (dest / "foxden_00003_.png").write_bytes(b"ALREADY-THERE")   # collision: leave it
+    seen = fake_history(monkeypatch, {
+        "pid-3": orphan_entry("pid-3", "foxden_00003_.png"),
+        "pid-4": orphan_entry("pid-4", "foxden_00004_.png")}, view_bytes=b"NEWPNG")
+    r = client.post("/api/foxden/recent/reconcile").json()
+    assert r["added"] == 2
+    assert (dest / "foxden_00004_.png").read_bytes() == b"NEWPNG"      # new orphan copied
+    assert (dest / "foxden_00001_.png").read_bytes() == b"NEWPNG"      # known render backfilled
+    assert (dest / "foxden_00003_.png").read_bytes() == b"ALREADY-THERE"
+    assert r["delivered"] == 2
+    assert not list(dest.glob("*.part"))                               # atomic writes
+    fetched = [p for p, _t in seen if p.startswith("/view?")]
+    assert not any("foxden_00003_" in p for p in fetched)              # no needless fetch
+    assert all("type=output" in p for p in fetched)                    # copy from output only
+
+
+def test_normal_done_delivers_once(client, env, monkeypatch):
+    seen = []
+
+    def f(path, data=None, headers=None, method=None, timeout=30):
+        seen.append(path)
+        if path.startswith("/prompt"):
+            return 200, json.dumps({"prompt_id": "pid-d", "node_errors": {}}).encode(), {}
+        if path.startswith("/history/pid-d"):
+            return 200, json.dumps({"pid-d": hist(outputs={"736": {"images": [IM]}})}).encode(), {}
+        if path.startswith("/view?"):
+            return 200, b"RENDER", {}
+        raise AssertionError(path)
+    monkeypatch.setattr(foxden, "_comfy", f)
+    client.post("/api/foxden/generate", json={"prompt": "a fox"})
+    for _ in range(3):
+        assert client.get("/api/foxden/status/pid-d").json()["state"] == "done"
+    assert (env / "share" / "_FoxDen" / IM["filename"]).read_bytes() == b"RENDER"
+    assert sum(p.startswith("/view?") for p in seen) == 1             # once, not per poll
+
+
+def test_delivery_unavailable_never_breaks_anything(client, env, monkeypatch):
+    monkeypatch.setenv("ELLIEEDIT_FOXDEN_DELIVERY_DIR", str(env / "no-such-share" / "_FoxDen"))
+    fake_history(monkeypatch, {"p": orphan_entry("p", "foxden_00003_.png")})
+    r = client.post("/api/foxden/recent/reconcile")
+    assert r.status_code == 200 and r.json()["added"] == 1 and r.json()["delivered"] == 0
+    assert not (env / "no-such-share").exists()    # parent share is never conjured up
+
+
+def test_reconcile_throttled_unless_forced(client, env, monkeypatch):
+    seen = fake_history(monkeypatch, {})
+    assert "skipped" not in client.post("/api/foxden/recent/reconcile").json()
+    again = client.post("/api/foxden/recent/reconcile").json()
+    assert again["skipped"] == "recent" and again["added"] == 0
+    assert len([p for p, _ in seen if p.startswith("/history")]) == 1
+    assert "skipped" not in client.post("/api/foxden/recent/reconcile?force=true").json()
+    assert len([p for p, _ in seen if p.startswith("/history")]) == 2
+
+
+def test_reconcile_busy_is_a_noop(client, monkeypatch):
+    fake_history(monkeypatch, {})
+    assert foxden._reconcile_lock.acquire(blocking=False)
+    try:
+        r = client.post("/api/foxden/recent/reconcile?force=true").json()
+    finally:
+        foxden._reconcile_lock.release()
+    assert r["skipped"] == "busy"
+
+
+def test_reconcile_survives_huge_history(client, env, monkeypatch):
+    """Real history is 50MB+: the fetch must be bounded (max_items) with a long
+    timeout, and a multi-MB body must still parse and find the orphan."""
+    pad = {"1": {"class_type": "Pad", "inputs": {"blob": "x" * 2000}}}
+    big = {f"junk-{i}": {"status": {"status_str": "success", "completed": True, "messages": []},
+                         "outputs": {"9": {"images": [{"filename": f"ComfyUI_{i:05d}_.png",
+                                                       "subfolder": "", "type": "output"}]}},
+                         "prompt": [i, f"junk-{i}", pad, {}, []]}
+           for i in range(3000)}
+    big["pid-needle"] = orphan_entry("pid-needle", "foxden_00042_.png")
+    assert len(json.dumps(big)) > 6_000_000
+    seen = fake_history(monkeypatch, big)
+    r = client.post("/api/foxden/recent/reconcile").json()
+    assert r["added"] == 1 and r["scanned"] == 3001
+    hist_calls = [(p, t) for p, t in seen if p.startswith("/history")]
+    assert len(hist_calls) == 1
+    path, timeout = hist_calls[0]
+    assert "max_items=500" in path and timeout >= 120
+
+
+def test_reconcile_failure_modes_are_loud(client, monkeypatch):
+    fake_comfy(monkeypatch, {"/history": foxden.ComfyDown("refused")})
+    assert client.post("/api/foxden/recent/reconcile?force=true").status_code == 502
+    fake_comfy(monkeypatch, {"/history": (500, {"error": "boom"})})
+    assert client.post("/api/foxden/recent/reconcile?force=true").status_code == 502
+    fake_comfy(monkeypatch, {"/history": (200, [1, 2])})            # wrong shape
+    assert client.post("/api/foxden/recent/reconcile?force=true").status_code == 502
