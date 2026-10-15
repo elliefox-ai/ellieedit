@@ -117,3 +117,15 @@ Context: the one-off backfill (2026-10-14) worked — render `foxden_00002_.png`
 7. **Named presets**: save the complete FoxDen form state under a user-chosen name — prompt, workflow, aspect (or input image), seed (optional: save seed or leave random — checkbox "lock seed"), steps, denoise, LoRA pins + suspended tray with strengths, input image reference. Server-backed: `GET/POST/DELETE /api/foxden/presets` storing JSON at `data/foxden/presets.json` (same dir as recent.jsonl). Frontend: preset picker (dropdown or chip row) + 💾 save button prompting for name; applying a preset restores the full form; delete with confirm. Tablet-first: no hover, 44px targets.
 8. **Auto-remember last state**: the form persists itself (server-side same store, key `_last`, or localStorage with server sync) — reload/sleep/crash restores the in-progress composition instead of a blank form. Recent's `Reuse settings` remains the per-render shortcut; presets are the deliberate bookmarks.
 9. Tests: preset CRUD round-trip, apply restores every field incl. suspended tray and input image ref, auto-remember survives a fresh client, delete-with-confirm contract.
+
+---
+
+## Task 6 (added 2026-10-15 09:15, operator request) — FaceCycle image visibility: zoom + pan
+
+Operator goal: more visibility of the working image. A tall portrait shrinks into whatever vertical space remains after the status bar + thumb strip. Design decision made by Ellie (operator deferred): **NO vertical/horizontal layout switch** — it doubles layout states and still letterboxes portraits. Instead:
+
+1. **Zoom slider** on the canvas area: fit (default) ↔ 300%. Above fit, the container scrolls to pan (the .fc-canvas-wrap scroll now works correctly after the auto-margin centering fix, 2026-10-15c). A "Fit" button returns instantly. Zoom level persists in localStorage.
+2. **CRITICAL INVARIANT — pointer math:** CanvasStack.eventToWorld() (canvas-stack.js ~line 115) normalizes via `canvas.width / rect.width` from getBoundingClientRect, so CSS scaling is safe ONLY if both this.canvas AND the absolutely-positioned overlayCanvas scale in exact lockstep (same computed CSS size; overlay has no maxWidth set — verify). Test this: mock a rect larger than canvas.width, assert world coords unchanged. Every stroke/mask/region must land identically at 300% as at fit.
+3. Suggested mechanism: set canvas.style.maxWidth/maxHeight = 'none' when zoom > fit, drive explicit CSS px width/height = fitSize × zoom on both canvases; fit = current behavior (max 100%). Avoid transform:scale — it does not expand scrollable overflow, so panning breaks.
+4. Touch: canvas has touch-action:none (paint priority). Panning while zoomed: container scroll via scrollbar/edges is poor on tablet — consider two-finger pan on the wrap (second non-primary pointer already ignored by the paint path) as the pan gesture; document the choice in the verify file.
+5. Tests: pointer invariant test (above), zoom persistence, fit-button reset, overlay/canvas lockstep at zoom extremes.

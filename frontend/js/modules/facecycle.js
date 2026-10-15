@@ -309,8 +309,13 @@ export class FaceCycle {
         }));
         await this.handleFiles(files);
         // Visible receipt: the status bar names exactly what was handed off.
+        // Long names are middle-ellipsized so the band stays one line and the
+        // canvas keeps its vertical space (operator feedback 2026-10-15).
+        const mid = (s, max = 34) => s.length <= max ? s : s.slice(0, Math.ceil(max / 2) - 1) + '…' + s.slice(-Math.floor(max / 2));
+        const list = files.map(f => mid(f.name)).join(', ');
+        const full = files.map(f => f.name).join(', ');
         const src = meld ? 'Dupe family' : 'Gallery';
-        this.el.statusBar.innerHTML = `<span class="badge" style="color:#8ad08a">→ ${files.length} image${files.length !== 1 ? 's' : ''} handed off from ${src}:</span> ${files.map(f => f.name).join(', ')}`;
+        this.el.statusBar.innerHTML = `<span class="badge" style="color:#8ad08a" title="${full.replace(/"/g, '&quot;')}">→ ${files.length} image${files.length !== 1 ? 's' : ''} handed off from ${src}:</span> <span title="${full.replace(/"/g, '&quot;')}">${list}</span>`;
       } catch (err) {
         alert('FaceCycle handoff failed: ' + err.message);
       }
