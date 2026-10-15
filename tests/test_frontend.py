@@ -73,3 +73,24 @@ def test_js_gallery_path_helpers():
     )
     assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
     assert "PASS" in r.stdout
+
+
+def test_js_foxden_recent_helpers():
+    """FoxDen recent-strip collapse persistence + count label (Task 5)."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "foxden-recent.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+    assert "PASS" in r.stdout
+
+
+def test_js_deploy_gate_covers_foxden():
+    """The Safari-syntax deploy gate must parse FoxDen's modules too."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "syntax-check.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"syntax gate failed:\n{r.stdout}\n{r.stderr}"
+    assert "ok js/modules/foxden.js" in r.stdout
+    assert "ok js/modules/foxden-recent.js" in r.stdout

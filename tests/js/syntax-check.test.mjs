@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'frontend');
 const files = ['index.html', 'js/shell.js', 'sw.js',
-  ...['gallery', 'facecycle', 'review', 'dupe'].map(m => `js/modules/${m}.js`)];
+  ...['gallery', 'facecycle', 'review', 'dupe', 'foxden', 'foxden-recent'].map(m => `js/modules/${m}.js`)];
 
 for (const rel of files) {
   if (rel.endsWith('.html')) {

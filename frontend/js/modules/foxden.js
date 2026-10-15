@@ -3,6 +3,7 @@
 // Generate -> poll status -> inline outputs (tap to enlarge) + recent strip.
 // Backend: /api/foxden/*. No frameworks, no build step.
 import { registerModule } from '../shell.js';
+import { readCollapsed, writeCollapsed, recentLabel } from './foxden-recent.js';
 
 const API = '/api/foxden';
 const PRESETS = { landscape: [1024, 576], portrait: [576, 1024] };
@@ -43,7 +44,14 @@ registerModule({
         </div>
         <div class="fx-out" data-id="out"></div>
       </div>
-      <div class="fx-recent" data-id="recent"><span class="lbl">recent</span></div>
+      <div class="fx-recentwrap" data-id="recentwrap">
+        <div class="fx-rbar">
+          <button class="ee-btn fx-btn" data-id="refresh" aria-label="Refresh recent renders" title="Refresh">⟳</button>
+          <button class="ee-btn fx-btn" data-id="rtoggle" aria-expanded="true" aria-label="Collapse recent renders">▾</button>
+          <span class="lbl" data-id="rcount">recent</span>
+        </div>
+        <div class="fx-recent" data-id="recent"></div>
+      </div>
       <div class="fx-big" data-id="big">
         <div class="bar"><span class="meta" data-id="bigmeta"></span>
           <button class="ee-btn fx-btn" data-id="reuse">↺ Reuse settings</button>
@@ -53,8 +61,8 @@ registerModule({
     </div>`;
     const $ = id => panel.querySelector(`[data-id="${id}"]`);
     const el = Object.fromEntries(['conn', 'wf', 'prompt', 'aspects', 'seed', 'dice',
-      'lcount', 'lfilter', 'loras', 'go', 'status', 'out', 'recent', 'big', 'bigmeta',
-      'reuse', 'bigclose', 'bigimg'].map(k => [k, $(k)]));
+      'lcount', 'lfilter', 'loras', 'go', 'status', 'out', 'recent', 'recentwrap',
+      'refresh', 'rtoggle', 'rcount', 'big', 'bigmeta', 'reuse', 'bigclose', 'bigimg'].map(k => [k, $(k)]));
 
     let aspect = 'landscape';
     let allLoras = [];
@@ -195,19 +203,58 @@ registerModule({
       renderLoras();
       el.bigclose.click();
     });
+    // ── recent strip: load, reconcile, collapse ──
+    let recentTotal = 0;
+    function countLabel(extra = '') {
+      el.rcount.textContent = recentLabel(recentTotal, extra);
+    }
     async function loadRecent() {
       try {
-        const { items } = await api('/recent?limit=16');
-        el.recent.innerHTML = '<span class="lbl">recent</span>';
+        const { items, total } = await api('/recent?limit=16');
+        recentTotal = total ?? items.length;
+        el.recent.innerHTML = '';
         for (const it of items) for (const u of it.urls) el.recent.appendChild(thumb(u, true, it));
-        if (!items.length) el.recent.innerHTML += '<span class="lbl">none yet</span>';
+        if (!items.length) el.recent.innerHTML = '<span class="lbl">none yet</span>';
+        countLabel();
       } catch (e) { jobbar.textContent = ''; }
     }
+    // Adopt renders ComfyUI finished while nobody was polling (tab left, device
+    // slept). Server throttles non-forced calls; the refresh button forces.
+    async function reconcile(force) {
+      try {
+        const r = await api('/recent/reconcile' + (force ? '?force=true' : ''), { method: 'POST' });
+        if (r.added && !force) await loadRecent();
+        return r;
+      } catch (e) { el.rcount.title = e.message; return null; }
+    }
+    async function refreshRecent() {
+      el.refresh.disabled = true; el.refresh.classList.add('spin');
+      try {
+        const r = await reconcile(true);
+        await loadRecent();                 // always reload, even if reconcile failed
+        if (r === null) countLabel(' · refresh failed (tap ⟳ to retry)');
+        else if (r.added) countLabel(` · adopted ${r.added}`);
+      } finally { el.refresh.disabled = false; el.refresh.classList.remove('spin'); }
+    }
+    el.refresh.addEventListener('click', refreshRecent);
+
+    function setCollapsed(on, persist = true) {
+      el.recentwrap.classList.toggle('collapsed', on);
+      el.rtoggle.textContent = on ? '▸' : '▾';
+      el.rtoggle.setAttribute('aria-expanded', String(!on));
+      el.rtoggle.setAttribute('aria-label', on ? 'Expand recent renders' : 'Collapse recent renders');
+      if (persist) writeCollapsed(window.localStorage, on);
+    }
+    setCollapsed(readCollapsed(window.localStorage), false);
+    const toggleRecent = () => setCollapsed(!el.recentwrap.classList.contains('collapsed'));
+    el.rtoggle.addEventListener('click', toggleRecent);
+    el.rcount.addEventListener('click', toggleRecent);
 
     loadConfig();
     loadRecent();
+    reconcile(false);
     window.addEventListener('ellieedit:tab-activated', e => {
-      if (e.detail?.name === 'foxden') { loadConfig(); loadRecent(); }
+      if (e.detail?.name === 'foxden') { loadConfig(); loadRecent(); reconcile(false); }
     });
   },
 });

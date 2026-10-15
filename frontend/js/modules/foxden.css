@@ -24,8 +24,13 @@
 .fx-status.ok { color:#7de08a; }
 .fx-out { display:flex; gap:10px; flex-wrap:wrap; align-content:flex-start; }
 .fx-out img { max-width:100%; max-height:62vh; border-radius:8px; border:2px solid #2a2a44; background:#0f0f1a; }
-.fx-recent { display:flex; gap:6px; padding:8px 12px; overflow-x:auto; border-top:1px solid #2a2a44;
-             background:#12121f; flex-shrink:0; align-items:center; min-height:84px; }
+.fx-recentwrap { border-top:1px solid #2a2a44; background:#12121f; flex-shrink:0; }
+.fx-rbar { display:flex; gap:6px; align-items:center; padding:2px 12px; min-height:48px; }
+.fx-rbar .lbl { font-size:11px; color:#8a8aaa; flex:1; min-height:44px; display:flex; align-items:center; cursor:pointer; }
+.fx-btn.spin { animation:fx-spin 1s linear infinite; }
+@keyframes fx-spin { to { transform:rotate(360deg); } }
+.fx-recent { display:flex; gap:6px; padding:4px 12px 8px; overflow-x:auto; align-items:center; min-height:76px; }
+.fx-recentwrap.collapsed .fx-recent { display:none; }
 .fx-recent .lbl { font-size:10px; color:#5a5a7a; flex-shrink:0; }
 .fx-recent img { height:64px; width:auto; border-radius:6px; border:2px solid #2a2a44; flex-shrink:0; }
 .fx-big { position:absolute; inset:0; z-index:60; background:rgba(8,8,16,0.96);
