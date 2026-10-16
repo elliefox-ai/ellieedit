@@ -415,7 +415,7 @@ export class FaceCycle {
         // Kept so the receipt SURVIVES the analyze pass overwriting the status
         // band (updateStatusBar re-renders it with the middle-ellipsized names).
         this.handoffReceipt = { src, list, full: full.replace(/"/g, '&quot;') };
-        this.el.statusBar.innerHTML = `<span class="badge" style="color:#8ad08a" title="${full.replace(/"/g, '&quot;')}">→ ${files.length} image${files.length !== 1 ? 's' : ''} handed off from ${src}:</span> <span title="${full.replace(/"/g, '&quot;')}">${list}</span>`;
+        this.el.statusBar.innerHTML = `<span class="badge" style="color:#8ad08a" title="${full.replace(/"/g, '&quot;')}">→ ${files.length} image${files.length !== 1 ? 's' : ''} from ${src}</span>`;
       } catch (err) {
         alert('FaceCycle handoff failed: ' + err.message);
       }
@@ -693,9 +693,10 @@ export class FaceCycle {
   updateStatusBar() {
     const n = this.state.activeRegions.length;
     const manualCount = this.state.activeRegions.filter(r => r.manual).length;
-    // Handoff receipt (compressed names, 2026-10-15) survives every re-render.
+    // Handoff receipt (2026-10-16d): badge only — full names live in the hover
+    // tooltip; Alexander never reads them inline.
     const receipt = this.handoffReceipt
-      ? ` <span class="badge" style="color:#8ad08a" title="${this.handoffReceipt.full}">→ from ${this.handoffReceipt.src}:</span> <span class="help" title="${this.handoffReceipt.full}">${this.handoffReceipt.list}</span>`
+      ? ` <span class="badge" style="color:#8ad08a" title="${this.handoffReceipt.full}">→ from ${this.handoffReceipt.src}</span>`
       : '';
 
     // Buttons derive from the SELECTED REGION's status only.
