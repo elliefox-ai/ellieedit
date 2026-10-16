@@ -168,6 +168,7 @@ function panelHTML() {
       <button class="ee-btn gal-btn toggled" data-act="view-active">Active</button>
       <button class="ee-btn gal-btn" data-act="view-pending">🗑 Deletion (<span data-id="pending-count">0</span>)</button>
     </div>
+    <button class="ee-btn gal-btn" data-act="refresh" title="Check the current folder for new/removed files — cheap: does nothing when nothing changed, in-place update otherwise">⟳ Refresh</button>
     <button class="ee-btn gal-btn" data-act="select-mode">☰ Select</button>
     <button class="ee-btn gal-btn danger" data-act="delete-mode" title="Mark images for pending delete">🚨</button>
   </div>
@@ -293,6 +294,7 @@ export class Gallery {
     }
     this.el.pdDeleteAll.addEventListener('click', () => this.pdConfirmStep());
     act('pd-audit').addEventListener('click', () => this.pdAudit());
+    act('refresh').addEventListener('click', () => this.cheapRefresh());
   }
 
   async pdAudit() {
@@ -330,6 +332,11 @@ export class Gallery {
       this.syncManifest().then(() => { this.flashChampion(); this.maybeFill(); });
     });
     window.addEventListener('ellieedit:pending-changed', () => this.syncManifest());
+    // FaceCycle Replace saved a new file into the current folder: add it in place.
+    window.addEventListener('ellieedit:gallery-file-added', e => {
+      const p = e.detail?.path;
+      if (p && this.isVisible()) this.insertNewTop(p);
+    });
     window.addEventListener('ellieedit:ladder-complete', e => {
       this.championPath = e.detail?.champion?.path || null;
       this.championPending = !!this.championPath;
@@ -957,6 +964,47 @@ export class Gallery {
     });
     this.el.grid.appendChild(cell);
     this.io.observe(cell);
+    return cell;
+  }
+
+  // ── Manual gallery updates (2026-10-16g) — no full reload ──
+  // FaceCycle Replace just saved a new file server-side; slide it in at the
+  // top of the Active grid without refetching the listing. Folder cells stay
+  // above images, matching loadMore's first-page layout.
+  insertNewTop(path) {
+    if (this.viewFilter !== 'active') return;   // other views refresh on activation
+    if (this.items.some(i => i.path === path)) return;
+    const item = { path, name: path.split('/').pop() };
+    this.items.unshift(item);
+    const cell = this.addCell(item, 0);
+    const firstImage = [...this.el.grid.children].find(c => !c.classList.contains('folder'));
+    this.el.grid.insertBefore(cell, firstImage || null);
+    this.updateStatus();
+    this.applyBadges();
+  }
+
+  // Cheap refresh: fetch ONE page of the current listing and compare paths.
+  // Unchanged → "up to date" in the status line, zero grid churn. Changed →
+  // reload keeping scroll position (the rare path; still no wipe-and-jump).
+  async cheapRefresh() {
+    if (this.loading) return;
+    const el0 = this.el.status.textContent;
+    this.el.status.textContent = 'Checking…';
+    try {
+      const p = new URLSearchParams({ dir: this.viewFilter === 'pending' ? '' : this.dir, pending: this.viewFilter });
+      const j = await fetch('/api/gallery/list?' + p).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+      const fresh = (j.items || []).map(i => i.path);
+      const known = this.items.slice(0, fresh.length).map(i => i.path);
+      const same = fresh.length === known.length && fresh.every((v, k) => v === known[k]);
+      if (same) {
+        this.el.status.textContent = 'Up to date · ' + el0;
+        setTimeout(() => { if (this.el.status.textContent.startsWith('Up to date · ')) this.el.status.textContent = el0; }, 2500);
+      } else {
+        await this.reload({ keepPosition: true });
+      }
+    } catch (err) {
+      this.el.status.textContent = 'Refresh failed: ' + err.message;
+    }
   }
 
   // ---- viewer ------------------------------------------------------------

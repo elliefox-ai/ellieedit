@@ -2215,7 +2215,9 @@ export class FaceCycle {
           { detail: { family, saved_as: j.saved_as } }));
       } else {
         this.el.statusBar.textContent = `♻ Saved ${j.saved_as} · ${j.pending_added} source${j.pending_added !== 1 ? 's' : ''} queued for deletion`;
-        alert(`Saved ${j.saved_as}\n${j.pending_added} source image${j.pending_added !== 1 ? 's' : ''} sent to the deletion queue.`);
+        // Manual gallery update (2026-10-16g): no alert, no gallery reload —
+        // the Gallery slides the new file into its grid in place.
+        window.dispatchEvent(new CustomEvent('ellieedit:gallery-file-added', { detail: { path: j.saved_as } }));
       }
     } catch (err) {
       alert('Replace sources failed: ' + err.message);
