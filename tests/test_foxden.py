@@ -668,6 +668,11 @@ def test_denoise_one_parity_everything_else_identical(g, monkeypatch):
     samp = _only_node(new, "SamplerCustomAdvanced")
     new[samp]["inputs"]["sigmas"] = new[sid]["inputs"]["sigmas"]
     del new[sid]
+    # Node IDs shift when the splice joins the graph (SaveImage lands one
+    # higher). Parity is wiring, not ID values — re-key to compare.
+    def _saveimg_key(graph):
+        return next(k for k, v in graph.items() if v.get("class_type") == "SaveImage")
+    new[_saveimg_key(old)] = new.pop(_saveimg_key(new))
     assert new == old
 
 
