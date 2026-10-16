@@ -42,8 +42,10 @@ function panelHTML() {
     .fc-drop p { color: #8a8aaa; font-size: 15px; }
     .fc-drop p.hint { font-size: 12px; color: #4a4a6c; }
     .fc-main { display: none; flex: 1; flex-direction: column; padding: 12px 20px 16px; gap: 10px; min-height: 0; }
-    .fc-status { font-size: 12px; color: #6c6c8e; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-    .fc-status .badge { background: #2a2a44; padding: 2px 8px; border-radius: 10px; font-size: 11px; color: #b0b0d0; }
+    /* 2026-10-16d — compact band: one short line, long guidance lives in the
+       hover tooltip, not inline. */
+    .fc-status { font-size: 12px; color: #6c6c8e; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; white-space: nowrap; }
+    .fc-status .badge { background: #2a2a44; padding: 1px 7px; border-radius: 10px; font-size: 11px; color: #b0b0d0; }
     .fc-status .help { color: #6c6c8e; }
     .fc-canvas-wrap { flex: 1; display: flex; overflow: auto; min-height: 0; }
     .fc-canvas-wrap > * { margin: auto; }
@@ -729,14 +731,17 @@ export class FaceCycle {
       return;
     }
 
+    // Compact band (2026-10-16d): short badges only; the long guidance sentence
+    // rides on the band's title tooltip. Alexander rarely reads it inline.
+    const bandTitle = 'Click a region to cycle · Right-click to go back · Drag tabs to move/resize · H toggles overlays · Del removes selected';
+    this.el.statusBar.title = bandTitle;
     let parts = [];
-    parts.push(`<span class="badge">${n} region${n !== 1 ? 's' : ''}</span>`);
-    if (manualCount > 0) parts.push(`<span class="badge" style="color:#e8b84d">${manualCount} manual</span>`);
+    parts.push(`<span class="badge">${n} reg${n !== 1 ? 's' : ''}</span>`);
+    if (manualCount > 0) parts.push(`<span class="badge" style="color:#e8b84d" title="manual regions">${manualCount} man</span>`);
     let modeIndicator = '';
-    if (this.clickToAddMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">👆 Click Face active</span>';
-    if (this.drawBoxMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">✏️ Draw Box active</span>';
-    if (this.drawMaskMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">🖌️ Draw Mask — click a region to edit its mask · paint adds (box auto-grows) · Enter=apply · Esc=reset · E=erase · ,/. = brush size</span>';
-    parts.push('<span class="help">Click a region to cycle • Right-click to go back • Drag tabs to move/resize • H toggles overlays • Del removes selected</span>');
+    if (this.clickToAddMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">👆 add</span>';
+    if (this.drawBoxMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">✏️ box</span>';
+    if (this.drawMaskMode) modeIndicator = ' <span class="badge" style="color:#e8b84d" title="Draw Mask — click a region to edit its mask · paint adds (box auto-grows) · Enter=apply · Esc=reset · E=erase · ,/. = brush size">🖌 mask</span>';
     this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + statusBadge + maskHint + runBadge + gensBadge + receipt;
   }
 
