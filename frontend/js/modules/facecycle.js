@@ -76,14 +76,17 @@ function panelHTML() {
       background:#1d2438; border-top:1px solid #2f5a8a; }
     .fc-meld-bar .msg { font-size:12px; color:#7ab8e8; flex:1; }
     /* Replace sources (work order 2026-10-13): result lands next to the BASE
-       image, every source goes to the deletion queue. */
-    .fc-replace-bar { display:none; align-items:center; gap:10px; padding:8px 16px;
-      background:#1f2a1f; border-top:1px solid #3d6a3d; }
-    .fc-replace-bar .msg { font-size:12px; color:#8ad08a; flex:1; }
-    .fc-replace-bar.disabled { background:#222; border-top-color:#444; }
-    .fc-replace-bar.disabled .msg { color:#888; }
+       image, every source goes to the deletion queue. 2026-10-16c: button lives
+       in the top row next to New Images (tinted), warning text dropped — the
+       tooltip carries the destination info. */
+    .ee-btn.warn { background:#5a3a2a; border-color:#8a5a3a; color:#f0c8a8; }
+    .ee-btn.warn:disabled { opacity:.45; }
     .thumb .basetag { position:absolute; top:2px; left:2px; background:#7a6aaa; color:#fff;
       font-size:9px; padding:1px 4px; border-radius:2px; font-family:monospace; }
+    /* 2026-10-16c — retracting drawers (tools band + media strip): toggling only
+       flips the hidden attribute on a wrapper — never canvas/region/undo state. */
+    .fc-drawer[hidden] { display:none; }
+    .fc-drawer-toggle.active-toggle { border-color:#7a6aaa; color:#c8b8ee; }
     /* Task 7 rev.2 — bottom sheets (Repaint / Detect). Fixed-position, so opening
        never changes layout or the canvas box. */
     .fc-sheet-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:900; }
@@ -105,10 +108,13 @@ function panelHTML() {
     <div class="fc-row top">
       <h1>FaceCycle <span class="subtitle">— pick the best variant for each changed region</span></h1>
       <div class="fc-row">
+        <button class="ee-btn" data-act="toggle-tools" aria-expanded="false" title="Show/hide the draw + generate controls">⚙ Tools</button>
+        <button class="ee-btn warn" data-act="replace-sources" style="display:none" title="Writes the result next to the base image; every source goes to the deletion queue">♻ Replace sources</button>
         <button class="ee-btn" data-act="reset">New Images</button>
         <button class="ee-btn primary" data-act="export" disabled>Export</button>
       </div>
     </div>
+    <div class="fc-drawer" data-id="tools-drawer" hidden>
     <div class="fc-row" data-group="controls">
       <button class="ee-btn" data-act="draw-box">✏️ Draw Box</button>
       <button class="ee-btn" data-act="draw-mask">🖌️ Draw Mask</button>
@@ -130,6 +136,7 @@ function panelHTML() {
         <button class="ee-btn" data-act="zoom-fit">Fit</button></span>
       <div class="fc-gens" data-id="gen-strip"></div>
     </div>
+    </div>
   </div>
   <div class="fc-drop" data-id="drop-zone">
     <div class="icon">📁</div>
@@ -144,12 +151,11 @@ function panelHTML() {
       <button class="ee-btn primary" data-act="meld-save" style="min-height:40px">💾 Save back → family</button>
       <button class="ee-btn" data-act="meld-cancel" style="min-height:40px">✕ Cancel</button>
     </div>
-    <div class="fc-replace-bar" data-id="replace-bar">
-      <span class="msg" data-id="replace-msg"></span>
-      <button class="ee-btn primary" data-act="replace-sources" style="min-height:40px">♻ Replace sources</button>
-    </div>
     <div class="fc-canvas-wrap" data-id="canvas-container"></div>
+    <button class="ee-btn fc-drawer-toggle" data-act="toggle-thumbs" aria-expanded="false" style="align-self:flex-start" title="Show/hide the media strip (drop images here too)">🎞 Media</button>
+    <div class="fc-drawer" data-id="thumbs-drawer" hidden>
     <div class="fc-thumbs" data-id="thumbnail-strip"></div>
+    </div>
   </div>
   <div class="fc-sheet-backdrop" data-id="sheet-backdrop"></div>
   <div class="fc-sheet" data-sheet="repaint" role="dialog" aria-label="Repaint" aria-hidden="true">
@@ -192,7 +198,8 @@ export class FaceCycle {
       statusBar: $('status-bar'), exportBtn: act('export'), resetBtn: act('reset'),
       meldBar: $('meld-bar'), meldMsg: $('meld-msg'),
       meldSaveBtn: act('meld-save'), meldCancelBtn: act('meld-cancel'),
-      replaceBar: $('replace-bar'), replaceMsg: $('replace-msg'), replaceBtn: act('replace-sources'),
+      replaceBtn: act('replace-sources'), toolsDrawer: $('tools-drawer'),
+      thumbsDrawer: $('thumbs-drawer'),
       removeAllBtn: act('remove-all'), detectBtn: act('detect'), clickAddBtn: act('click-add'),
       drawBoxBtn: act('draw-box'), drawMaskBtn: act('draw-mask'),
       brushControls: $('brush-controls'), brushSizeSlider: $('brush-size'),
@@ -338,6 +345,9 @@ export class FaceCycle {
     this.el.clickAddBtn.addEventListener('click', () => this.sheets.close());
     const paintDot = () => { const d = pq('[data-id="repaint-dot"]'); if (d) d.textContent = this.el.repaintPromptInput.value.trim() ? '●' : ''; };
     this.el.repaintPromptInput.addEventListener('input', paintDot);
+    // Drawers: toggling flips `hidden` on wrappers only — never canvas state.
+    pq('[data-act="toggle-tools"]').addEventListener('click', e => this.toggleDrawer(this.el.toolsDrawer, e.currentTarget));
+    pq('[data-act="toggle-thumbs"]').addEventListener('click', e => this.toggleDrawer(this.el.thumbsDrawer, e.currentTarget));
     this.el.keepBtn.addEventListener('click', () => this.commitPending());
     this.el.discardBtn.addEventListener('click', () => this.discardAction());
     this.el.undoBtn.addEventListener('click', () => this.undo());
@@ -402,6 +412,9 @@ export class FaceCycle {
         const list = files.map(f => mid(f.name)).join(', ');
         const full = files.map(f => f.name).join(', ');
         const src = meld ? 'Dupe family' : 'Gallery';
+        // Kept so the receipt SURVIVES the analyze pass overwriting the status
+        // band (updateStatusBar re-renders it with the middle-ellipsized names).
+        this.handoffReceipt = { src, list, full: full.replace(/"/g, '&quot;') };
         this.el.statusBar.innerHTML = `<span class="badge" style="color:#8ad08a" title="${full.replace(/"/g, '&quot;')}">→ ${files.length} image${files.length !== 1 ? 's' : ''} handed off from ${src}:</span> <span title="${full.replace(/"/g, '&quot;')}">${list}</span>`;
       } catch (err) {
         alert('FaceCycle handoff failed: ' + err.message);
@@ -460,6 +473,7 @@ export class FaceCycle {
 
   // ── File loading ──
   async handleFiles(files) {
+    this.handoffReceipt = null;   // a fresh stack gets a fresh receipt
     const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
     if (imageFiles.length < 1 && this.state.images.length === 0) {
       alert('Please drop at least 1 image.');
@@ -679,6 +693,10 @@ export class FaceCycle {
   updateStatusBar() {
     const n = this.state.activeRegions.length;
     const manualCount = this.state.activeRegions.filter(r => r.manual).length;
+    // Handoff receipt (compressed names, 2026-10-15) survives every re-render.
+    const receipt = this.handoffReceipt
+      ? ` <span class="badge" style="color:#8ad08a" title="${this.handoffReceipt.full}">→ from ${this.handoffReceipt.src}:</span> <span class="help" title="${this.handoffReceipt.full}">${this.handoffReceipt.list}</span>`
+      : '';
 
     // Buttons derive from the SELECTED REGION's status only.
     const selRegion = this.state.activeRegions.find(r => r.id === this.selectedRegionId);
@@ -706,7 +724,7 @@ export class FaceCycle {
       : '';
 
     if (n === 0) {
-      this.el.statusBar.innerHTML = '<span class="badge">' + (this.state.images.length < 2 ? 'Editor ready — draw a box (B) or click a region' : 'No changes detected') + '</span> <span class="help">' + (this.state.images.length < 2 ? 'Type a prompt (or leave empty), select a box, Generate to repaint.' : 'Try lowering sensitivity or min region size.') + '</span>' + statusBadge + maskHint + runBadge + gensBadge;
+      this.el.statusBar.innerHTML = '<span class="badge">' + (this.state.images.length < 2 ? 'Editor ready — draw a box (B) or click a region' : 'No changes detected') + '</span> <span class="help">' + (this.state.images.length < 2 ? 'Type a prompt (or leave empty), select a box, Generate to repaint.' : 'Try lowering sensitivity or min region size.') + '</span>' + statusBadge + maskHint + runBadge + gensBadge + receipt;
       return;
     }
 
@@ -718,7 +736,17 @@ export class FaceCycle {
     if (this.drawBoxMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">✏️ Draw Box active</span>';
     if (this.drawMaskMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">🖌️ Draw Mask — click a region to edit its mask · paint adds (box auto-grows) · Enter=apply · Esc=reset · E=erase · ,/. = brush size</span>';
     parts.push('<span class="help">Click a region to cycle • Right-click to go back • Drag tabs to move/resize • H toggles overlays • Del removes selected</span>');
-    this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + statusBadge + maskHint + runBadge + gensBadge;
+    this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + statusBadge + maskHint + runBadge + gensBadge + receipt;
+  }
+
+  // ── Drawers (2026-10-16c): toggling flips `hidden` on a wrapper div only —
+  // the controls inside keep every data-id/handler, so nothing about canvas,
+  // regions, undo or in-flight generations can be disturbed. ──
+  toggleDrawer(drawer, btn) {
+    const open = drawer.hidden;      // about to open
+    drawer.hidden = !open;
+    if (btn) { btn.setAttribute('aria-expanded', String(open)); btn.classList.toggle('active-toggle', open); }
+    return open;
   }
 
   // ── Rendering ──
@@ -2179,14 +2207,13 @@ export class FaceCycle {
   }
 
   paintReplaceBar() {
-    if (!this.el.replaceBar) return;
+    if (!this.el.replaceBtn) return;
     const hasImages = this.state.images.length > 0;
-    this.el.replaceBar.style.display = hasImages ? 'flex' : 'none';
+    this.el.replaceBtn.style.display = hasImages ? '' : 'none';
     if (!hasImages) return;
     const info = this.replaceInfo();
-    this.el.replaceBar.classList.toggle('disabled', !info.ok);
     this.el.replaceBtn.disabled = !info.ok;
-    this.el.replaceMsg.textContent = info.ok
+    this.el.replaceBtn.title = info.ok
       ? `♻ Result → ${info.folder}/ (next to base ${info.base.name}). ${info.srcs.length} source${info.srcs.length !== 1 ? 's' : ''} → deletion queue.`
       : info.hint;
   }

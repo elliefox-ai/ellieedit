@@ -242,3 +242,33 @@ def test_task7_sheets_never_touch_canvas_state_and_shortcuts_survive():
     assert ".fc-sheet { position:fixed;" in src
     # 44px targets inside sheets
     assert ".fc-sheet-body .ee-btn, .fc-sheet-head .ee-btn { min-height:44px; min-width:44px; }" in src
+
+
+# ------------------------------------------------------- drawers + receipt (2026-10-16c)
+def test_facecycle_drawers_default_closed_and_only_flip_hidden():
+    """Tools + media drawers: wrappers hidden by default; the toggle handler only
+    flips the hidden attribute + aria state — no canvas/region/undo contact."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "facecycle.js").read_text()
+    html = src[src.index("function panelHTML"):src.index("export class FaceCycle")]
+    assert 'data-id="tools-drawer" hidden' in html
+    assert 'data-id="thumbs-drawer" hidden' in html
+    for act in ('data-act="toggle-tools"', 'data-act="toggle-thumbs"'):
+        assert html.count(act) == 1, act
+    # toggle handler contract: hidden flip + aria only
+    assert "drawer.hidden = !open;" in src
+    assert "btn.setAttribute('aria-expanded', String(open))" in src
+    # replace sources moved to the top row, tinted, no warning bar
+    assert 'data-act="replace-sources"' in html[:html.index('data-group="controls"')]
+    assert 'class="ee-btn warn"' in html
+    assert "fc-replace-bar" not in src and "replace-msg" not in src
+
+
+def test_facecycle_handoff_receipt_survives_status_rerender():
+    """The middle-ellipsized filename receipt (2026-10-15) is stored on the
+    instance and re-rendered by updateStatusBar instead of being overwritten."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "facecycle.js").read_text()
+    assert "this.handoffReceipt = { src, list, full" in src
+    us = src[src.index("updateStatusBar() {"):]
+    assert "const receipt = this.handoffReceipt" in us
+    assert us.count("+ receipt;") == 2          # both branches re-attach it
+    assert src.count("this.handoffReceipt = null;") == 1   # fresh stack clears it
