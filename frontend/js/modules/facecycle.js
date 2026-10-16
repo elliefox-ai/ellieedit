@@ -53,6 +53,9 @@ function panelHTML() {
     .fc-thumbs.drag-over { border-color: #7a6aaa; background: rgba(90,74,138,0.08); }
     /* Task 10: kept gens live IN the layers row (keep/discard/undo/layer-toggle),
        right-aligned — no extra bar, no canvas-height cost. */
+    .fc-zoom { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:#9a9ab8; }
+    .fc-zoom input[type=range] { width: 90px; }
+    .fc-zoom .val { min-width: 34px; font-family: monospace; }
     .fc-gens { display: none; margin-left: auto; max-width: 45%; gap: 4px; padding: 2px 6px; background: #12121f; border: 1px solid #2a2a44; border-radius: 8px; overflow-x: auto; align-items: center; }
     .fc-gens .label { font-size: 10px; color: #6c6c8e; flex-shrink: 0; margin-right: 2px; }
     .gen-thumb { position: relative; flex-shrink: 0; border: 2px solid transparent; border-radius: 4px; overflow: hidden; cursor: pointer; }
@@ -114,6 +117,10 @@ function panelHTML() {
       <button class="ee-btn" data-act="discard">✕ Discard</button>
       <button class="ee-btn" data-act="undo">↩ Undo</button>
       <button class="ee-btn" data-act="layer-toggle">👁 Edit layer: On</button>
+      <span class="fc-zoom" title="Zoom the working image (two-finger drag pans on touch)">🔍
+        <input type="range" data-id="zoom-slider" min="100" max="300" step="10" value="100" aria-label="Zoom">
+        <span class="val" data-id="zoom-val">Fit</span>
+        <button class="ee-btn" data-act="zoom-fit">Fit</button></span>
       <div class="fc-gens" data-id="gen-strip"></div>
     </div>
   </div>
@@ -163,6 +170,7 @@ export class FaceCycle {
       generateBtn: act('generate'),
       keepBtn: act('keep'), discardBtn: act('discard'), undoBtn: act('undo'),
       layerToggleBtn: act('layer-toggle'),
+      zoomSlider: $('zoom-slider'), zoomVal: $('zoom-val'), zoomFitBtn: act('zoom-fit'),
       threshold: $('threshold'), thresholdVal: $('threshold-val'),
       minSize: $('min-size'), minSizeVal: $('min-size-val'),
       maxSize: $('max-size'), maxSizeVal: $('max-size-val'),
@@ -213,6 +221,7 @@ export class FaceCycle {
       onPointerCancel: () => this.onPointerCancel(),
     });
     this.stack.opts.drawUnder = (ctx, opts) => this.drawRegionState(ctx, opts);
+    this.initZoom();
     this.stack.opts.drawContent = (ctx, opts) => this.drawOverlays(ctx, opts);
     this.undoLog = []; // transitions { region, before, after } for Undo
 
@@ -351,7 +360,9 @@ export class FaceCycle {
       this.onKeyDownInner(e);
     });
 
-    window.addEventListener('resize', this.onResize = () => { if (this.state.images.length) this.render(); });
+    window.addEventListener('resize', this.onResize = () => {
+      if (this.state.images.length) { this.stack.setZoom(this.stack.zoom); this.render(); }
+    });
   }
 
   resetAll() {
@@ -2057,6 +2068,44 @@ export class FaceCycle {
     } catch (err) {
       alert('Meld save-back failed: ' + err.message);
     }
+  }
+
+  // ── Zoom + pan (Task 6) ───────────────────────────────────────────────
+  // Fit (default) ↔ 300%. Above fit the .fc-canvas-wrap scrolls. Level
+  // persists in localStorage. Touch pan = two-finger drag on the wrap (the
+  // paint path ignores non-primary pointers, so a second finger is free);
+  // mouse users pan with scrollbars/wheel.
+  initZoom() {
+    const KEY = 'ellieedit.facecycle.zoom';
+    let pct = 100;
+    try { pct = Number(localStorage.getItem(KEY)) || 100; } catch (e) {}
+    this.setZoomPct = (v, persist = true) => {
+      pct = Math.min(300, Math.max(100, Math.round(Number(v) || 100)));
+      this.stack.setZoom(pct / 100);
+      this.el.zoomSlider.value = String(pct);
+      this.el.zoomVal.textContent = pct === 100 ? 'Fit' : pct + '%';
+      if (persist) { try { localStorage.setItem(KEY, String(pct)); } catch (e) {} }
+      if (this.state.images.length) this.render();
+    };
+    this.el.zoomSlider.addEventListener('input', () => this.setZoomPct(this.el.zoomSlider.value));
+    this.el.zoomFitBtn.addEventListener('click', () => this.setZoomPct(100));
+    this.stack.zoom = pct / 100;                       // applied on first setSize
+    this.el.zoomSlider.value = String(pct);
+    this.el.zoomVal.textContent = pct === 100 ? 'Fit' : pct + '%';
+    const c = this.el.canvasContainer, touches = new Map();
+    c.addEventListener('pointerdown', e => {
+      if (e.pointerType === 'touch') touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }, true);
+    c.addEventListener('pointermove', e => {
+      const t = touches.get(e.pointerId);
+      if (!t) return;
+      const dx = e.clientX - t.x, dy = e.clientY - t.y;
+      t.x = e.clientX; t.y = e.clientY;
+      if (touches.size >= 2) { c.scrollLeft -= dx / touches.size; c.scrollTop -= dy / touches.size; }
+    }, true);
+    const up = e => touches.delete(e.pointerId);
+    c.addEventListener('pointerup', up, true);
+    c.addEventListener('pointercancel', up, true);
   }
 
   // ── Replace sources (work order 2026-10-13, Task 8/9 revision) ───────

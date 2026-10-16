@@ -17,6 +17,7 @@ export class CanvasStack {
     this.opts = opts;
     this.width = 0;
     this.height = 0;
+    this.zoom = 1;          // 1 = fit (default); >1 scales both canvases in lockstep
 
     this.wrap = document.createElement('div');
     this.wrap.style.position = 'relative';
@@ -55,6 +56,35 @@ export class CanvasStack {
   setSize(w, h) {
     this.width = w; this.height = h;
     this.canvas.width = w; this.canvas.height = h;
+    this._applyZoom();
+  }
+
+  /** Zoom: 1 = fit (current max-100% behavior), up to 3 (300% of the fit size).
+   *  Drives explicit CSS px width/height on the canvas (NOT transform:scale —
+   *  transforms don't grow scrollable overflow, so panning would break). The
+   *  overlay is re-synced to the canvas's laid-out box right after, so both
+   *  canvases always share one computed CSS size; eventToWorld() normalizes by
+   *  canvas.width / rect.width and is therefore zoom-invariant. */
+  setZoom(z) {
+    this.zoom = Math.min(3, Math.max(1, Number(z) || 1));
+    this._applyZoom();
+    return this.zoom;
+  }
+
+  _applyZoom() {
+    const cv = this.canvas, st = cv.style;
+    // Always measure the FIT size first (clear any explicit size).
+    st.width = ''; st.height = '';
+    st.maxWidth = '100%'; st.maxHeight = '100%';
+    if (this.zoom > 1 && this.width) {
+      const fw = cv.offsetWidth, fh = cv.offsetHeight;
+      if (fw && fh) {
+        st.maxWidth = 'none'; st.maxHeight = 'none';
+        st.width = (fw * this.zoom) + 'px';
+        st.height = (fh * this.zoom) + 'px';
+      }
+    }
+    if (this.width) this.ensureOverlay();
   }
 
   setCursor(c) { this.canvas.style.cursor = c; }
@@ -121,6 +151,8 @@ export class CanvasStack {
 
   // ── Full stack render ──
   render(opts = {}) {
+    // zoom couldn't be applied while hidden (offsetWidth 0) — retry once visible
+    if (this.zoom > 1 && !this.canvas.style.width) this._applyZoom();
     this.canvas.width = this.width;
     this.canvas.height = this.height;
     if (this.baseData) this.ctx.putImageData(this.baseData, 0, 0);

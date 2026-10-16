@@ -110,3 +110,19 @@ def test_kept_gens_share_the_layers_row():
     assert 'data-id="gen-strip"' not in main, "no gens bar below the canvas"
     assert html.count('data-id="gen-strip"') == 1
     assert "margin-left: auto" in html[html.index(".fc-gens {"):html.index(".fc-gens .label")]
+
+
+def test_facecycle_zoom_controls_and_persistence():
+    """Task 6: slider (fit..300%), Fit button, localStorage persistence,
+    two-finger touch pan; zoom is CSS-width driven (never transform:scale)."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "facecycle.js").read_text()
+    for needle in ('data-id="zoom-slider"', 'min="100"', 'max="300"',
+                   'data-act="zoom-fit"', "ellieedit.facecycle.zoom",
+                   "localStorage.getItem(KEY)", "localStorage.setItem(KEY",
+                   "touches.size >= 2"):
+        assert needle in src, needle
+    cs = (HERE.parent / "frontend" / "js" / "components" / "canvas-stack.js").read_text()
+    assert "transform" not in cs.split("setZoom")[1].split("render(opts")[0], \
+        "zoom must not use transform:scale (breaks scrollable overflow)"
+    # fit button resets to 100 through the same persisted setter
+    assert "zoomFitBtn.addEventListener('click', () => this.setZoomPct(100))" in src
