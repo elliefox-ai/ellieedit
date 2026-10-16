@@ -97,14 +97,14 @@ def test_js_deploy_gate_covers_foxden():
 
 
 def test_kept_gens_share_the_layers_row():
-    """Task 10: the gen strip is a child of the repaint/layers row, right-aligned,
-    not a separate block under the canvas; data-id unchanged."""
+    """Task 10, revised 2026-10-16f: the tools drawer is ONE row now; the gen
+    strip still lives in it, right-aligned; data-id unchanged."""
     src = (HERE.parent / "frontend" / "js" / "modules" / "facecycle.js").read_text()
     html = src[src.index("function panelHTML"):src.index("export class FaceCycle")]
-    row_start = html.index('data-group="repaint"')
-    row_end = html.index('<div class="fc-drop"')
+    row_start = html.index('data-id="tools-drawer"')
+    row_end = html.index('data-id="repaint-drawer"')
     row = html[row_start:row_end]
-    assert 'data-id="gen-strip"' in row, "gen strip must live inside the layers row"
+    assert 'data-id="gen-strip"' in row, "gen strip must live inside the tools drawer row"
     assert row.index('data-act="layer-toggle"') < row.index('data-id="gen-strip"')
     main = html[html.index('data-id="main-view"'):]
     assert 'data-id="gen-strip"' not in main, "no gens bar below the canvas"
@@ -195,53 +195,59 @@ def _fc_html():
 
 
 def test_task7_every_control_keeps_its_id_and_lives_in_the_right_surface():
-    """Three surfaces: main band (draw/erase/undo/Generate...), 🖌 Repaint sheet,
-    🔍 Detect sheet. Every pre-existing data-id/data-act survives, exactly once."""
+    """Revised 2026-10-16f: two surfaces — main band (ONE tools-drawer row) and
+    the repaint drawer (in-flow, offsets canvas). Detect is retired: no sheet
+    markup, no detect/click-add controls; its diff sliders moved to the tools row.
+    Every surviving data-id/data-act appears exactly once."""
     _, html = _fc_html()
-    band = html[html.index('data-group="controls"'):html.index('data-id="sheet-backdrop"')]
-    rep = html[html.index('data-sheet="repaint"'):html.index('data-sheet="detect"')]
-    det = html[html.index('data-sheet="detect"'):]
+    band = html[html.index('data-id="tools-drawer"'):html.index('data-id="repaint-drawer"')]
+    rep = html[html.index('data-id="repaint-drawer"'):html.index('<div class="fc-canvas-wrap"')]
     for i in OLD_IDS + ["zoom-slider", "zoom-val"]:
+        if i in ("face-mode",):
+            continue
         assert html.count(f'data-id="{i}"') == 1, i
     for a in OLD_ACTS:
+        if a in ("detect", "click-add", "open-detect", "sheet-close"):
+            assert html.count(f'data-act="{a}"') == 0, a
+            continue
         assert html.count(f'data-act="{a}"') == 1, a
-    # main band: draw tools, erase/brush, undo, Generate (+ keep/discard/layers row)
+    # tools drawer is ONE row: draw tools, erase/brush, undo, Generate, keep/discard,
+    # layers, zoom — plus the diff sliders (retired from the Detect sheet)
     for x in ('data-act="draw-box"', 'data-act="draw-mask"', 'data-act="erase"',
               'data-id="brush-controls"', 'data-act="undo"', 'data-act="generate"',
-              'data-act="keep"', 'data-act="discard"', 'data-act="open-repaint"',
-              'data-act="open-detect"'):
+              'data-act="keep"', 'data-act="discard"',
+              'data-id="threshold"', 'data-id="min-size"', 'data-id="max-size"'):
         assert x in band, x
-    # Repaint sheet: prompt + repaint options + its own Generate (same handler)
+    assert band.count('<div class="fc-row"') == 1, "tools drawer must be a single row"
+    # repaint drawer: prompt + repaint options + its own Generate (same handler)
     for x in ('data-id="repaint-prompt"', 'data-id="denoise"', 'data-id="seed-input"',
               'data-id="randomize-seed"', 'data-id="detail-crop"',
               'data-id="variant-count"', 'data-act="generate-sheet"'):
         assert x in rep, x
-    # Detect sheet: detection + diff sensitivity + min/max region (one diff engine)
-    for x in ('data-act="detect"', 'data-act="click-add"', 'data-id="face-mode"',
-              'data-id="threshold"', 'data-id="min-size"', 'data-id="max-size"'):
-        assert x in det, x
-    # nothing detection/repaint-specific left in the everyday band
-    for gone in ('data-id="threshold"', 'data-id="repaint-prompt"', 'data-act="detect"'):
-        assert gone not in band, gone
+    # Detect UI is fully retired
+    assert 'data-sheet=' not in html and 'sheet-backdrop' not in html
 
 
 def test_task7_sheets_never_touch_canvas_state_and_shortcuts_survive():
-    src, _ = _fc_html()
+    """Revised 2026-10-16f: sheets replaced by in-flow drawers. The drawer toggle
+    contract (hidden + aria only) plus shortcut/generator invariants survive."""
+    src, html = _fc_html()
     ctl = (HERE.parent / "frontend" / "js" / "modules" / "facecycle-sheets.js").read_text()
     for forbidden in ("render(", "resetAll", "ensureOverlay", "setSize", "processImages",
                       "undoLog", "activeRegions", "stack"):
         assert forbidden not in ctl, f"sheet controller must not touch {forbidden}"
-    # Escape closes an open sheet BEFORE the mask-mode Escape handling
-    assert src.index("e.key === 'Escape' && this.sheets.isOpen()") < src.index("if (e.target.tagName === 'INPUT'")
+    # drawer toggles never touch canvas state: hidden flip + aria only
+    assert "drawer.hidden = !open;" in src
+    assert "btn.setAttribute('aria-expanded', String(open))" in src
+    assert src.count("this.toggleDrawer(") == 3   # tools, thumbs, repaint
     # shortcuts untouched (F/B/M still wired at document level)
     for k in ("e.key === 'f'", "e.key === 'b'", "e.key === 'm'"):
         assert k in src
-    # sheet Generate + Enter use the one generateRepaint handler
+    # drawer Generate + Enter use the one generateRepaint handler
     assert src.count("this.generateRepaint()") >= 3
-    # sheets are fixed-position (no layout/canvas-box impact)
-    assert ".fc-sheet { position:fixed;" in src
-    # 44px targets inside sheets
-    assert ".fc-sheet-body .ee-btn, .fc-sheet-head .ee-btn { min-height:44px; min-width:44px; }" in src
+    # repaint drawer is in-flow (offsets the canvas), not fixed overlay
+    assert 'data-id="repaint-drawer" hidden' in html
+    assert "position:fixed" not in html[html.index('data-id="repaint-drawer"') - 2000:html.index('data-id="repaint-drawer"')]
 
 
 # ------------------------------------------------------- drawers + receipt (2026-10-16c)
