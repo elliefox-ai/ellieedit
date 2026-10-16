@@ -178,3 +178,10 @@ A kept repaint generation currently adds its own bar below the canvas, compressi
   4. **Workflow metadata transfer is best-effort, not critical:** if embedding generation metadata into the output PNG is cheap (e.g., tEXt chunk with the handoff source + generation params), do it; if it turns out to need new plumbing, skip and note in the verify file.
   5. No dupe-family/gallery provenance at all → method hidden or disabled with a hint (nowhere to return the result).
 - Tests: result lands in base image's folder with non-clobbering name; sources hit the correct queue per provenance type; multi-folder set uses base image's folder; no-confirm contract; metadata presence if implemented.
+
+### Task 6 revision (2026-10-15 22:34, operator live feedback) — slider inverted, fit is the baseline
+Operator's actual need is the OPPOSITE of the built default: he wants to shrink the working image below fit (overview/margin in the workspace), not enlarge it. Changes:
+1. **Invert the slider range**: fit (100%) is the DEFAULT and the slider's rest position; the useful travel is DOWNWARD (fit → 25%, smaller than fit). If keeping zoom-in is cheap, allow the full 25%–300% range with 100% at its default position and the scale clearly oriented small-left/big-right — but the operator's stated need is shrink; do not let zoom-in complicate the default experience.
+2. Fit button stays; zoom persistence stays.
+3. This pairs with Task 7 (menu segmentation): the row is more crowded than ever — Task 7's modal pass is the actual decongestion fix and should be treated as higher priority now. When Task 7 lands, evaluate whether zoom + Fit stay in the row or move into it.
+4. Tests: default = fit on fresh load; slider range covers sub-fit; persistence unchanged; row layout unchanged from 15i.
