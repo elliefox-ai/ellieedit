@@ -1,6 +1,7 @@
 """FoxDen tests — workflow editing, status normalization, config, upload.
 No live ComfyUI: backend.routers.foxden._comfy is monkeypatched."""
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -615,3 +616,152 @@ def test_corrupt_presets_file_is_set_aside_not_fatal(client, env):
     assert client.get("/api/foxden/presets").json() == {"presets": [], "last": None}
     assert client.post("/api/foxden/presets", json={"name": "ok", "state": {}}).status_code == 200
     assert (env / "data" / "presets.json.corrupt").is_file()
+
+
+# ------------------------------------------- denoise + img2img (add.5, rev 10-16)
+
+def _by_class(g, cls):
+    return {k: n for k, n in g.items() if n["class_type"] == cls}
+
+
+def split_sigmas(sigmas, denoise):
+    """Replica of ComfyUI's SplitSigmasDenoise (for the parity maths test)."""
+    total = round(max(len(sigmas) - 1, 0) * denoise)
+    return sigmas[:-total] if total else sigmas[:0], sigmas[-(total + 1):]
+
+
+def test_denoise_one_is_the_full_schedule_and_trim_math():
+    sig = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]                   # 5 steps -> 6 sigmas
+    assert split_sigmas(sig, 1.0)[1] == sig                  # identity: txt2img parity
+    assert split_sigmas(sig, 0.6)[1] == sig[-4:]             # 3 of 5 steps sampled
+    assert len(split_sigmas(sig, 0.2)[1]) == 2               # 1 step
+
+
+@pytest.mark.parametrize("g", graphs())
+def test_klein_always_injects_split_sigmas_with_sent_value(g):
+    for d in (1.0, 0.55, 0.1):
+        wf = foxden.apply_edits(g, "p", 1, denoise=d)
+        splits = _by_class(wf, "SplitSigmasDenoise")
+        assert len(splits) == 1, "unconditional: exactly one, txt2img too"
+        (sid, sn), = splits.items()
+        samp = _only_node(wf, "SamplerCustomAdvanced")
+        sched = _only_node(wf, "Flux2Scheduler")
+        assert sn["inputs"] == {"sigmas": [sched, 0], "denoise": d}
+        assert wf[samp]["inputs"]["sigmas"] == [sid, 1]      # tail schedule is sampled
+        foxden.validate_graph(wf)
+    assert not _by_class(wf, "LoadImage")                    # txt2img: no image chain
+
+
+def _only_node(g, cls):
+    hits = _by_class(g, cls)
+    assert len(hits) == 1
+    return next(iter(hits))
+
+
+@pytest.mark.parametrize("g", graphs())
+def test_denoise_one_parity_everything_else_identical(g, monkeypatch):
+    """Strip the splice -> exactly the pre-denoise graph (one parity test)."""
+    new = foxden.apply_edits(g, "a fox", 7, 1024, 576, [L("x.safetensors", .5)], 6, denoise=1.0)
+    monkeypatch.setattr(foxden, "wire_denoise", lambda wf, d: None)
+    old = foxden.apply_edits(g, "a fox", 7, 1024, 576, [L("x.safetensors", .5)], 6, denoise=1.0)
+    sid = _only_node(new, "SplitSigmasDenoise")
+    samp = _only_node(new, "SamplerCustomAdvanced")
+    new[samp]["inputs"]["sigmas"] = new[sid]["inputs"]["sigmas"]
+    del new[sid]
+    assert new == old
+
+
+def test_graph_without_denoise_support_renders_unchanged(monkeypatch):
+    g = copy.deepcopy(KLEIN)
+    g["733"]["class_type"] = "SomeOtherSampler"               # can't consume denoise
+    a = foxden.apply_edits(g, "p", 3, denoise=1.0)
+    b = foxden.apply_edits(g, "p", 3, denoise=0.3)
+    assert a == b and not _by_class(b, "SplitSigmasDenoise")
+    assert foxden.wire_denoise(copy.deepcopy(g), 0.3) is None
+
+
+def test_native_denoise_input_is_wired_not_duplicated():
+    g = copy.deepcopy(KLEIN)
+    g["733"]["class_type"] = "KSampler"
+    g["733"]["inputs"]["denoise"] = 1.0                      # graph carries its own
+    wf = foxden.apply_edits(g, "p", 3, denoise=0.4)
+    assert wf["733"]["inputs"]["denoise"] == 0.4
+    assert not _by_class(wf, "SplitSigmasDenoise")
+    g2 = copy.deepcopy(KLEIN)                                # workflow shipping a split
+    g2["740"] = {"class_type": "SplitSigmasDenoise", "inputs": {"sigmas": ["731", 0], "denoise": 1.0}}
+    g2["733"]["inputs"]["sigmas"] = ["740", 1]
+    wf2 = foxden.apply_edits(g2, "p", 3, denoise=0.25)
+    assert len(_by_class(wf2, "SplitSigmasDenoise")) == 1
+    assert wf2["740"]["inputs"]["denoise"] == 0.25
+
+
+@pytest.mark.parametrize("g", graphs())
+def test_img2img_graph_edits_compose_with_loras_and_denoise(g):
+    wf = foxden.apply_edits(g, "p", 5, 1024, 576,
+                            [L("a.safetensors", .7), L("b.safetensors", 1.2)],
+                            denoise=0.6, input_image="fox in.png")
+    li = _only_node(wf, "LoadImage"); enc = _only_node(wf, "VAEEncode")
+    samp = _only_node(wf, "SamplerCustomAdvanced")
+    assert wf[li]["inputs"] == {"image": "fox in.png"}
+    vae_link = wf[_only_node(wf, "VAEDecode")]["inputs"]["vae"]
+    assert wf[enc]["inputs"] == {"pixels": [li, 0], "vae": vae_link}
+    assert wf[samp]["inputs"]["latent_image"] == [enc, 0]    # rewired off the empty latent
+    assert not _by_class(wf, "EmptyFlux2LatentImage")        # orphan dropped
+    sched = wf[_only_node(wf, "Flux2Scheduler")]["inputs"]
+    assert (sched["width"], sched["height"]) == (1024, 576)  # scheduler keeps the size
+    assert len(_by_class(wf, "LoraLoaderModelOnly")) == 2    # loras still chained
+    guider = wf[_only_node(wf, "CFGGuider")]["inputs"]["model"]
+    assert wf[guider[0]]["class_type"] == "LoraLoaderModelOnly"
+    assert wf[_only_node(wf, "SplitSigmasDenoise")]["inputs"]["denoise"] == 0.6
+    foxden.validate_graph(wf)
+    ids = list(wf); assert len(ids) == len(set(ids))
+
+
+def test_txt2img_unchanged_without_input_image():
+    wf = foxden.apply_edits(KLEIN, "p", 1, 1024, 576)
+    assert not _by_class(wf, "LoadImage") and not _by_class(wf, "VAEEncode")
+    assert wf[_only_node(wf, "SamplerCustomAdvanced")]["inputs"]["latent_image"] == ["729", 0]
+    assert wf["729"]["inputs"]["width"] == 1024
+
+
+def test_generate_denoise_always_accepted_and_recorded(client, env, monkeypatch):
+    calls = fake_comfy(monkeypatch, {
+        "/prompt": (200, {"prompt_id": "pid-d", "node_errors": {}}),
+        "/history/pid-d": (200, {"pid-d": hist(outputs={"736": {"images": [IM]}})}),
+        "/view?": (200, b"PNGBYTES"),
+    })
+    # omitted -> default 1.0 still spliced; explicit values accepted incl. extremes
+    assert client.post("/api/foxden/generate", json={"prompt": "a", "seed": 1}).status_code == 200
+    for d in (0.0, 0.35, 1.0):
+        assert client.post("/api/foxden/generate", json={"prompt": "a", "seed": 1, "denoise": d}).status_code == 200
+    sent = [json.loads(c[1])["prompt"] for c in calls if c[0].endswith("/prompt")]
+    assert [wf[_only_node(wf, "SplitSigmasDenoise")]["inputs"]["denoise"] for wf in sent] == [1.0, 0.0, 0.35, 1.0]
+    for bad in (-0.1, 1.01):
+        assert client.post("/api/foxden/generate", json={"prompt": "a", "denoise": bad}).status_code == 400
+
+
+def test_generate_img2img_roundtrip_recorded_for_reuse(client, env, monkeypatch):
+    calls = fake_comfy(monkeypatch, {
+        "/prompt": (200, {"prompt_id": "pid-i", "node_errors": {}}),
+        "/history/pid-i": (200, {"pid-i": hist(outputs={"736": {"images": [IM]}})}),
+        "/view?": (200, b"PNGBYTES"),
+    })
+    r = client.post("/api/foxden/generate", json={
+        "prompt": "a", "seed": 9, "denoise": 0.45, "input_image": "fox.png",
+        "width": 1000, "height": 600})
+    assert r.status_code == 200, r.text
+    wf = json.loads(calls[0][1])["prompt"]
+    assert wf[_only_node(wf, "LoadImage")]["inputs"]["image"] == "fox.png"
+    assert wf[_only_node(wf, "Flux2Scheduler")]["inputs"]["width"] == 1008    # snap16
+    assert client.get("/api/foxden/status/pid-i").json()["state"] == "done"
+    e = json.loads((env / "data" / "recent.jsonl").read_text().splitlines()[0])
+    assert e["denoise"] == 0.45 and e["input_image"] == "fox.png"
+    for bad in ("../x.png", "/etc/passwd", "C:\\x.png", "  "):
+        assert client.post("/api/foxden/generate",
+                           json={"prompt": "a", "input_image": bad}).status_code == 400
+
+
+def test_reconcile_recovers_denoise_and_input_image_from_graph():
+    wf = foxden.apply_edits(KLEIN, "p", 2, 1024, 576, denoise=0.7, input_image="fox.png")
+    m = foxden._meta_from_graph(wf)
+    assert m["denoise"] == 0.7 and m["input_image"] == "fox.png"

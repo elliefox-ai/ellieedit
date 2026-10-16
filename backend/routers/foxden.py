@@ -200,9 +200,71 @@ def snap16(n: int) -> int:
     return max(64, min(4096, int(n / 16 + 0.5) * 16))
 
 
+def wire_denoise(wf: dict, denoise: float) -> str | None:
+    """Per-workflow denoise wiring (work order add.5 revision 2026-10-16).
+    The interface always SENDS denoise; whether the graph consumes it:
+      'native' -> the graph already carries a literal `denoise` input
+                  (KSampler-style, or a workflow that ships SplitSigmasDenoise):
+                  set every one of them to the value.
+      'split'  -> klein-style advanced pipeline (SamplerCustomAdvanced fed by a
+                  sigmas link, no denoise input anywhere): ALWAYS splice a
+                  SplitSigmasDenoise between the scheduler and the sampler —
+                  unconditional, txt2img and img2img alike. Output slot 1 is the
+                  tail (low-sigma) schedule that is actually sampled; at
+                  denoise 1.0 it is the full schedule, i.e. identical to the
+                  un-spliced graph.
+      None     -> can't consume it: nothing wired, graph untouched."""
+    d = float(denoise)
+    native = [k for k, n in wf.items()
+              if isinstance(n["inputs"].get("denoise"), (int, float))
+              and not isinstance(n["inputs"].get("denoise"), bool)]
+    if native:
+        for k in native:
+            wf[k]["inputs"]["denoise"] = d
+        return "native"
+    samplers = [k for k, n in wf.items()
+                if n["class_type"] == "SamplerCustomAdvanced"
+                and is_link(n["inputs"].get("sigmas"))]
+    if len(samplers) == 1:
+        sid = samplers[0]
+        nid = str(_next_id(wf))
+        wf[nid] = {"class_type": "SplitSigmasDenoise",
+                   "inputs": {"sigmas": list(wf[sid]["inputs"]["sigmas"]),
+                              "denoise": d}}
+        wf[sid]["inputs"]["sigmas"] = [nid, 1]
+        return "split"
+    return None
+
+
+def inject_input_image(wf: dict, name: str) -> None:
+    """img2img on a graph with no upstream image chain (klein): LoadImage ->
+    VAEEncode -> SamplerCustomAdvanced.latent_image, replacing the
+    EmptyFlux2LatentImage link. The VAE is the one the graph already decodes
+    with. The now-unreferenced empty-latent node is dropped."""
+    sid = _only(wf, "SamplerCustomAdvanced")
+    vae = wf[_only(wf, "VAEDecode")]["inputs"].get("vae")
+    if not is_link(vae):
+        raise HTTPException(400, "VAEDecode.vae is not a link; cannot encode input image")
+    old = wf[sid]["inputs"].get("latent_image")
+    lid = str(_next_id(wf))
+    wf[lid] = {"class_type": "LoadImage", "inputs": {"image": name}}
+    eid = str(_next_id(wf))
+    wf[eid] = {"class_type": "VAEEncode",
+               "inputs": {"pixels": [lid, 0], "vae": list(vae)}}
+    wf[sid]["inputs"]["latent_image"] = [eid, 0]
+    if is_link(old) and wf.get(old[0], {}).get("class_type", "").startswith("Empty"):
+        still_used = any(v == old for n in wf.values()
+                         for v in n["inputs"].values() if is_link(v))
+        if not still_used:
+            del wf[old[0]]
+
+
 def apply_edits(wf: dict, prompt: str, seed: int, width=None, height=None,
-                loras=(), steps=None) -> dict:
-    """Return an edited DEEP COPY. LoRAs chain loader -> l1 -> l2 -> guider."""
+                loras=(), steps=None, denoise: float = 1.0,
+                input_image: str | None = None) -> dict:
+    """Return an edited DEEP COPY. LoRAs chain loader -> l1 -> l2 -> guider.
+    `denoise` is always supplied (default 1.0); wire_denoise decides whether
+    the graph consumes it. `input_image` switches to img2img."""
     wf = copy.deepcopy(wf)
     s = find_slots(wf)
     pid, pkey = s["prompt"]
@@ -212,6 +274,10 @@ def apply_edits(wf: dict, prompt: str, seed: int, width=None, height=None,
         raise HTTPException(400, "give both width and height, or neither")
     if width is not None:
         for nid in s["size"]:                 # BOTH literal sites (729 + 731)
+            # img2img: the image IS the latent source, so only the scheduler
+            # (whose sigma shift depends on resolution) takes the size.
+            if input_image and "Latent" in wf[nid]["class_type"]:
+                continue
             wf[nid]["inputs"]["width"] = snap16(width)
             wf[nid]["inputs"]["height"] = snap16(height)
     if steps is not None:
@@ -227,12 +293,15 @@ def apply_edits(wf: dict, prompt: str, seed: int, width=None, height=None,
                               "strength_model": float(lo.strength_model)}}
         prev = [nid, 0]
     wf[s["guider"]]["inputs"]["model"] = prev
+    if input_image:
+        inject_input_image(wf, input_image)
+    wire_denoise(wf, denoise)
     # Baselines exported from the UI carry PreviewImage (temp outputs), which
     # ComfyUI purges and our status filter rightly ignores. Inject a real
     # SaveImage so renders persist as type=output (2026-10-14 inaugural).
     if not any(n["class_type"] == "SaveImage" for n in wf.values()):
         vae = _only(wf, "VAEDecode")
-        wf[str(nxt)] = {"class_type": "SaveImage",
+        wf[str(_next_id(wf))] = {"class_type": "SaveImage",
                         "inputs": {"images": [vae, 0],
                                    "filename_prefix": "foxden"}}
     validate_graph(wf)
@@ -293,6 +362,11 @@ class GenerateBody(BaseModel):
     # "Reuse settings" can restore the tray faithfully.
     suspended_loras: list[LoraSpec] = []
     steps: int | None = None
+    # First-class and ALWAYS sent (interface law, work order add.5 revision
+    # 2026-10-16): whether the graph consumes it is wire_denoise's business.
+    # Stored in recent/presets/Reuse either way.
+    denoise: float = 1.0
+    input_image: str | None = None          # name from /inputs or /upload (img2img)
 
 
 def _node_errors_text(resp: dict) -> str:
@@ -313,6 +387,13 @@ def generate(body: GenerateBody):
         raise HTTPException(400, "prompt is empty")
     if body.steps is not None and not (1 <= body.steps <= 150):
         raise HTTPException(400, "steps must be 1..150")
+    if not 0.0 <= body.denoise <= 1.0:
+        raise HTTPException(400, "denoise must be 0.0..1.0")
+    if body.input_image is not None:
+        n = body.input_image.replace("\\", "/")
+        if (not n.strip() or len(n) > 255 or n.startswith("/") or ".." in n.split("/")
+                or ":" in n):
+            raise HTTPException(400, "invalid input_image name")
     if len(body.loras) > 8:
         raise HTTPException(400, "at most 8 LoRAs")
     avail = set(scan_loras())
@@ -323,7 +404,8 @@ def generate(body: GenerateBody):
             raise HTTPException(400, f"unknown LoRA: {lo.name}")
     seed = body.seed if body.seed is not None else random.randrange(2 ** 31)
     wf = apply_edits(load_workflow(body.workflow), body.prompt, seed,
-                     body.width, body.height, body.loras, body.steps)
+                     body.width, body.height, body.loras, body.steps,
+                     body.denoise, body.input_image)
     try:
         status, resp = _json(
             "/prompt", data=json.dumps({"prompt": wf}).encode(),
@@ -345,6 +427,7 @@ def generate(body: GenerateBody):
         "width": body.width, "height": body.height, "steps": body.steps,
         "loras": [lo.model_dump() for lo in body.loras],
         "suspended_loras": [lo.model_dump() for lo in body.suspended_loras],
+        "denoise": body.denoise, "input_image": body.input_image,
         "submitted": time.time(),
     }
     return {"prompt_id": pid, "seed": seed, "workflow": body.workflow}
@@ -442,6 +525,8 @@ def _log_recent(pid: str, images: list[dict]) -> None:
     entry = {k: meta[k] for k in ("prompt", "workflow", "seed", "width",
                                   "height", "steps", "loras")}
     entry["suspended_loras"] = meta.get("suspended_loras", [])
+    entry["denoise"] = meta.get("denoise", 1.0)
+    entry["input_image"] = meta.get("input_image")
     entry.update(prompt_id=pid, ts=int(time.time()),
                  outputs=[{"filename": i["filename"],
                            "subfolder": i.get("subfolder", ""),
@@ -554,6 +639,12 @@ def _meta_from_graph(graph) -> dict:
             meta["width"], meta["height"] = ins.get("width"), ins.get("height")
         if sl["steps"]:
             meta["steps"] = graph[sl["steps"][0]]["inputs"].get("steps")
+        for n in graph.values():
+            dn = n.get("inputs", {}).get("denoise")
+            if isinstance(dn, (int, float)) and not isinstance(dn, bool):
+                meta["denoise"] = float(dn)
+            if n.get("class_type") == "LoadImage" and isinstance(n["inputs"].get("image"), str):
+                meta["input_image"] = n["inputs"]["image"]
         for nid in sorted((k for k, n in graph.items() if k.isdigit()
                            and n.get("class_type") == "LoraLoaderModelOnly"),
                           key=int):
