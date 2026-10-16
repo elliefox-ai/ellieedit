@@ -94,3 +94,19 @@ def test_js_deploy_gate_covers_foxden():
     assert r.returncode == 0, f"syntax gate failed:\n{r.stdout}\n{r.stderr}"
     assert "ok js/modules/foxden.js" in r.stdout
     assert "ok js/modules/foxden-recent.js" in r.stdout
+
+
+def test_kept_gens_share_the_layers_row():
+    """Task 10: the gen strip is a child of the repaint/layers row, right-aligned,
+    not a separate block under the canvas; data-id unchanged."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "facecycle.js").read_text()
+    html = src[src.index("function panelHTML"):src.index("export class FaceCycle")]
+    row_start = html.index('data-group="repaint"')
+    row_end = html.index('<div class="fc-drop"')
+    row = html[row_start:row_end]
+    assert 'data-id="gen-strip"' in row, "gen strip must live inside the layers row"
+    assert row.index('data-act="layer-toggle"') < row.index('data-id="gen-strip"')
+    main = html[html.index('data-id="main-view"'):]
+    assert 'data-id="gen-strip"' not in main, "no gens bar below the canvas"
+    assert html.count('data-id="gen-strip"') == 1
+    assert "margin-left: auto" in html[html.index(".fc-gens {"):html.index(".fc-gens .label")]

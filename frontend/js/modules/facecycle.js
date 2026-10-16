@@ -51,7 +51,9 @@ function panelHTML() {
       overflow-x: auto; border: 1px solid #2a2a44; transition: border-color .2s, background .2s;
     }
     .fc-thumbs.drag-over { border-color: #7a6aaa; background: rgba(90,74,138,0.08); }
-    .fc-gens { display: none; gap: 4px; padding: 6px 8px; background: #12121f; border: 1px solid #2a2a44; border-radius: 8px; overflow-x: auto; align-items: center; }
+    /* Task 10: kept gens live IN the layers row (keep/discard/undo/layer-toggle),
+       right-aligned — no extra bar, no canvas-height cost. */
+    .fc-gens { display: none; margin-left: auto; max-width: 45%; gap: 4px; padding: 2px 6px; background: #12121f; border: 1px solid #2a2a44; border-radius: 8px; overflow-x: auto; align-items: center; }
     .fc-gens .label { font-size: 10px; color: #6c6c8e; flex-shrink: 0; margin-right: 2px; }
     .gen-thumb { position: relative; flex-shrink: 0; border: 2px solid transparent; border-radius: 4px; overflow: hidden; cursor: pointer; }
     .gen-thumb.current { border-color: #7de08a; }
@@ -112,6 +114,7 @@ function panelHTML() {
       <button class="ee-btn" data-act="discard">✕ Discard</button>
       <button class="ee-btn" data-act="undo">↩ Undo</button>
       <button class="ee-btn" data-act="layer-toggle">👁 Edit layer: On</button>
+      <div class="fc-gens" data-id="gen-strip"></div>
     </div>
   </div>
   <div class="fc-drop" data-id="drop-zone">
@@ -133,7 +136,6 @@ function panelHTML() {
     </div>
     <div class="fc-canvas-wrap" data-id="canvas-container"></div>
     <div class="fc-thumbs" data-id="thumbnail-strip"></div>
-    <div class="fc-gens" data-id="gen-strip"></div>
   </div>`;
 }
 
