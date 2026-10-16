@@ -5,6 +5,7 @@
 // (selected box → in-progress painted mask → last painted-mask region),
 // denoise slider driving BasicScheduler server-side.
 
+import { createSheetController } from './facecycle-sheets.js';
 import { registerModule } from '../shell.js';
 import { CanvasStack, drawFeatheredSource } from '../components/canvas-stack.js';
 import { JobPanel } from '../components/jobpanel.js';
@@ -83,6 +84,22 @@ function panelHTML() {
     .fc-replace-bar.disabled .msg { color:#888; }
     .thumb .basetag { position:absolute; top:2px; left:2px; background:#7a6aaa; color:#fff;
       font-size:9px; padding:1px 4px; border-radius:2px; font-family:monospace; }
+    /* Task 7 rev.2 — bottom sheets (Repaint / Detect). Fixed-position, so opening
+       never changes layout or the canvas box. */
+    .fc-sheet-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:900; }
+    .fc-sheet-backdrop.open { display:block; }
+    .fc-sheet { position:fixed; left:0; right:0; bottom:0; z-index:901; max-height:70vh; overflow:auto;
+      background:#161628; border-top:1px solid #3a3a5a; border-radius:14px 14px 0 0; padding:8px 16px 18px;
+      transform:translateY(100%); visibility:hidden; transition:transform .18s ease, visibility 0s .18s; }
+    .fc-sheet.open { transform:none; visibility:visible; transition:transform .18s ease; }
+    @media (min-width: 900px) { .fc-sheet { left:50%; right:auto; width:560px; margin-left:-280px; } }
+    .fc-sheet-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
+    .fc-sheet-body label { display:flex; align-items:center; gap:8px; margin:8px 0; font-size:13px; color:#c0c0d8; }
+    .fc-sheet-body input[type=text] { flex:1; min-height:44px; }
+    .fc-sheet-body input[type=range] { flex:1; min-height:44px; }
+    .fc-sheet-body input[type=number], .fc-sheet-body select { min-height:44px; }
+    .fc-sheet-body .ee-btn, .fc-sheet-head .ee-btn { min-height:44px; min-width:44px; }
+    .fc-sheet-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:6px 0; }
   </style>
   <div class="fc-header">
     <div class="fc-row top">
@@ -93,32 +110,22 @@ function panelHTML() {
       </div>
     </div>
     <div class="fc-row" data-group="controls">
-      <label>Diff sensitivity <input type="range" data-id="threshold" min="3" max="80" value="20"><span class="val" data-id="threshold-val">20</span></label>
-      <label>Min region <input type="range" data-id="min-size" min="200" max="20000" value="1000" step="200"><span class="val" data-id="min-size-val">1k</span></label>
-      <label>Max region <input type="range" data-id="max-size" min="2000" max="500000" value="500000" step="2000"><span class="val" data-id="max-size-val">&infin;</span></label>
-      <button class="ee-btn" data-act="detect">🔍 Detect Faces</button>
-      <button class="ee-btn" data-act="click-add">👆 Click Face</button>
       <button class="ee-btn" data-act="draw-box">✏️ Draw Box</button>
       <button class="ee-btn" data-act="draw-mask">🖌️ Draw Mask</button>
       <label data-id="brush-controls" style="display:none">Brush <input type="range" data-id="brush-size" min="5" max="80" value="25"><span class="val" data-id="brush-size-val">25</span></label>
       <button class="ee-btn" data-act="erase" style="display:none">Erase: Off</button>
-      <select data-id="face-mode"><option value="add">Add to regions</option><option value="replace">Replace regions</option></select>
       <button class="ee-btn" data-act="remove-all">Remove All</button>
+      <button class="ee-btn" data-act="open-repaint" aria-expanded="false" title="Prompt, denoise, seed, variants">🖌 Repaint <span data-id="repaint-dot" style="color:#8ad08a"></span></button>
+      <button class="ee-btn" data-act="open-detect" aria-expanded="false" title="Face detection + diff sensitivity / region size">🔍 Detect</button>
     </div>
     <div class="fc-row" data-group="repaint">
-      <label>Prompt <input type="text" data-id="repaint-prompt" placeholder="repaint prompt… (select a box, then Generate)" size="44"></label>
-      <label>Denoise <input type="range" data-id="denoise" min="0.2" max="0.8" step="0.05" value="0.5"><span class="val" data-id="denoise-val">0.5</span></label>
-      <label>Seed <input type="number" data-id="seed-input" placeholder="random"></label>
-      <label><input type="checkbox" data-id="randomize-seed" checked> Randomize each</label>
-      <label><input type="checkbox" data-id="detail-crop" checked> Detail crop</label>
-      <label>Variants <select data-id="variant-count"><option value="1" selected>1</option><option value="2">2</option><option value="4">4</option></select></label>
       <button class="ee-btn primary" data-act="generate">⚡ Generate</button>
       <button class="ee-btn" data-act="keep">✓ Keep</button>
       <button class="ee-btn" data-act="discard">✕ Discard</button>
       <button class="ee-btn" data-act="undo">↩ Undo</button>
       <button class="ee-btn" data-act="layer-toggle">👁 Edit layer: On</button>
       <span class="fc-zoom" title="Zoom the working image (two-finger drag pans on touch)">🔍
-        <input type="range" data-id="zoom-slider" min="100" max="300" step="10" value="100" aria-label="Zoom">
+        <input type="range" data-id="zoom-slider" min="25" max="300" step="5" value="100" aria-label="Zoom">
         <span class="val" data-id="zoom-val">Fit</span>
         <button class="ee-btn" data-act="zoom-fit">Fit</button></span>
       <div class="fc-gens" data-id="gen-strip"></div>
@@ -143,8 +150,35 @@ function panelHTML() {
     </div>
     <div class="fc-canvas-wrap" data-id="canvas-container"></div>
     <div class="fc-thumbs" data-id="thumbnail-strip"></div>
+  </div>
+  <div class="fc-sheet-backdrop" data-id="sheet-backdrop"></div>
+  <div class="fc-sheet" data-sheet="repaint" role="dialog" aria-label="Repaint" aria-hidden="true">
+    <div class="fc-sheet-head"><b>🖌 Repaint</b><button class="ee-btn" data-act="sheet-close" aria-label="Close">✕</button></div>
+    <div class="fc-sheet-body">
+      <label>Prompt <input type="text" data-id="repaint-prompt" placeholder="repaint prompt… (select a box, then Generate)" size="44"></label>
+      <label>Denoise <input type="range" data-id="denoise" min="0.2" max="0.8" step="0.05" value="0.5"><span class="val" data-id="denoise-val">0.5</span></label>
+      <label>Seed <input type="number" data-id="seed-input" placeholder="random"></label>
+      <label><input type="checkbox" data-id="randomize-seed" checked> Randomize each</label>
+      <label><input type="checkbox" data-id="detail-crop" checked> Detail crop</label>
+      <label>Variants <select data-id="variant-count"><option value="1" selected>1</option><option value="2">2</option><option value="4">4</option></select></label>
+      <button class="ee-btn primary" data-act="generate-sheet">⚡ Generate</button>
+    </div>
+  </div>
+  <div class="fc-sheet" data-sheet="detect" role="dialog" aria-label="Detect" aria-hidden="true">
+    <div class="fc-sheet-head"><b>🔍 Detect</b><button class="ee-btn" data-act="sheet-close" aria-label="Close">✕</button></div>
+    <div class="fc-sheet-body">
+      <div class="fc-sheet-row">
+        <button class="ee-btn" data-act="detect">🔍 Detect Faces</button>
+        <button class="ee-btn" data-act="click-add">👆 Click Face</button>
+        <select data-id="face-mode"><option value="add">Add to regions</option><option value="replace">Replace regions</option></select>
+      </div>
+      <label>Diff sensitivity <input type="range" data-id="threshold" min="3" max="80" value="20"><span class="val" data-id="threshold-val">20</span></label>
+      <label>Min region <input type="range" data-id="min-size" min="200" max="20000" value="1000" step="200"><span class="val" data-id="min-size-val">1k</span></label>
+      <label>Max region <input type="range" data-id="max-size" min="2000" max="500000" value="500000" step="2000"><span class="val" data-id="max-size-val">&infin;</span></label>
+    </div>
   </div>`;
 }
+
 
 export class FaceCycle {
   constructor(panel, jobbarEl) {
@@ -284,6 +318,26 @@ export class FaceCycle {
       this.render();
     });
     this.el.generateBtn.addEventListener('click', () => this.generateRepaint());
+    // ── Bottom sheets (Task 7 rev.2): open/close only toggles classes; the
+    // controls keep their data-ids/handlers, so nothing about the canvas,
+    // regions, undo log or an in-flight generation can be disturbed. ──
+    const pq = sel => this.panel.querySelector(sel);
+    this.sheets = createSheetController({
+      backdrop: pq('[data-id="sheet-backdrop"]'),
+      sheets: { repaint: pq('[data-sheet="repaint"]'), detect: pq('[data-sheet="detect"]') },
+      openers: { repaint: pq('[data-act="open-repaint"]'), detect: pq('[data-act="open-detect"]') },
+    });
+    pq('[data-act="open-repaint"]').addEventListener('click', () => this.sheets.toggle('repaint'));
+    pq('[data-act="open-detect"]').addEventListener('click', () => this.sheets.toggle('detect'));
+    pq('[data-id="sheet-backdrop"]').addEventListener('click', () => this.sheets.close());
+    this.panel.querySelectorAll('[data-act="sheet-close"]').forEach(b => b.addEventListener('click', () => this.sheets.close()));
+    // The sheet's own Generate = the SAME handler; close first so the preview is visible.
+    pq('[data-act="generate-sheet"]').addEventListener('click', () => { this.sheets.close(); this.generateRepaint(); });
+    // Detect actions need the canvas next — dismiss the sheet after they run.
+    this.el.detectBtn.addEventListener('click', () => this.sheets.close());
+    this.el.clickAddBtn.addEventListener('click', () => this.sheets.close());
+    const paintDot = () => { const d = pq('[data-id="repaint-dot"]'); if (d) d.textContent = this.el.repaintPromptInput.value.trim() ? '●' : ''; };
+    this.el.repaintPromptInput.addEventListener('input', paintDot);
     this.el.keepBtn.addEventListener('click', () => this.commitPending());
     this.el.discardBtn.addEventListener('click', () => this.discardAction());
     this.el.undoBtn.addEventListener('click', () => this.undo());
@@ -294,7 +348,7 @@ export class FaceCycle {
     this.el.meldCancelBtn.addEventListener('click', () => this.meldCancel());
     this.el.replaceBtn.addEventListener('click', () => this.replaceSources());
     this.el.repaintPromptInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); this.generateRepaint(); }
+      if (e.key === 'Enter') { e.preventDefault(); this.sheets.close(); this.generateRepaint(); }
     });
 
     // Import API: Gallery (or anything) dispatches a window CustomEvent
@@ -356,6 +410,7 @@ export class FaceCycle {
 
     document.addEventListener('keydown', this.onKeyDown = e => {
       if (!this.panel.classList.contains('active')) return;
+      if (e.key === 'Escape' && this.sheets.isOpen()) { e.preventDefault(); this.sheets.close(); return; }
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
       this.onKeyDownInner(e);
     });
@@ -2071,7 +2126,8 @@ export class FaceCycle {
   }
 
   // ── Zoom + pan (Task 6) ───────────────────────────────────────────────
-  // Fit (default) ↔ 300%. Above fit the .fc-canvas-wrap scrolls. Level
+  // 25% … Fit (100%, the default + rest position) … 300%. The useful travel is
+  // DOWNWARD (shrink for overview/margin); above fit the .fc-canvas-wrap scrolls. Level
   // persists in localStorage. Touch pan = two-finger drag on the wrap (the
   // paint path ignores non-primary pointers, so a second finger is free);
   // mouse users pan with scrollbars/wheel.
@@ -2080,7 +2136,7 @@ export class FaceCycle {
     let pct = 100;
     try { pct = Number(localStorage.getItem(KEY)) || 100; } catch (e) {}
     this.setZoomPct = (v, persist = true) => {
-      pct = Math.min(300, Math.max(100, Math.round(Number(v) || 100)));
+      pct = Math.min(300, Math.max(25, Math.round(Number(v) || 100)));
       this.stack.setZoom(pct / 100);
       this.el.zoomSlider.value = String(pct);
       this.el.zoomVal.textContent = pct === 100 ? 'Fit' : pct + '%';

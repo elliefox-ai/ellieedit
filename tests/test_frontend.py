@@ -113,10 +113,10 @@ def test_kept_gens_share_the_layers_row():
 
 
 def test_facecycle_zoom_controls_and_persistence():
-    """Task 6: slider (fit..300%), Fit button, localStorage persistence,
+    """Task 6 (+10-15 revision): slider 25%..300% with fit=100 default, Fit button, localStorage persistence,
     two-finger touch pan; zoom is CSS-width driven (never transform:scale)."""
     src = (HERE.parent / "frontend" / "js" / "modules" / "facecycle.js").read_text()
-    for needle in ('data-id="zoom-slider"', 'min="100"', 'max="300"',
+    for needle in ('data-id="zoom-slider"', 'min="25"', 'max="300"', 'value="100"',
                    'data-act="zoom-fit"', "ellieedit.facecycle.zoom",
                    "localStorage.getItem(KEY)", "localStorage.setItem(KEY",
                    "touches.size >= 2"):
@@ -178,3 +178,67 @@ def test_foxden_denoise_always_visible_always_sent_and_img2img_wiring():
     for needle in ('data-id="ichips"', 'data-id="iup"', 'data-id="iclear"',
                    "setInput(n === inputImage ? null : n)", "type=input"):
         assert needle in src, needle
+
+
+# ------------------------------------------------------------------ Task 7
+OLD_IDS = ["threshold", "threshold-val", "min-size", "min-size-val", "max-size",
+           "max-size-val", "brush-controls", "brush-size", "brush-size-val",
+           "face-mode", "repaint-prompt", "denoise", "denoise-val", "seed-input",
+           "randomize-seed", "detail-crop", "variant-count", "gen-strip"]
+OLD_ACTS = ["detect", "click-add", "draw-box", "draw-mask", "erase", "remove-all",
+            "generate", "keep", "discard", "undo", "layer-toggle", "zoom-fit"]
+
+
+def _fc_html():
+    src = (HERE.parent / "frontend" / "js" / "modules" / "facecycle.js").read_text()
+    return src, src[src.index("function panelHTML"):src.index("export class FaceCycle")]
+
+
+def test_task7_every_control_keeps_its_id_and_lives_in_the_right_surface():
+    """Three surfaces: main band (draw/erase/undo/Generate...), 🖌 Repaint sheet,
+    🔍 Detect sheet. Every pre-existing data-id/data-act survives, exactly once."""
+    _, html = _fc_html()
+    band = html[html.index('data-group="controls"'):html.index('data-id="sheet-backdrop"')]
+    rep = html[html.index('data-sheet="repaint"'):html.index('data-sheet="detect"')]
+    det = html[html.index('data-sheet="detect"'):]
+    for i in OLD_IDS + ["zoom-slider", "zoom-val"]:
+        assert html.count(f'data-id="{i}"') == 1, i
+    for a in OLD_ACTS:
+        assert html.count(f'data-act="{a}"') == 1, a
+    # main band: draw tools, erase/brush, undo, Generate (+ keep/discard/layers row)
+    for x in ('data-act="draw-box"', 'data-act="draw-mask"', 'data-act="erase"',
+              'data-id="brush-controls"', 'data-act="undo"', 'data-act="generate"',
+              'data-act="keep"', 'data-act="discard"', 'data-act="open-repaint"',
+              'data-act="open-detect"'):
+        assert x in band, x
+    # Repaint sheet: prompt + repaint options + its own Generate (same handler)
+    for x in ('data-id="repaint-prompt"', 'data-id="denoise"', 'data-id="seed-input"',
+              'data-id="randomize-seed"', 'data-id="detail-crop"',
+              'data-id="variant-count"', 'data-act="generate-sheet"'):
+        assert x in rep, x
+    # Detect sheet: detection + diff sensitivity + min/max region (one diff engine)
+    for x in ('data-act="detect"', 'data-act="click-add"', 'data-id="face-mode"',
+              'data-id="threshold"', 'data-id="min-size"', 'data-id="max-size"'):
+        assert x in det, x
+    # nothing detection/repaint-specific left in the everyday band
+    for gone in ('data-id="threshold"', 'data-id="repaint-prompt"', 'data-act="detect"'):
+        assert gone not in band, gone
+
+
+def test_task7_sheets_never_touch_canvas_state_and_shortcuts_survive():
+    src, _ = _fc_html()
+    ctl = (HERE.parent / "frontend" / "js" / "modules" / "facecycle-sheets.js").read_text()
+    for forbidden in ("render(", "resetAll", "ensureOverlay", "setSize", "processImages",
+                      "undoLog", "activeRegions", "stack"):
+        assert forbidden not in ctl, f"sheet controller must not touch {forbidden}"
+    # Escape closes an open sheet BEFORE the mask-mode Escape handling
+    assert src.index("e.key === 'Escape' && this.sheets.isOpen()") < src.index("if (e.target.tagName === 'INPUT'")
+    # shortcuts untouched (F/B/M still wired at document level)
+    for k in ("e.key === 'f'", "e.key === 'b'", "e.key === 'm'"):
+        assert k in src
+    # sheet Generate + Enter use the one generateRepaint handler
+    assert src.count("this.generateRepaint()") >= 3
+    # sheets are fixed-position (no layout/canvas-box impact)
+    assert ".fc-sheet { position:fixed;" in src
+    # 44px targets inside sheets
+    assert ".fc-sheet-body .ee-btn, .fc-sheet-head .ee-btn { min-height:44px; min-width:44px; }" in src
