@@ -137,3 +137,21 @@ def test_foxden_pinned_chips_sit_above_the_list():
     assert "loras: pins.payload()" in src and "suspended_loras: pins.suspendedPayload()" in src
     assert "pins.restoreFrom(e.loras, e.suspended_loras)" in src      # faithful Reuse
     assert "pickList(allLoras, el.lfilter.value)" in src              # filter -> list only
+
+
+def test_foxden_presets_wiring():
+    """Task 5 add.2: preset bar markup, 44px targets, confirm-on-delete,
+    auto-remember held back until restore, no _last re-apply on tab activation."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "foxden.js").read_text()
+    css = (HERE.parent / "frontend" / "js" / "modules" / "foxden.css").read_text()
+    for needle in ('data-id="preset-pick"', 'data-id="preset-lock"',
+                   'data-id="preset-save"', 'data-id="preset-del"',
+                   "confirm(`Delete preset", "method: 'DELETE'", "'/presets'",
+                   "API + '/last'", "keepalive: true", "if (!restored) return;",
+                   "presetState(collectState(), el['preset-lock'].checked)"):
+        assert needle in src, needle
+    assert ".fx-presets .fx-btn { min-width:44px; min-height:44px; }" in css
+    # restore happens once, at construction — activation only refreshes lists
+    assert src.count("applyState(last)") == 1
+    act = src[src.index("ellieedit:tab-activated"):]
+    assert "applyState" not in act.split("});")[0]

@@ -5,6 +5,7 @@
 import { registerModule } from '../shell.js';
 import { readCollapsed, writeCollapsed, recentLabel } from './foxden-recent.js';
 import { createPins } from './foxden-loras.js';
+import { normalizeState, presetState, debounce, cleanName } from './foxden-state.js';
 
 const API = '/api/foxden';
 const PRESETS = { landscape: [1024, 576], portrait: [576, 1024] };
@@ -27,6 +28,12 @@ registerModule({
       <div class="fx-body">
         <div class="fx-panel">
           <div class="fx-status" data-id="conn">connecting…</div>
+          <div class="fx-row fx-presets">
+            <select data-id="preset-pick" style="flex:1;min-width:140px"><option value="">Presets…</option></select>
+            <label class="fx-lock"><input type="checkbox" data-id="preset-lock"> 🔒 seed</label>
+            <button class="ee-btn fx-btn" data-id="preset-save" title="Save current form as a preset">💾</button>
+            <button class="ee-btn fx-btn" data-id="preset-del" title="Delete the selected preset">🗑</button>
+          </div>
           <div><label>Workflow</label><select data-id="wf"></select></div>
           <div><label>Prompt</label><textarea data-id="prompt" placeholder="describe the image…"></textarea></div>
           <div class="fx-row" data-id="aspects">
@@ -64,7 +71,8 @@ registerModule({
     </div>`;
     const $ = id => panel.querySelector(`[data-id="${id}"]`);
     const el = Object.fromEntries(['conn', 'wf', 'prompt', 'aspects', 'seed', 'dice',
-      'lcount', 'lfilter', 'loras', 'pins', 'susp', 'go', 'status', 'out', 'recent', 'recentwrap',
+      'lcount', 'lfilter', 'loras', 'pins', 'susp',
+      'preset-pick', 'preset-lock', 'preset-save', 'preset-del', 'go', 'status', 'out', 'recent', 'recentwrap',
       'refresh', 'rtoggle', 'rcount', 'big', 'bigmeta', 'reuse', 'bigclose', 'bigimg'].map(k => [k, $(k)]));
 
     let aspect = 'landscape';
@@ -168,6 +176,81 @@ registerModule({
     });
     el.dice.addEventListener('click', () => { el.seed.value = Math.floor(Math.random() * 2 ** 31); });
 
+    // ── presets + auto-remember (Task 5 add.2) ──
+    // collectState/applyState are the single place the form maps to a state
+    // object. (steps/denoise/input_image are normalized and persisted when the
+    // form emits them — img2img will add them here.)
+    function collectState() {
+      return normalizeState({
+        workflow: el.wf.value, prompt: el.prompt.value, aspect,
+        seed: el.seed.value === '' ? null : parseInt(el.seed.value),
+        loras: pins.payload(), suspended_loras: pins.suspendedPayload(),
+      });
+    }
+    function applyState(raw) {
+      const st = normalizeState(raw);
+      if (st.workflow && [...el.wf.options].some(o => o.value === st.workflow && !o.disabled)) el.wf.value = st.workflow;
+      el.prompt.value = st.prompt;
+      aspect = st.aspect;
+      el.aspects.querySelectorAll('[data-a]').forEach(x => x.classList.toggle('on', x.dataset.a === aspect));
+      el.seed.value = st.seed === null ? '' : st.seed;
+      pins.restoreFrom(st.loras, st.suspended_loras);
+      renderLoras();
+    }
+    let savedPresets = [];
+    function renderPresetPick(selectName = '') {
+      el['preset-pick'].innerHTML = '<option value="">Presets…</option>' +
+        savedPresets.map(p => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+      el['preset-pick'].value = savedPresets.some(p => p.name === selectName) ? selectName : '';
+    }
+    async function loadPresets() {
+      try {
+        const d = await api('/presets');
+        savedPresets = d.presets || [];
+        renderPresetPick();
+        return d.last;
+      } catch (e) { return null; }
+    }
+    el['preset-pick'].addEventListener('change', () => {
+      const p = savedPresets.find(x => x.name === el['preset-pick'].value);
+      if (p) { applyState(p.state); scheduleSave(); say(`Applied preset “${p.name}”.`, 'ok'); }
+    });
+    el['preset-save'].addEventListener('click', async () => {
+      const name = cleanName(prompt('Preset name:', el['preset-pick'].value || ''));
+      if (!name) return;
+      if (savedPresets.some(p => p.name === name) && !confirm(`Overwrite preset “${name}”?`)) return;
+      try {
+        await api('/presets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, state: presetState(collectState(), el['preset-lock'].checked) }) });
+        await loadPresets(); renderPresetPick(name);
+        say(`Saved preset “${name}”${el['preset-lock'].checked ? ' (seed locked)' : ''}.`, 'ok');
+      } catch (e) { say(e.message, 'err'); }
+    });
+    el['preset-del'].addEventListener('click', async () => {
+      const name = el['preset-pick'].value;
+      if (!name) { say('Pick a preset to delete.', 'err'); return; }
+      if (!confirm(`Delete preset “${name}”? This cannot be undone.`)) return;
+      try {
+        await api('/presets/' + encodeURIComponent(name), { method: 'DELETE' });
+        await loadPresets(); say(`Deleted preset “${name}”.`, 'ok');
+      } catch (e) { say(e.message, 'err'); }
+    });
+    // Auto-remember: debounced PUT /last on any form edit; flushed when the
+    // tab hides (tablet sleep). Held back until the saved state has been
+    // applied so a blank first paint can never overwrite it.
+    let restored = false;
+    const saveLast = () => {
+      if (!restored) return;
+      fetch(API + '/last', { method: 'PUT', keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: collectState() }) }).catch(() => {});
+    };
+    const scheduleSave = debounce(saveLast, 800);
+    for (const ev of ['input', 'change', 'click']) {
+      panel.addEventListener(ev, e => { if (!e.target.closest('.fx-presets, [data-id="lfilter"]')) scheduleSave(); });
+    }
+    document.addEventListener('visibilitychange', () => { if (document.hidden && scheduleSave.pending()) scheduleSave.flush(); });
+
     // ── generate + poll ──
     async function generate() {
       if (busy) return;
@@ -186,6 +269,7 @@ registerModule({
         const j = await api('/generate', { method: 'POST',
           headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         el.seed.value = j.seed;           // always show the seed actually used
+        scheduleSave();
         await poll(j.prompt_id);
       } catch (e) { say(e.message, 'err'); }
       busy = false; el.go.disabled = false;
@@ -282,11 +366,20 @@ registerModule({
     el.rtoggle.addEventListener('click', toggleRecent);
     el.rcount.addEventListener('click', toggleRecent);
 
-    loadConfig();
+    // First paint: config (workflow options must exist) -> restore the
+    // auto-remembered composition -> only THEN allow auto-save.
+    (async () => {
+      await loadConfig();
+      const last = await loadPresets();
+      if (last) applyState(last);
+      restored = true;
+    })();
     loadRecent();
     reconcile(false);
     window.addEventListener('ellieedit:tab-activated', e => {
-      if (e.detail?.name === 'foxden') { loadConfig(); loadRecent(); reconcile(false); }
+      // Re-activation refreshes lists only — never re-applies `_last` over
+      // an in-progress edit.
+      if (e.detail?.name === 'foxden') { loadConfig(); loadPresets(); loadRecent(); reconcile(false); }
     });
   },
 });

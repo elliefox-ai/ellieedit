@@ -48,3 +48,9 @@
 .fx-chip .val { min-width:38px; text-align:right; font-family:monospace; }
 .fx-chip input[type=range] { width:100%; min-height:36px; accent-color:#7a6aaa; }
 .fx-chip .fx-btn, .fx-susp .fx-btn { min-width:44px; min-height:44px; }
+
+/* Task 5 add.2 — preset bar */
+.fx-presets { align-items:center; gap:8px; }
+.fx-presets select { min-height:44px; }
+.fx-presets .fx-lock { display:inline-flex; align-items:center; gap:4px; font-size:12px; color:#9a9ab8; min-height:44px; }
+.fx-presets .fx-btn { min-width:44px; min-height:44px; }

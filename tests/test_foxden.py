@@ -563,3 +563,55 @@ def test_suspended_loras_never_reach_graph_but_are_recorded(client, env, monkeyp
     assert e["suspended_loras"] == [{"name": "_Flux\\b.safetensors", "strength_model": 1.25}]
     # old clients (no suspended_loras) still work and record an empty tray
     client.post("/api/foxden/generate", json={"prompt": "x", "seed": 1})
+
+
+# -------------------------------------------------------------- presets
+
+STATE = {"workflow": "klein", "prompt": "a fox", "aspect": "portrait", "seed": 42,
+         "loras": [{"name": "a.safetensors", "strength_model": 0.5}],
+         "suspended_loras": [{"name": "b.safetensors", "strength_model": 1.25}],
+         "steps": 6, "denoise": 0.6, "input_image": "in.png"}
+
+
+def test_preset_crud_roundtrip_every_field(client, env):
+    assert client.get("/api/foxden/presets").json() == {"presets": [], "last": None}
+    r = client.post("/api/foxden/presets", json={"name": "  couch   fox ", "state": STATE})
+    assert r.status_code == 200 and r.json() == {"saved": "couch fox", "overwrote": False, "count": 1}
+    got = client.get("/api/foxden/presets").json()["presets"]
+    assert got[0]["name"] == "couch fox" and got[0]["state"] == STATE   # incl. tray + input image
+    # same name overwrites, never duplicates
+    s2 = dict(STATE, prompt="a wolf")
+    assert client.post("/api/foxden/presets", json={"name": "couch fox", "state": s2}).json()["overwrote"] is True
+    got = client.get("/api/foxden/presets").json()["presets"]
+    assert len(got) == 1 and got[0]["state"]["prompt"] == "a wolf"
+    # lives in the same dir as recent.jsonl
+    assert (env / "data" / "presets.json").is_file()
+    # delete, then 404
+    assert client.delete("/api/foxden/presets/couch fox").json()["count"] == 0
+    assert client.delete("/api/foxden/presets/couch fox").status_code == 404
+
+
+def test_preset_name_and_size_validation(client, env):
+    for bad in ("", "   ", "_last", "x" * 61):
+        assert client.post("/api/foxden/presets", json={"name": bad, "state": {}}).status_code == 400
+    big = {"blob": "x" * (70 * 1024)}
+    assert client.post("/api/foxden/presets", json={"name": "big", "state": big}).status_code == 413
+    assert client.get("/api/foxden/presets").json()["presets"] == []
+
+
+def test_auto_remember_survives_a_fresh_client(client, env):
+    assert client.put("/api/foxden/last", json={"state": STATE}).json() == {"ok": True}
+    fresh = TestClient(app)                                   # "reload / new device"
+    assert fresh.get("/api/foxden/presets").json()["last"] == STATE
+    # last never shows up in the named list and presets never clobber it
+    client.post("/api/foxden/presets", json={"name": "p", "state": {"prompt": "z"}})
+    d = client.get("/api/foxden/presets").json()
+    assert d["last"] == STATE and [p["name"] for p in d["presets"]] == ["p"]
+
+
+def test_corrupt_presets_file_is_set_aside_not_fatal(client, env):
+    (env / "data").mkdir(exist_ok=True)
+    (env / "data" / "presets.json").write_text("{not json")
+    assert client.get("/api/foxden/presets").json() == {"presets": [], "last": None}
+    assert client.post("/api/foxden/presets", json={"name": "ok", "state": {}}).status_code == 200
+    assert (env / "data" / "presets.json.corrupt").is_file()

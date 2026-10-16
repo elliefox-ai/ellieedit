@@ -695,3 +695,108 @@ def inputs():
     except (TypeError, KeyError, IndexError):
         names = []
     return {"items": [n for n in names if isinstance(n, str)]}
+
+
+# ---------------------------------------------------------------- presets
+# Task 5 addendum 2 (2026-10-14): named workspace presets + auto-remembered
+# last state, server-backed at data/foxden/presets.json (same dir as
+# recent.jsonl) so they follow the operator across devices. The form state is
+# an opaque-but-bounded dict (the frontend owns its shape: prompt, workflow,
+# aspect/input image, seed, steps, denoise, LoRA pins + suspended tray).
+
+PRESETS_FILE = "presets.json"
+PRESET_MAX = 200
+PRESET_NAME_MAX = 60
+PRESET_STATE_MAX_BYTES = 64 * 1024
+_presets_lock = threading.Lock()
+
+
+def _presets_path() -> Path:
+    return data_dir() / PRESETS_FILE
+
+
+def _load_presets() -> dict:
+    p = _presets_path()
+    empty = {"presets": {}, "last": None}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return empty
+    except (OSError, ValueError):
+        try:                                   # keep the damaged file for rescue
+            p.replace(p.with_suffix(".json.corrupt"))
+        except OSError:
+            pass
+        return empty
+    if not isinstance(raw, dict) or not isinstance(raw.get("presets"), dict):
+        return empty
+    return {"presets": raw["presets"],
+            "last": raw.get("last") if isinstance(raw.get("last"), dict) else None}
+
+
+def _save_presets(d: dict) -> None:
+    p = _presets_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, p)                         # atomic: never a half-written file
+
+
+def _check_state(state: dict) -> None:
+    if len(json.dumps(state, ensure_ascii=False).encode("utf-8")) > PRESET_STATE_MAX_BYTES:
+        raise HTTPException(413, "preset state too large")
+
+
+class PresetBody(BaseModel):
+    name: str
+    state: dict
+
+
+class LastBody(BaseModel):
+    state: dict
+
+
+@router.get("/presets")
+def presets_list():
+    d = _load_presets()
+    return {"presets": [{"name": n, "ts": v.get("ts"), "state": v.get("state", {})}
+                        for n, v in sorted(d["presets"].items(), key=lambda kv: kv[0].lower())],
+            "last": d["last"]}
+
+
+@router.post("/presets")
+def presets_save(body: PresetBody):
+    name = " ".join(body.name.split())
+    if not name or len(name) > PRESET_NAME_MAX or name.startswith("_"):
+        raise HTTPException(400, f"name must be 1-{PRESET_NAME_MAX} chars and not start with '_'")
+    _check_state(body.state)
+    with _presets_lock:
+        d = _load_presets()
+        if name not in d["presets"] and len(d["presets"]) >= PRESET_MAX:
+            raise HTTPException(400, "too many presets")
+        existed = name in d["presets"]
+        d["presets"][name] = {"ts": int(time.time()), "state": body.state}
+        _save_presets(d)
+    return {"saved": name, "overwrote": existed, "count": len(d["presets"])}
+
+
+@router.delete("/presets/{name}")
+def presets_delete(name: str):
+    with _presets_lock:
+        d = _load_presets()
+        if name not in d["presets"]:
+            raise HTTPException(404, "no such preset")
+        del d["presets"][name]
+        _save_presets(d)
+    return {"deleted": name, "count": len(d["presets"])}
+
+
+@router.put("/last")
+def last_save(body: LastBody):
+    """Auto-remember: the in-progress composition (reload/sleep/crash safe)."""
+    _check_state(body.state)
+    with _presets_lock:
+        d = _load_presets()
+        d["last"] = body.state
+        _save_presets(d)
+    return {"ok": True}
