@@ -5,7 +5,7 @@
 
 // Bump on every deploy — shown in the job bar so a stale-cache client is
 // instantly visible.
-const BUILD = '2026-10-15j';
+const BUILD = '2026-10-16a';
 
 const registry = [];
 const mounted = new Map(); // name -> { panelEl }
