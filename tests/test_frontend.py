@@ -155,3 +155,26 @@ def test_foxden_presets_wiring():
     assert src.count("applyState(last)") == 1
     act = src[src.index("ellieedit:tab-activated"):]
     assert "applyState" not in act.split("});")[0]
+
+
+def test_foxden_denoise_always_visible_always_sent_and_img2img_wiring():
+    """Add.5 revision: slider never hidden/grayed, value ALWAYS in /generate;
+    input-image chips toggle; aspect buttons gray (only those) when an input is set."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "foxden.js").read_text()
+    css = (HERE.parent / "frontend" / "js" / "modules" / "foxden.css").read_text()
+    assert 'data-id="denoise" min="0.1" max="1" step="0.05" value="1"' in src
+    gen = src[src.index("async function generate()"):src.index("async function poll(")]
+    assert "denoise: parseFloat(el.denoise.value)" in gen          # unconditional
+    assert "if (inputImage) body.input_image = inputImage" in gen
+    # nothing ever hides/disables the denoise slider
+    for bad in ("el.denoise.disabled", "el.denoise.style.display", "el.denoise.hidden",
+                "el.dval.style.display"):
+        assert bad not in src, bad
+    assert "[data-id=\"aspects\"].dim { opacity:.4; }" in css     # only aspects dim
+    # captured by presets + Reuse
+    assert "denoise: parseFloat(el.denoise.value), input_image: inputImage" in src
+    assert "setDenoise(e.denoise ?? 1)" in src and "setDenoise(st.denoise)" in src
+    # chips: tap toggles selection; upload + none controls exist
+    for needle in ('data-id="ichips"', 'data-id="iup"', 'data-id="iclear"',
+                   "setInput(n === inputImage ? null : n)", "type=input"):
+        assert needle in src, needle

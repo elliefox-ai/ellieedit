@@ -40,6 +40,18 @@ registerModule({
             <button class="ee-btn fx-btn on" data-a="landscape">▭ 1024×576</button>
             <button class="ee-btn fx-btn" data-a="portrait">▯ 576×1024</button>
           </div>
+          <div class="fx-inputs">
+            <label>Input image (img2img) <span data-id="icount"></span></label>
+            <div class="fx-chips" data-id="ichips"></div>
+            <div class="fx-row">
+              <button class="ee-btn fx-btn" data-id="iup">⬆ Upload</button>
+              <button class="ee-btn fx-btn" data-id="iclear" title="Back to text-to-image">✕ None</button>
+              <input type="file" accept="image/*" data-id="ifile" style="display:none">
+            </div>
+          </div>
+          <div class="fx-denoise"><label>Denoise <span data-id="dval">1.00</span></label>
+            <input type="range" data-id="denoise" min="0.1" max="1" step="0.05" value="1" aria-label="Denoise">
+          </div>
           <div class="fx-row">
             <div style="flex:1;min-width:140px"><label>Seed</label><input type="number" data-id="seed" placeholder="random"></div>
             <button class="ee-btn fx-btn" data-id="dice">🎲 Random</button>
@@ -72,7 +84,8 @@ registerModule({
     const $ = id => panel.querySelector(`[data-id="${id}"]`);
     const el = Object.fromEntries(['conn', 'wf', 'prompt', 'aspects', 'seed', 'dice',
       'lcount', 'lfilter', 'loras', 'pins', 'susp',
-      'preset-pick', 'preset-lock', 'preset-save', 'preset-del', 'go', 'status', 'out', 'recent', 'recentwrap',
+      'preset-pick', 'preset-lock', 'preset-save', 'preset-del',
+      'icount', 'ichips', 'iup', 'iclear', 'ifile', 'denoise', 'dval', 'go', 'status', 'out', 'recent', 'recentwrap',
       'refresh', 'rtoggle', 'rcount', 'big', 'bigmeta', 'reuse', 'bigclose', 'bigimg'].map(k => [k, $(k)]));
 
     let aspect = 'landscape';
@@ -176,6 +189,67 @@ registerModule({
     });
     el.dice.addEventListener('click', () => { el.seed.value = Math.floor(Math.random() * 2 ** 31); });
 
+    // ── denoise (ALWAYS visible, ALWAYS sent — never hidden or grayed) ──
+    function setDenoise(v) {
+      const d = Math.min(1, Math.max(0.1, Number.isFinite(Number(v)) ? Number(v) : 1));
+      el.denoise.value = String(d); el.dval.textContent = d.toFixed(2);
+    }
+    el.denoise.addEventListener('input', () => setDenoise(el.denoise.value));
+
+    // ── input image (img2img): tap a chip to select, tap again to deselect.
+    // Last-selected wins (v1). Natural size is read so the scheduler gets the
+    // image's own resolution; aspect buttons are grayed while one is set. ──
+    let inputImage = null, inputDims = null, inputItems = [];
+    const viewUrl = n => {
+      const i = n.replace(/\\/g, '/').lastIndexOf('/');
+      const sub = i >= 0 ? n.slice(0, i) : '', fn = i >= 0 ? n.slice(i + 1) : n;
+      return `${API}/view?type=input&filename=${encodeURIComponent(fn)}&subfolder=${encodeURIComponent(sub)}`;
+    };
+    function paintInput() {
+      el.aspects.classList.toggle('dim', !!inputImage);
+      el.aspects.querySelectorAll('[data-a]').forEach(b => { b.disabled = !!inputImage; });
+      el.icount.textContent = inputImage ? '(selected)' : '';
+      el.ichips.innerHTML = '';
+      const names = inputItems.includes(inputImage) || !inputImage ? inputItems : [inputImage, ...inputItems];
+      for (const n of names) {
+        const b = document.createElement('button');
+        b.className = 'fx-chipimg' + (n === inputImage ? ' on' : '');
+        b.title = n; b.setAttribute('aria-pressed', n === inputImage ? 'true' : 'false');
+        const im = document.createElement('img');
+        im.loading = 'lazy'; im.alt = n; im.src = viewUrl(n);
+        b.appendChild(im);
+        b.addEventListener('click', () => { setInput(n === inputImage ? null : n); scheduleSave(); });
+        el.ichips.appendChild(b);
+      }
+    }
+    function setInput(name) {
+      inputImage = name || null; inputDims = null;
+      if (inputImage) {
+        const probe = new Image();
+        probe.onload = () => { if (inputImage === name) inputDims = [probe.naturalWidth, probe.naturalHeight]; };
+        probe.src = viewUrl(inputImage);
+      }
+      paintInput();
+    }
+    async function loadInputs() {
+      try { inputItems = (await api('/inputs')).items || []; } catch (e) { inputItems = []; }
+      paintInput();
+    }
+    el.iclear.addEventListener('click', () => { setInput(null); scheduleSave(); });
+    el.iup.addEventListener('click', () => el.ifile.click());
+    el.ifile.addEventListener('change', async () => {
+      const file = el.ifile.files[0]; if (!file) return;
+      const fd = new FormData(); fd.append('image', file);
+      try {
+        say('uploading…');
+        const j = await api('/upload', { method: 'POST', body: fd });
+        const name = j.subfolder ? `${j.subfolder}/${j.name}` : j.name;
+        if (!inputItems.includes(name)) inputItems.unshift(name);
+        setInput(name); scheduleSave(); say(`Uploaded ${name}.`, 'ok');
+      } catch (e) { say(e.message, 'err'); }
+      el.ifile.value = '';
+    });
+
     // ── presets + auto-remember (Task 5 add.2) ──
     // collectState/applyState are the single place the form maps to a state
     // object. (steps/denoise/input_image are normalized and persisted when the
@@ -185,6 +259,7 @@ registerModule({
         workflow: el.wf.value, prompt: el.prompt.value, aspect,
         seed: el.seed.value === '' ? null : parseInt(el.seed.value),
         loras: pins.payload(), suspended_loras: pins.suspendedPayload(),
+        denoise: parseFloat(el.denoise.value), input_image: inputImage,
       });
     }
     function applyState(raw) {
@@ -196,6 +271,8 @@ registerModule({
       el.seed.value = st.seed === null ? '' : st.seed;
       pins.restoreFrom(st.loras, st.suspended_loras);
       renderLoras();
+      setDenoise(st.denoise);
+      setInput(st.input_image || null);
     }
     let savedPresets = [];
     function renderPresetPick(selectName = '') {
@@ -257,12 +334,15 @@ registerModule({
       const prompt = el.prompt.value.trim();
       if (!prompt) { say('Type a prompt first.', 'err'); return; }
       busy = true; el.go.disabled = true;
-      const [width, height] = PRESETS[aspect];
+      let [width, height] = PRESETS[aspect];
+      if (inputImage && inputDims) [width, height] = inputDims;     // image is the size source
       const body = {
         workflow: el.wf.value, prompt, width, height,
         loras: pins.payload(),
         suspended_loras: pins.suspendedPayload(),
+        denoise: parseFloat(el.denoise.value),                       // always sent
       };
+      if (inputImage) body.input_image = inputImage;
       if (el.seed.value !== '') body.seed = parseInt(el.seed.value);
       try {
         say('submitting…');
@@ -317,6 +397,7 @@ registerModule({
       if ([...el.wf.options].some(o => o.value === e.workflow && !o.disabled)) el.wf.value = e.workflow;
       pins.restoreFrom(e.loras, e.suspended_loras);
       renderLoras();
+      setDenoise(e.denoise ?? 1); setInput(e.input_image || null);   // older entries: txt2img @1.0
       el.bigclose.click();
     });
     // ── recent strip: load, reconcile, collapse ──
@@ -374,12 +455,13 @@ registerModule({
       if (last) applyState(last);
       restored = true;
     })();
+    loadInputs();
     loadRecent();
     reconcile(false);
     window.addEventListener('ellieedit:tab-activated', e => {
       // Re-activation refreshes lists only — never re-applies `_last` over
       // an in-progress edit.
-      if (e.detail?.name === 'foxden') { loadConfig(); loadPresets(); loadRecent(); reconcile(false); }
+      if (e.detail?.name === 'foxden') { loadConfig(); loadPresets(); loadInputs(); loadRecent(); reconcile(false); }
     });
   },
 });

@@ -13,7 +13,12 @@ assert.deepEqual(normalizeState(JSON.parse(JSON.stringify(full))), full);
 
 // garbage in -> safe defaults out (old/corrupt stored states never crash apply)
 assert.deepEqual(normalizeState(null),
-  { workflow: '', prompt: '', aspect: 'landscape', seed: null, loras: [], suspended_loras: [] });
+  { workflow: '', prompt: '', aspect: 'landscape', seed: null, loras: [], suspended_loras: [], denoise: 1 });
+// denoise is ALWAYS present: defaults to 1, clamps to 0..1, survives presets
+assert.equal(normalizeState({ denoise: '0.45' }).denoise, 0.45);
+assert.equal(normalizeState({ denoise: 7 }).denoise, 1);
+assert.equal(normalizeState({ denoise: 'junk' }).denoise, 1);
+assert.equal(presetState({ ...full, denoise: 0.3 }, false).denoise, 0.3);
 const g = normalizeState({ aspect: 'diagonal', seed: 'abc', loras: [null, {}, { name: 'x', strength_model: 'z' }], steps: 'n/a' });
 assert.equal(g.aspect, 'landscape'); assert.equal(g.seed, null);
 assert.deepEqual(g.loras, [{ name: 'x', strength_model: 1 }]); assert.ok(!('steps' in g));

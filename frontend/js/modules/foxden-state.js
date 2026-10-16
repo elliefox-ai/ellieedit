@@ -4,8 +4,8 @@
 
 const ASPECTS = ['landscape', 'portrait'];
 
-// Optional fields pass through untouched so img2img (input_image/denoise) and
-// steps ride along as soon as the form emits them — presets never need a
+// Optional fields (steps, input_image) pass through untouched as soon as the
+// form emits them — presets never need a
 // migration when the form grows.
 export function normalizeState(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
@@ -18,9 +18,10 @@ export function normalizeState(raw) {
     seed: num(r.seed),
     loras: Array.isArray(r.loras) ? r.loras.filter(l => l && l.name).map(lora) : [],
     suspended_loras: Array.isArray(r.suspended_loras) ? r.suspended_loras.filter(l => l && l.name).map(lora) : [],
+    // ALWAYS present (interface law): default 1.0 = plain txt2img behavior.
+    denoise: num(r.denoise) === null ? 1 : Math.min(1, Math.max(0, num(r.denoise))),
   };
   if (num(r.steps) !== null) out.steps = num(r.steps);
-  if (num(r.denoise) !== null) out.denoise = num(r.denoise);
   if (typeof r.input_image === 'string' && r.input_image) out.input_image = r.input_image;
   return out;
 }
