@@ -538,3 +538,28 @@ def test_reconcile_failure_modes_are_loud(client, monkeypatch):
     assert client.post("/api/foxden/recent/reconcile?force=true").status_code == 502
     fake_comfy(monkeypatch, {"/history": (200, [1, 2])})            # wrong shape
     assert client.post("/api/foxden/recent/reconcile?force=true").status_code == 502
+
+
+def test_suspended_loras_never_reach_graph_but_are_recorded(client, env, monkeypatch):
+    """Task 5 add.6: parked pins stay out of the submitted graph yet ride into
+    recent.jsonl so Reuse settings can restore the tray."""
+    calls = fake_comfy(monkeypatch, {
+        "/prompt": (200, {"prompt_id": "pid-s", "node_errors": {}}),
+        "/history/pid-s": (200, {"pid-s": hist(outputs={"736": {"images": [IM]}})}),
+        "/view?": (200, b"PNGBYTES"),
+    })
+    r = client.post("/api/foxden/generate", json={
+        "prompt": "a fox", "seed": 3,
+        "loras": [{"name": "a.safetensors", "strength_model": 0.5}],
+        "suspended_loras": [{"name": "_Flux\\b.safetensors", "strength_model": 1.25}]})
+    assert r.status_code == 200, r.text
+    sent = json.loads(calls[0][1])["prompt"]
+    lora_nodes = [n for n in sent.values() if n["class_type"] == "LoraLoaderModelOnly"]
+    assert len(lora_nodes) == 1                              # active only
+    assert "b.safetensors" not in json.dumps(sent)           # parked one absent
+    assert client.get("/api/foxden/status/pid-s").json()["state"] == "done"
+    e = json.loads((env / "data" / "recent.jsonl").read_text().splitlines()[0])
+    assert e["loras"][0]["strength_model"] == 0.5
+    assert e["suspended_loras"] == [{"name": "_Flux\\b.safetensors", "strength_model": 1.25}]
+    # old clients (no suspended_loras) still work and record an empty tray
+    client.post("/api/foxden/generate", json={"prompt": "x", "seed": 1})

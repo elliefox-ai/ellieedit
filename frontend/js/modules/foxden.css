@@ -39,3 +39,12 @@
 .fx-big .bar .meta { flex:1; font-size:11px; color:#8a8aaa; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .fx-big .stage { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; }
 .fx-big .stage img { max-width:100%; max-height:100%; object-fit:contain; }
+
+/* Task 5 add.6 — pinned LoRA chips just above the scrollable list */
+.fx-pins, .fx-susp { display:flex; flex-direction:column; gap:6px; margin-bottom:6px; }
+.fx-chip { border:1px solid #7a6aaa; background:#1d1d33; border-radius:8px; padding:6px 8px; }
+.fx-chip.parked { border-style:dashed; border-color:#4a4a6a; background:#161628; opacity:.85; }
+.fx-chip .nm { font-size:12px; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fx-chip .val { min-width:38px; text-align:right; font-family:monospace; }
+.fx-chip input[type=range] { width:100%; min-height:36px; accent-color:#7a6aaa; }
+.fx-chip .fx-btn, .fx-susp .fx-btn { min-width:44px; min-height:44px; }

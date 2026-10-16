@@ -126,3 +126,14 @@ def test_facecycle_zoom_controls_and_persistence():
         "zoom must not use transform:scale (breaks scrollable overflow)"
     # fit button resets to 100 through the same persisted setter
     assert "zoomFitBtn.addEventListener('click', () => this.setZoomPct(100))" in src
+
+
+def test_foxden_pinned_chips_sit_above_the_list():
+    """Task 5 add.6: pins + suspended tray render just above the scrollable
+    list, and the submitted payload comes from the pin state (active only)."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "foxden.js").read_text()
+    order = [src.index(f'data-id="{k}"') for k in ("pins", "susp", "lfilter", "loras")]
+    assert order == sorted(order), "pins, suspended tray, filter, list — in that order"
+    assert "loras: pins.payload()" in src and "suspended_loras: pins.suspendedPayload()" in src
+    assert "pins.restoreFrom(e.loras, e.suspended_loras)" in src      # faithful Reuse
+    assert "pickList(allLoras, el.lfilter.value)" in src              # filter -> list only

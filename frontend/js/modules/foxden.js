@@ -4,6 +4,7 @@
 // Backend: /api/foxden/*. No frameworks, no build step.
 import { registerModule } from '../shell.js';
 import { readCollapsed, writeCollapsed, recentLabel } from './foxden-recent.js';
+import { createPins } from './foxden-loras.js';
 
 const API = '/api/foxden';
 const PRESETS = { landscape: [1024, 576], portrait: [576, 1024] };
@@ -37,6 +38,8 @@ registerModule({
             <button class="ee-btn fx-btn" data-id="dice">🎲 Random</button>
           </div>
           <div><label>LoRAs <span data-id="lcount"></span></label>
+            <div class="fx-pins" data-id="pins"></div>
+            <div class="fx-susp" data-id="susp"></div>
             <input type="text" data-id="lfilter" placeholder="filter…" style="margin-bottom:6px">
             <div class="fx-loras" data-id="loras"></div></div>
           <button class="ee-btn primary fx-go" data-id="go">⚡ Generate</button>
@@ -61,12 +64,13 @@ registerModule({
     </div>`;
     const $ = id => panel.querySelector(`[data-id="${id}"]`);
     const el = Object.fromEntries(['conn', 'wf', 'prompt', 'aspects', 'seed', 'dice',
-      'lcount', 'lfilter', 'loras', 'go', 'status', 'out', 'recent', 'recentwrap',
+      'lcount', 'lfilter', 'loras', 'pins', 'susp', 'go', 'status', 'out', 'recent', 'recentwrap',
       'refresh', 'rtoggle', 'rcount', 'big', 'bigmeta', 'reuse', 'bigclose', 'bigimg'].map(k => [k, $(k)]));
 
     let aspect = 'landscape';
     let allLoras = [];
-    const sel = new Map();          // lora name -> strength (selected only)
+    const pins = createPins();      // active pins + suspended tray (foxden-loras.js)
+    let suspOpen = false;
     let bigEntry = null;
     let busy = false;
 
@@ -92,37 +96,64 @@ registerModule({
       } catch (e) { el.conn.textContent = 'config failed: ' + e.message; el.conn.className = 'fx-status err'; }
     }
 
+    function chip(n, strength, parked) {
+      const c = document.createElement('div');
+      c.className = 'fx-chip' + (parked ? ' parked' : '');
+      const nm = document.createElement('span');
+      nm.className = 'nm'; nm.title = n; nm.textContent = n;
+      const val = document.createElement('span');
+      val.className = 'fx-status val'; val.textContent = Number(strength).toFixed(2);
+      const rg = document.createElement('input');
+      rg.type = 'range'; rg.min = '-1'; rg.max = '2'; rg.step = '0.05'; rg.value = strength;
+      rg.addEventListener('input', () => {
+        const v = parseFloat(rg.value); pins.setStrength(n, v); val.textContent = v.toFixed(2);
+      });
+      const mk = (txt, title, fn) => {
+        const b = document.createElement('button');
+        b.className = 'ee-btn fx-btn'; b.textContent = txt; b.title = title;
+        b.addEventListener('click', fn); return b;
+      };
+      const top = document.createElement('div'); top.className = 'fx-row top';
+      top.append(nm, val,
+        parked ? mk('▶', 'restore', () => { pins.restore(n); renderLoras(); })
+               : mk('⏸', 'suspend (keeps strength)', () => { pins.suspend(n); renderLoras(); }),
+        mk('✕', 'remove', () => { pins.remove(n); renderLoras(); }));
+      c.appendChild(top);
+      if (!parked) c.appendChild(rg);
+      return c;
+    }
+
     function renderLoras() {
-      const q = el.lfilter.value.trim().toLowerCase();
-      el.lcount.textContent = sel.size ? `(${sel.size} on)` : '';
+      el.lcount.textContent = pins.count() ? `(${pins.count()} on)` : '';
+      // pinned chips: JUST above the list; the filter never touches these
+      el.pins.innerHTML = '';
+      for (const [n, st] of pins.active) el.pins.appendChild(chip(n, st, false));
+      // collapsed "suspended (N)" tray
+      el.susp.innerHTML = '';
+      if (pins.suspended.size) {
+        const hd = document.createElement('button');
+        hd.className = 'ee-btn fx-btn'; hd.setAttribute('data-id', 'susp-toggle');
+        hd.textContent = `${suspOpen ? '▾' : '▸'} suspended (${pins.suspended.size})`;
+        hd.addEventListener('click', () => { suspOpen = !suspOpen; renderLoras(); });
+        el.susp.appendChild(hd);
+        if (suspOpen) for (const [n, st] of pins.suspended) el.susp.appendChild(chip(n, st, true));
+      }
+      // pick list: filtered; tap to pin at 1.0
       el.loras.innerHTML = '';
-      const shown = allLoras.filter(n => sel.has(n) || !q || n.toLowerCase().includes(q));
+      const shown = pins.pickList(allLoras, el.lfilter.value);
       if (!shown.length) el.loras.innerHTML = '<span class="fx-status">no LoRAs found</span>';
       for (const n of shown) {
-        const on = sel.has(n);
         const card = document.createElement('div');
-        card.className = 'fx-lora' + (on ? ' on' : '');
+        card.className = 'fx-lora';
         const top = document.createElement('div');
         top.className = 'fx-row';
         const nm = document.createElement('span');
         nm.className = 'nm'; nm.textContent = n;
         const tg = document.createElement('button');
-        tg.className = 'ee-btn fx-btn' + (on ? ' on' : '');
-        tg.textContent = on ? 'On' : 'Off';
-        tg.addEventListener('click', () => { on ? sel.delete(n) : sel.set(n, 1.0); renderLoras(); });
+        tg.className = 'ee-btn fx-btn'; tg.textContent = '＋ Pin';
+        tg.addEventListener('click', () => { pins.pin(n, 1.0); renderLoras(); });
         top.append(nm, tg);
         card.appendChild(top);
-        if (on) {
-          const row = document.createElement('div');
-          row.className = 'fx-row';
-          const rg = document.createElement('input');
-          rg.type = 'range'; rg.min = '-1'; rg.max = '2'; rg.step = '0.05'; rg.value = sel.get(n);
-          const val = document.createElement('span');
-          val.className = 'fx-status'; val.textContent = Number(sel.get(n)).toFixed(2);
-          rg.addEventListener('input', () => { sel.set(n, parseFloat(rg.value)); val.textContent = parseFloat(rg.value).toFixed(2); });
-          row.append(rg, val);
-          card.appendChild(row);
-        }
         el.loras.appendChild(card);
       }
     }
@@ -146,7 +177,8 @@ registerModule({
       const [width, height] = PRESETS[aspect];
       const body = {
         workflow: el.wf.value, prompt, width, height,
-        loras: [...sel].map(([name, strength_model]) => ({ name, strength_model })),
+        loras: pins.payload(),
+        suspended_loras: pins.suspendedPayload(),
       };
       if (el.seed.value !== '') body.seed = parseInt(el.seed.value);
       try {
@@ -199,7 +231,7 @@ registerModule({
       const e = bigEntry; if (!e) return;
       el.prompt.value = e.prompt; el.seed.value = e.seed;
       if ([...el.wf.options].some(o => o.value === e.workflow && !o.disabled)) el.wf.value = e.workflow;
-      sel.clear(); (e.loras || []).forEach(l => sel.set(l.name, l.strength_model));
+      pins.restoreFrom(e.loras, e.suspended_loras);
       renderLoras();
       el.bigclose.click();
     });

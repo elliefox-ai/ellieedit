@@ -289,6 +289,9 @@ class GenerateBody(BaseModel):
     width: int | None = None
     height: int | None = None
     loras: list[LoraSpec] = []
+    # Parked (suspended) pins: never reach the graph — recorded only so
+    # "Reuse settings" can restore the tray faithfully.
+    suspended_loras: list[LoraSpec] = []
     steps: int | None = None
 
 
@@ -341,6 +344,7 @@ def generate(body: GenerateBody):
         "prompt": body.prompt, "workflow": body.workflow, "seed": seed,
         "width": body.width, "height": body.height, "steps": body.steps,
         "loras": [lo.model_dump() for lo in body.loras],
+        "suspended_loras": [lo.model_dump() for lo in body.suspended_loras],
         "submitted": time.time(),
     }
     return {"prompt_id": pid, "seed": seed, "workflow": body.workflow}
@@ -437,6 +441,7 @@ def _log_recent(pid: str, images: list[dict]) -> None:
     _logged.add(pid)
     entry = {k: meta[k] for k in ("prompt", "workflow", "seed", "width",
                                   "height", "steps", "loras")}
+    entry["suspended_loras"] = meta.get("suspended_loras", [])
     entry.update(prompt_id=pid, ts=int(time.time()),
                  outputs=[{"filename": i["filename"],
                            "subfolder": i.get("subfolder", ""),
