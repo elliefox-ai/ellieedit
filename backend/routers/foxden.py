@@ -549,8 +549,22 @@ def status(prompt_id: str, background: BackgroundTasks):
         if young:
             out["state"] = "queued"     # submit/queue race window
         else:
-            out.update(state="error", error="unknown prompt id",
-                       log_tail=log_tail())
+            # Comfy removes a finished prompt from /queue and writes its
+            # history entry in two steps; a poll landing in that gap sees it
+            # in neither (2026-10-17: "unknown prompt id" shown for a render
+            # that was completing successfully). Re-check once before
+            # declaring death — the second look finds the history entry.
+            time.sleep(1.5)
+            try:
+                _s2, hist2 = _json(f"/history/{urllib.parse.quote(prompt_id)}")
+                entry2 = (hist2 or {}).get(prompt_id) if isinstance(hist2, dict) else None
+                queue2 = None if entry2 else _json("/queue")[1]
+                out = normalize_status(prompt_id, entry2, queue2)
+            except ComfyDown:
+                pass
+            if out["state"] == "unknown":
+                out.update(state="error", error="unknown prompt id",
+                           log_tail=log_tail())
     images = out.pop("_images", None)
     if out["state"] == "done" and images:
         _log_recent(prompt_id, images)
