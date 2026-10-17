@@ -158,28 +158,50 @@ def _only(wf, class_type):
 
 
 def find_slots(wf: dict) -> dict:
-    """Discover edit slots. klein verified: prompt 668, seed 730, guider 735,
-    model source 743, size literals 729+731, steps on 731."""
-    guider = _only(wf, "CFGGuider")
-    seed = _only(wf, "RandomNoise")
-    ins = wf[guider]["inputs"]
-    if not is_link(ins.get("model")) or not is_link(ins.get("positive")):
-        raise HTTPException(400, "CFGGuider model/positive are not links")
+    """Discover edit slots. Two graph families:
+    - klein (CFGGuider/RandomNoise/SamplerCustomAdvanced): prompt 668, seed 730,
+      guider 735, model source 743, size literals 729+731, steps on 731.
+    - ksampler (classic KSampler graphs, e.g. krea2_gen_basic): seed may be a
+      link to a Seed (rgthree) node; prompt walked the same way; size may be
+      link-driven (ResolutionSelector) and then is left alone."""
+    guiders = [k for k, n in wf.items() if n["class_type"] == "CFGGuider"]
+    if len(guiders) == 1:
+        return _find_slots_cfg(wf, guiders[0])
+    samplers = [k for k, n in wf.items() if n["class_type"] == "KSampler"]
+    if len(samplers) == 1:
+        return _find_slots_ksampler(wf, samplers[0])
+    raise HTTPException(
+        400, "workflow has neither exactly one CFGGuider nor exactly one KSampler")
+
+
+def _find_prompt_upstream(wf: dict, positive_link: list) -> tuple:
+    """Walk upstream from a positive conditioning link to the literal prompt
+    node. Empty-string literals are skipped (StringConcatenate string_b='')."""
     prompt = None
-    seen, frontier = set(), [ins["positive"][0]]
+    seen, frontier = set(), [positive_link[0]]
     while frontier and prompt is None:
         nid = frontier.pop(0)
         if nid in seen or nid not in wf:
             continue
         seen.add(nid)
         for key in ("string", "text", "prompt"):
-            if isinstance(wf[nid]["inputs"].get(key), str):
+            v = wf[nid]["inputs"].get(key)
+            if isinstance(v, str) and v.strip():
                 prompt = (nid, key)
                 break
         else:
             frontier += [v[0] for v in wf[nid]["inputs"].values() if is_link(v)]
     if prompt is None:
-        raise HTTPException(400, "no literal prompt node upstream of guider")
+        raise HTTPException(400, "no literal prompt node upstream of sampler")
+    return prompt
+
+
+def _find_slots_cfg(wf: dict, guider: str) -> dict:
+    ins = wf[guider]["inputs"]
+    if not is_link(ins.get("model")) or not is_link(ins.get("positive")):
+        raise HTTPException(400, "CFGGuider model/positive are not links")
+    prompt = _find_prompt_upstream(wf, ins["positive"])
+    seed = _only(wf, "RandomNoise")
     size = [k for k, n in wf.items()
             if isinstance(n["inputs"].get("width"), int)
             and isinstance(n["inputs"].get("height"), int)
@@ -190,6 +212,30 @@ def find_slots(wf: dict) -> dict:
     return {"guider": guider, "seed": seed, "prompt": prompt,
             "model_src": ins["model"][0], "model_slot": ins["model"][1],
             "size": size, "steps": steps}
+
+
+def _find_slots_ksampler(wf: dict, sid: str) -> dict:
+    ins = wf[sid]["inputs"]
+    if not is_link(ins.get("model")) or not is_link(ins.get("positive")):
+        raise HTTPException(400, "KSampler model/positive are not links")
+    prompt = _find_prompt_upstream(wf, ins["positive"])
+    # seed: literal on the KSampler, or a link to a node with a literal `seed`.
+    if isinstance(ins.get("seed"), int):
+        seed, seed_key = sid, "seed"
+    elif is_link(ins.get("seed")) and isinstance(
+            wf.get(ins["seed"][0], {}).get("inputs", {}).get("seed"), int):
+        seed, seed_key = ins["seed"][0], "seed"
+    else:
+        raise HTTPException(400, "KSampler seed is neither literal nor linked "
+                                 "to a node with a literal seed")
+    size = [k for k, n in wf.items()
+            if isinstance(n["inputs"].get("width"), int)
+            and isinstance(n["inputs"].get("height"), int)
+            and ("Latent" in n["class_type"] or "Scheduler" in n["class_type"])]
+    steps = [sid] if isinstance(ins.get("steps"), int) else []
+    return {"guider": sid, "seed": seed, "seed_key": seed_key,
+            "prompt": prompt, "model_src": ins["model"][0],
+            "model_slot": ins["model"][1], "size": size, "steps": steps}
 
 
 def _next_id(wf: dict) -> int:
@@ -241,7 +287,8 @@ def inject_input_image(wf: dict, name: str) -> None:
     VAEEncode -> SamplerCustomAdvanced.latent_image, replacing the
     EmptyFlux2LatentImage link. The VAE is the one the graph already decodes
     with. The now-unreferenced empty-latent node is dropped."""
-    sid = _only(wf, "SamplerCustomAdvanced")
+    adv = [k for k, n in wf.items() if n["class_type"] == "SamplerCustomAdvanced"]
+    sid = _only(wf, "SamplerCustomAdvanced") if len(adv) == 1 else _only(wf, "KSampler")
     vae = wf[_only(wf, "VAEDecode")]["inputs"].get("vae")
     if not is_link(vae):
         raise HTTPException(400, "VAEDecode.vae is not a link; cannot encode input image")
@@ -269,7 +316,7 @@ def apply_edits(wf: dict, prompt: str, seed: int, width=None, height=None,
     s = find_slots(wf)
     pid, pkey = s["prompt"]
     wf[pid]["inputs"][pkey] = prompt
-    wf[s["seed"]]["inputs"]["noise_seed"] = int(seed)
+    wf[s["seed"]]["inputs"][s.get("seed_key", "noise_seed")] = int(seed)
     if (width is None) != (height is None):
         raise HTTPException(400, "give both width and height, or neither")
     if width is not None:
