@@ -28,6 +28,8 @@ registerModule({
       <div class="fx-body">
         <div class="fx-panel">
           <div class="fx-status" data-id="conn">connecting…</div>
+          <button class="ee-btn primary fx-go" data-id="go">⚡ Generate</button>
+          <div class="fx-status" data-id="status"></div>
           <div class="fx-row fx-presets">
             <select data-id="preset-pick" style="flex:1;min-width:140px"><option value="">Presets…</option></select>
             <label class="fx-lock"><input type="checkbox" data-id="preset-lock"> 🔒 seed</label>
@@ -61,8 +63,6 @@ registerModule({
             <div class="fx-susp" data-id="susp"></div>
             <input type="text" data-id="lfilter" placeholder="filter…" style="margin-bottom:6px">
             <div class="fx-loras" data-id="loras"></div></div>
-          <button class="ee-btn primary fx-go" data-id="go">⚡ Generate</button>
-          <div class="fx-status" data-id="status"></div>
         </div>
         <div class="fx-out" data-id="out"></div>
       </div>
