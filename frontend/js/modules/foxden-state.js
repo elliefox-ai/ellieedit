@@ -36,7 +36,14 @@ export function presetState(state, lockSeed) {
 
 // Trailing debounce with an immediate flush (used on tab-hide / page-hide so a
 // sleeping tablet doesn't lose the last edit).
-export function debounce(fn, ms, timers = { set: setTimeout, clear: clearTimeout }) {
+// 2026-10-17: wrap setTimeout/clearTimeout in arrow functions — storing them
+// bare in the timers object unbinds them from Window, and calling
+// timers.set(...) later throws "Can only call Window.setTimeout on instances
+// of Window" (Safari) / "Illegal invocation" (Chrome).
+export function debounce(fn, ms, timers = {
+  set: (f, d) => setTimeout(f, d),
+  clear: (t) => clearTimeout(t),
+}) {
   let t = null;
   const run = (...a) => { if (t) timers.clear(t); t = timers.set(() => { t = null; fn(...a); }, ms); };
   run.flush = (...a) => { if (t) { timers.clear(t); t = null; } fn(...a); };
