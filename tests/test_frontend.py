@@ -199,7 +199,7 @@ def test_task7_every_control_keeps_its_id_and_lives_in_the_right_surface():
     the repaint drawer (in-flow, offsets canvas). Detect is retired: no sheet
     markup, no detect/click-add controls; its diff sliders moved to the tools row.
     Every surviving data-id/data-act appears exactly once."""
-    _, html = _fc_html()
+    src, html = _fc_html()
     band = html[html.index('data-id="tools-drawer"'):html.index('data-id="repaint-drawer"')]
     rep = html[html.index('data-id="repaint-drawer"'):html.index('<div class="fc-canvas-wrap"')]
     for i in OLD_IDS + ["zoom-slider", "zoom-val"]:
@@ -218,7 +218,9 @@ def test_task7_every_control_keeps_its_id_and_lives_in_the_right_surface():
               'data-act="keep"', 'data-act="discard"',
               'data-id="threshold"', 'data-id="min-size"', 'data-id="max-size"'):
         assert x in band, x
-    assert band.count('<div class="fc-row"') == 1, "tools drawer must be a single row"
+    assert band.count('<div class="fc-row oneline"') == 1, "tools drawer must be a single row"
+    # 2026-10-20: one LINE, not just one row — it must never wrap (scrolls sideways instead)
+    assert ".fc-row.oneline { flex-wrap: nowrap;" in src, "tools row must not wrap"
     # repaint drawer: prompt + repaint options + its own Generate (same handler)
     for x in ('data-id="repaint-prompt"', 'data-id="denoise"', 'data-id="seed-input"',
               'data-id="randomize-seed"', 'data-id="detail-crop"',
@@ -240,9 +242,10 @@ def test_task7_sheets_never_touch_canvas_state_and_shortcuts_survive():
     assert "drawer.hidden = !open;" in src
     assert "btn.setAttribute('aria-expanded', String(open))" in src
     assert src.count("this.toggleDrawer(") == 3   # tools, thumbs, repaint
-    # shortcuts untouched (F/B/M still wired at document level)
-    for k in ("e.key === 'f'", "e.key === 'b'", "e.key === 'm'"):
+    # shortcuts untouched (B/M still wired at document level; F retired with detect)
+    for k in ("e.key === 'b'", "e.key === 'm'"):
         assert k in src
+    assert "e.key === 'f'" not in src and "toggleClickToAdd" not in src
     # drawer Generate + Enter use the one generateRepaint handler
     assert src.count("this.generateRepaint()") >= 3
     # repaint drawer is in-flow (offsets the canvas), not fixed overlay
@@ -278,3 +281,11 @@ def test_facecycle_handoff_receipt_survives_status_rerender():
     assert "const receipt = this.handoffReceipt" in us
     assert us.count("+ receipt;") == 2          # both branches re-attach it
     assert src.count("this.handoffReceipt = null;") == 1   # fresh stack clears it
+
+
+def test_detect_method_fully_removed():
+    """Work order 2026-10-20 item 2: no face-api, no detect/click-add code paths."""
+    src, _ = _fc_html()
+    for gone in ("faceapi", "face-api", "loadFaceModels", "detectFaces", "detectFaceAtPoint",
+                 "clickToAddMode", "detectBtn", "clickAddBtn", "rectOverlap"):
+        assert gone not in src, gone

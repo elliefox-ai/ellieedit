@@ -21,6 +21,10 @@ function panelHTML() {
     }
     .fc-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
     .fc-row.top { justify-content: space-between; }
+    /* Tools drawer is a single line (2026-10-20): never wraps; scrolls sideways when narrow. */
+    .fc-row.oneline { flex-wrap: nowrap; gap: 8px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .fc-row.oneline > * { flex-shrink: 0; }
+    .fc-row.oneline > .fc-gens { flex-shrink: 1; min-width: 0; }
     .fc-header h1 { font-size: 17px; font-weight: 600; color: #e0e0f0; }
     .fc-header h1 .subtitle { color: #6c6c8e; font-weight: 400; font-size: 12px; margin-left: 8px; }
     label { font-size: 11px; color: #8a8aaa; display: flex; align-items: center; gap: 6px; }
@@ -102,7 +106,7 @@ function panelHTML() {
       </div>
     </div>
     <div class="fc-drawer" data-id="tools-drawer" hidden>
-    <div class="fc-row" data-group="controls">
+    <div class="fc-row oneline" data-group="controls">
       <button class="ee-btn" data-act="draw-box">✏️ Draw Box</button>
       <button class="ee-btn" data-act="draw-mask">🖌️ Draw Mask</button>
       <label data-id="brush-controls" style="display:none">Brush <input type="range" data-id="brush-size" min="5" max="80" value="25"><span class="val" data-id="brush-size-val">25</span></label>
@@ -198,7 +202,6 @@ export class FaceCycle {
     this.state = { images: [], width: 0, height: 0, activeRegions: [], selections: {}, baseVariant: 0 };
     this.nextRegionId = 0;
     this.selectedRegionId = null;
-    this.clickToAddMode = false;
     this.drawBoxMode = false;
     this.drawMaskMode = false;
     this.moveDrag = null;
@@ -220,8 +223,6 @@ export class FaceCycle {
     this.strokeBBox = null;   // bbox of current paint strokes (auto-grow)
     this.paintArm = null;     // armed paint: { x0, y0, mode } — tap vs stroke disambiguation
     this.lastRunInfo = null;  // 'detail crop …' / 'full-image' status for the last generate
-    this.faceModelsLoaded = false;
-    this.faceApiLoading = false;
     this.BADGE_H = 20;
     this.RESIZE_TAB_SIZE = 10;
 
@@ -419,7 +420,6 @@ export class FaceCycle {
     this.el.mainView.style.display = 'none';
     this.el.dropZone.style.display = 'flex';
     this.el.exportBtn.disabled = true;
-    if (this.clickToAddMode) this.toggleClickToAdd();
     if (this.drawBoxMode) this.toggleDrawBox();
     if (this.drawMaskMode) this.toggleDrawMask();
   }
@@ -702,7 +702,6 @@ export class FaceCycle {
     parts.push(`<span class="badge">${n} reg${n !== 1 ? 's' : ''}</span>`);
     if (manualCount > 0) parts.push(`<span class="badge" style="color:#e8b84d" title="manual regions">${manualCount} man</span>`);
     let modeIndicator = '';
-    if (this.clickToAddMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">👆 add</span>';
     if (this.drawBoxMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">✏️ box</span>';
     if (this.drawMaskMode) modeIndicator = ' <span class="badge" style="color:#e8b84d" title="Draw Mask — click a region to edit its mask · paint adds (box auto-grows) · Enter=apply · Esc=reset · E=erase · ,/. = brush size">🖌 mask</span>';
     this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + statusBadge + maskHint + runBadge + gensBadge + receipt;
@@ -957,11 +956,6 @@ export class FaceCycle {
 
   onPointerDown(e, pt) {
     const { x, y } = pt;
-    if (this.clickToAddMode) {
-      if (e.button === 0) { e.preventDefault(); this.detectFaceAtPoint(x, y); }
-      else if (e.button === 2) { e.preventDefault(); this.toggleClickToAdd(); }
-      return;
-    }
     if (this.drawBoxMode) {
       if (e.button === 0) { e.preventDefault(); this.drawBoxDrag = { active: true, startX: x, startY: y, curX: x, curY: y }; }
       else if (e.button === 2) { e.preventDefault(); this.toggleDrawBox(); }
@@ -1249,7 +1243,6 @@ export class FaceCycle {
   }
 
   onKeyDownInner(e) {
-    if (e.key === 'f' || e.key === 'F') { if (this.state.images.length) this.toggleClickToAdd(); return; }
     if (e.key === 'b' || e.key === 'B') { if (this.state.images.length) this.toggleDrawBox(); return; }
     if (e.key === 'm' || e.key === 'M') { if (this.state.images.length) this.toggleDrawMask(); return; }
 
@@ -1325,194 +1318,9 @@ export class FaceCycle {
     setTimeout(() => this.render(), 200);
   }
 
-  // ── Face detection (face-api.js, lazy loaded — as original) ──
-  async loadFaceModels() {
-    if (this.faceModelsLoaded) return true;
-    if (this.faceApiLoading) {
-      while (this.faceApiLoading) await new Promise(r => setTimeout(r, 100));
-      return this.faceModelsLoaded;
-    }
-    this.faceApiLoading = true;
-    const CDN = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.14';
-    const MODEL_URL = CDN + '/model';
-    try {
-      this.el.detectBtn.textContent = '⏳ Loading model…';
-      this.el.detectBtn.disabled = true;
-      if (!window.faceapi) {
-        await new Promise((resolve, reject) => {
-          const s = document.createElement('script');
-          s.src = CDN + '/dist/face-api.js';
-          s.onload = resolve;
-          s.onerror = () => reject(new Error('Failed to load face-api.js'));
-          document.head.appendChild(s);
-        });
-      }
-      await window.faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-      this.faceModelsLoaded = true;
-      return true;
-    } catch (err) {
-      console.error('Face model load failed:', err);
-      this.el.statusBar.innerHTML = '<span class="badge">⚠️ Face detection unavailable</span> <span class="help">' + err.message + '</span>';
-      return false;
-    } finally {
-      this.faceApiLoading = false;
-      this.el.detectBtn.textContent = '🔍 Detect Faces';
-      this.el.detectBtn.disabled = false;
-    }
-  }
-
-  rectOverlap(a, b) {
-    const x1 = Math.max(a.x, b.x);
-    const y1 = Math.max(a.y, b.y);
-    const x2 = Math.min(a.x + a.w, b.x + b.w);
-    const y2 = Math.min(a.y + a.h, b.y + b.h);
-    if (x2 <= x1 || y2 <= y1) return 0;
-    return (x2 - x1) * (y2 - y1);
-  }
-
-  async detectFaces() {
-    if (this.state.images.length === 0) return;
-    const ok = await this.loadFaceModels();
-    if (!ok) return;
-    this.el.detectBtn.textContent = '⏳ Detecting…';
-    this.el.detectBtn.disabled = true;
-    try {
-      const detCanvas = document.createElement('canvas');
-      detCanvas.width = this.state.width;
-      detCanvas.height = this.state.height;
-      detCanvas.getContext('2d').putImageData(this.state.images[0].processedData, 0, 0);
-      const options = new window.faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.3 });
-      const detections = await window.faceapi.detectAllFaces(detCanvas, options);
-      if (detections.length === 0) {
-        this.el.statusBar.innerHTML = '<span class="badge">No faces detected</span> <span class="help">Try a different image or adjust settings.</span>';
-        setTimeout(() => this.updateStatusBar(), 2500);
-        return;
-      }
-      const padPct = 0.15;
-      const detectedRegions = detections.map(d => {
-        const box = d.box;
-        const padW = box.width * padPct;
-        const padH = box.height * padPct;
-        return {
-          x: Math.max(0, Math.round(box.x - padW)),
-          y: Math.max(0, Math.round(box.y - padH)),
-          w: Math.min(this.state.width, Math.round(box.width + padW * 2)),
-          h: Math.min(this.state.height, Math.round(box.height + padH * 2)),
-        };
-      });
-      const mode = this.el.faceModeSelect.value;
-      if (mode === 'replace') {
-        const manualRegions = this.state.activeRegions.filter(r => r.manual);
-        const newAutoRegions = detectedRegions.map(r => ({ ...r, id: this.nextRegionId++, manual: false, status: 'idle' }));
-        this.state.activeRegions = [...newAutoRegions, ...manualRegions];
-      } else {
-        const existing = [...this.state.activeRegions];
-        for (const dr of detectedRegions) {
-          let overlaps = false;
-          for (const er of existing) {
-            const overlapArea = this.rectOverlap(dr, er);
-            const drArea = dr.w * dr.h;
-            if (drArea > 0 && overlapArea / drArea > 0.5) { overlaps = true; break; }
-          }
-          if (!overlaps) existing.push({ ...dr, id: this.nextRegionId++, manual: false, status: 'idle' });
-        }
-        this.state.activeRegions = existing;
-      }
-      for (const r of this.state.activeRegions) {
-        if (this.state.selections[r.id] === undefined) this.state.selections[r.id] = this.state.baseVariant;
-      }
-      this.updateStatusBar();
-      this.el.exportBtn.disabled = this.state.activeRegions.length === 0;
-      this.render();
-    } catch (err) {
-      console.error('Face detection error:', err);
-      this.el.statusBar.innerHTML = '<span class="badge">⚠️ Detection error</span> <span class="help">' + err.message + '</span>';
-    } finally {
-      this.el.detectBtn.textContent = '🔍 Detect Faces';
-      this.el.detectBtn.disabled = false;
-    }
-  }
-
-  toggleClickToAdd() {
-    this.clickToAddMode = !this.clickToAddMode;
-    if (this.clickToAddMode) {
-      if (this.drawBoxMode) this.toggleDrawBox();
-      this.el.clickAddBtn.classList.add('active-toggle');
-      this.stack.setCursor('crosshair');
-    } else {
-      this.el.clickAddBtn.classList.remove('active-toggle');
-      this.stack.setCursor('pointer');
-    }
-    this.updateStatusBar();
-  }
-
-  async detectFaceAtPoint(x, y) {
-    const ok = await this.loadFaceModels();
-    if (!ok) return;
-    const cropSize = Math.round(Math.min(this.state.width, this.state.height) * 0.4);
-    const halfSize = cropSize / 2;
-    const cropX = Math.max(0, Math.round(x - halfSize));
-    const cropY = Math.max(0, Math.round(y - halfSize));
-    const cropW = Math.min(cropSize, this.state.width - cropX);
-    const cropH = Math.min(cropSize, this.state.height - cropY);
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = cropW;
-    cropCanvas.height = cropH;
-    cropCanvas.getContext('2d').putImageData(this.state.images[0].processedData, -cropX, -cropY);
-    const options = new window.faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.15 });
-    try {
-      const detections = await window.faceapi.detectAllFaces(cropCanvas, options);
-      if (detections.length === 0) {
-        this.el.statusBar.innerHTML = '<span class="badge">No face found there</span> <span class="help">Try clicking closer to the center of the face.</span>';
-        setTimeout(() => { if (this.clickToAddMode) this.updateStatusBar(); }, 2000);
-        return;
-      }
-      const localX = x - cropX;
-      const localY = y - cropY;
-      let best = null, bestDist = Infinity;
-      for (const d of detections) {
-        const cx = d.box.x + d.box.width / 2;
-        const cy = d.box.y + d.box.height / 2;
-        const dist = Math.hypot(cx - localX, cy - localY);
-        if (dist < bestDist) { bestDist = dist; best = d; }
-      }
-      const box = best.box;
-      const padPct = 0.15;
-      const padW = box.width * padPct;
-      const padH = box.height * padPct;
-      const faceRegion = {
-        x: Math.max(0, Math.round(box.x + cropX - padW)),
-        y: Math.max(0, Math.round(box.y + cropY - padH)),
-        w: Math.min(this.state.width, Math.round(box.width + padW * 2)),
-        h: Math.min(this.state.height, Math.round(box.height + padH * 2)),
-      };
-      let overlaps = false;
-      for (const er of this.state.activeRegions) {
-        const overlap = this.rectOverlap(faceRegion, er);
-        if (faceRegion.w * faceRegion.h > 0 && overlap / (faceRegion.w * faceRegion.h) > 0.5) { overlaps = true; break; }
-      }
-      if (overlaps) {
-        this.el.statusBar.innerHTML = '<span class="badge">Already covered</span> <span class="help">That area already has a region.</span>';
-        setTimeout(() => { if (this.clickToAddMode) this.updateStatusBar(); }, 2000);
-      } else {
-        const rid = this.nextRegionId++;
-        this.state.activeRegions.push({ ...faceRegion, id: rid, manual: true });
-        this.state.selections[rid] = this.state.baseVariant;
-        this.selectedRegionId = rid;
-        this.updateStatusBar();
-        this.el.exportBtn.disabled = this.state.activeRegions.length === 0;
-      }
-      this.render();
-    } catch (err) {
-      console.error('Click Face detection error:', err);
-      this.el.statusBar.innerHTML = '<span class="badge">⚠️ Detection error</span> <span class="help">' + err.message + '</span>';
-    }
-  }
-
   toggleDrawBox() {
     this.drawBoxMode = !this.drawBoxMode;
     if (this.drawBoxMode) {
-      if (this.clickToAddMode) this.toggleClickToAdd();
       this.el.drawBoxBtn.classList.add('active-toggle');
       this.stack.setCursor('crosshair');
     } else {
@@ -1526,7 +1334,6 @@ export class FaceCycle {
   toggleDrawMask() {
     this.drawMaskMode = !this.drawMaskMode;
     if (this.drawMaskMode) {
-      if (this.clickToAddMode) this.toggleClickToAdd();
       if (this.drawBoxMode) this.toggleDrawBox();
       this.el.drawMaskBtn.classList.add('active-toggle');
       this.el.brushControls.style.display = '';
