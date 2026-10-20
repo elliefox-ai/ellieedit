@@ -678,7 +678,11 @@ def families(state: str = "unresolved", cursor: str = "",
     # pre-marked UNCOMMITTED draft client-side (rehydrated flag).
     rehydrated = 0
     archived_hidden = 0
-    if state == "unresolved":
+    # Death-row rehydration RETIRED (2026-10-19): this was a one-time helper
+    # for a specific review pattern (2026-10-09b) that kept re-lighting
+    # committed families in the unresolved queue forever. Committed stays
+    # committed; a family is only listed here if it is genuinely unresolved.
+    if False and state == "unresolved":
         dh = _death_row_rows(verdicts, idx)
         have = {r["id"] for r in rows}
         dh = [r for r in dh if r["id"] not in have]
