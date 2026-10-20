@@ -38,7 +38,8 @@ log = logging.getLogger("ellieedit.foxden")
 router = APIRouter(prefix="/api/foxden", tags=["foxden"])
 
 WORKFLOW_FILES = {"klein": "klein_gen_basic.json",
-                  "krea2": "krea2_gen_basic.json"}
+                  "krea2": "krea2_gen_basic.json",
+                  "zengorestyle": "zengostyle_restyle_f2k4b_mkl.json"}
 LORA_EXTS = {".safetensors", ".pt", ".ckpt", ".pth"}
 UPLOAD_MAX = 25 * 1024 * 1024
 RECENT_MAX = 200
@@ -283,10 +284,18 @@ def wire_denoise(wf: dict, denoise: float) -> str | None:
 
 
 def inject_input_image(wf: dict, name: str) -> None:
-    """img2img on a graph with no upstream image chain (klein): LoadImage ->
-    VAEEncode -> SamplerCustomAdvanced.latent_image, replacing the
-    EmptyFlux2LatentImage link. The VAE is the one the graph already decodes
-    with. The now-unreferenced empty-latent node is dropped."""
+    """img2img input wiring, two graph shapes:
+    - t2i baseline (klein/krea2, no LoadImage): inject LoadImage ->
+      VAEEncode -> sampler.latent_image, replacing the EmptyFlux2LatentImage
+      link. The VAE is the one the graph already decodes with.
+    - graph already carries exactly one LoadImage (restyle graphs: the input
+      feeds VAEEncode AND downstream references like ColorMatch image_ref):
+      adopt it — repoint its image at the upload so every consumer follows.
+      Re-injecting here would desync the reference consumers."""
+    loads = [k for k, n in wf.items() if n["class_type"] == "LoadImage"]
+    if len(loads) == 1:
+        wf[loads[0]]["inputs"]["image"] = name
+        return
     adv = [k for k, n in wf.items() if n["class_type"] == "SamplerCustomAdvanced"]
     sid = _only(wf, "SamplerCustomAdvanced") if len(adv) == 1 else _only(wf, "KSampler")
     vae = wf[_only(wf, "VAEDecode")]["inputs"].get("vae")

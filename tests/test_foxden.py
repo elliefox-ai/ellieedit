@@ -282,7 +282,8 @@ def test_config_scans_loras_and_reports_reachability(client, monkeypatch):
     c = client.get("/api/foxden/config").json()
     assert c["loras"] == ["_Flux\\b.safetensors", "a.safetensors"]   # no notes.txt
     assert c["comfy_reachable"] is True
-    assert {w["id"]: w["available"] for w in c["workflows"]} == {"klein": True, "krea2": False}
+    assert {w["id"]: w["available"] for w in c["workflows"]} == {
+        "klein": True, "krea2": False, "zengorestyle": False}  # restyle added 2026-10-20
 
 
 def test_config_comfy_unreachable_is_graceful(client, monkeypatch):
