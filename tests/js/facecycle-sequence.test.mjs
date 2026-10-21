@@ -382,6 +382,124 @@ for (const g of [...A.gens, ...B.gens]) {
   fc.selectedRegionId = null;
 }
 
+// #J paint-target workflow (F2b, 2026-10-21): paint once, preview on the active
+// layer, EXPLICIT apply to the target, one undo step per apply.
+{
+  const ev = { button: 0, preventDefault() {} };
+  const key = k => fc.onKeyDownInner({ key: k, preventDefault() {} });
+  const callsOf = cv => ctxCache.get(cv)._calls;
+  const logLen = fc.undoLog.length;
+  const notes = []; fc.jobs.note = m => notes.push(m);   // spy: the real note schedules a 6s DOM timer
+  const saved = { gsel: A.gsel, mask: A.maskCanvas, status: A.status };
+  assert.ok(A.gens.length >= 2 && A.gens.every(g => g.raw), '#J fixture: A has re-maskable gens');
+  const [g0, g1] = A.gens;
+  const g0mask = g0.mask, g0canvas = g0.canvas, g1mask = g1.mask, g1canvas = g1.canvas, g1raw = g1.raw;
+
+  A.status = 'kept'; A.gsel = 1;
+  fc.drawMaskMode = true; fc.initMaskCanvas(); fc.selectedRegionId = A.id; fc.maskEditId = A.id;
+  fc.onPointerDown(ev, { x: A.x + 5, y: A.y + 5 });             // a real stroke inside A
+  fc.onPointerMove(ev, [{ x: A.x + 30, y: A.y + 20 }]);
+  fc.onPointerMove(ev, [{ x: A.x + 60, y: A.y + 30 }]);
+  fc.onPointerUp(ev, { x: A.x + 60, y: A.y + 30 });
+  assert.ok(A.maskCanvas, '#J painted a mask');
+
+  // (1) target = the layer being shown, and the status line says so
+  const T = fc.maskTarget();
+  assert.deepEqual([T.kind, T.index, T.gen === g1], ['gen', 1, true], '#J target is the active gen');
+  fc.updateStatusBar();
+  assert.ok(fc.el.statusBar.innerHTML.includes(`masking gen 2 of ${A.gens.length}`), '#J status names the target layer');
+
+  // (2) live preview = raw ∩ WORKING mask; display only — the gen itself is untouched
+  fc.render();
+  let P = fc.layerPreview;
+  assert.ok(P && P.gen === g1 && P.canvas !== g1canvas, '#J preview built for the active gen');
+  const pcalls = callsOf(P.canvas).filter(c => c[0] === 'drawImage');
+  assert.equal(pcalls[0][1], g1raw, '#J preview starts from the gen\'s RAW output');
+  assert.equal(pcalls[1][1].width, g1.rect.w, '#J …cut by the working mask at the gen\'s size');
+  assert.ok(fc.stack.ctx._calls.some(c => c[0] === 'drawImage' && c[1] === P.canvas), '#J the canvas shows the preview');
+  assert.equal(g1.canvas, g1canvas); assert.equal(g1.mask, g1mask);
+  fc.render(); assert.equal(fc.layerPreview, P, '#J preview is cached, not rebuilt per render');
+  // a further stroke changes the working mask → the preview is rebuilt, not stale
+  fc.onPointerDown(ev, { x: A.x + 8, y: A.y + 40 });
+  fc.onPointerMove(ev, [{ x: A.x + 30, y: A.y + 50 }]);
+  fc.onPointerMove(ev, [{ x: A.x + 55, y: A.y + 60 }]);
+  fc.onPointerUp(ev, { x: A.x + 55, y: A.y + 60 });
+  fc.render();
+  assert.ok(fc.layerPreview && fc.layerPreview !== P && fc.layerPreview.gen === g1, '#J preview rebuilt after another stroke');
+  P = fc.layerPreview;
+  const comp = fc.compositeSourceCanvas();
+  assert.ok(!callsOf(comp).some(c => c[0] === 'drawImage' && c[1] === P.canvas), '#J preview never leaks into the Repaint/Export composite');
+  assert.ok(callsOf(comp).some(c => c[0] === 'drawImage' && c[1] === g1canvas), '#J …which still carries the stored gen');
+
+  // (3) cycling = switching the target; keys act on the mask-edit region, not the Tab-focused one
+  const bBefore = B.gsel;
+  fc.focusedRegion = fc.state.activeRegions.indexOf(B);
+  key('[');
+  assert.equal(A.gsel, 0, '#J [ moves the target to the previous layer');
+  assert.ok(fc.layerPreview && fc.layerPreview !== P && fc.layerPreview.gen === g0, '#J the preview follows the new target (fresh, for that layer)');
+  assert.equal(B.gsel, bBefore, '#J the other region did not cycle');
+  assert.equal(fc.maskTarget().index, 0);
+  key(']'); assert.equal(A.gsel, 1);
+
+  // (4) Enter = explicit apply to the TARGET only; stays in mask-edit; one undo step
+  key('Enter');
+  assert.notEqual(g1.mask, g1mask, '#J target got its own mask snapshot');
+  assert.notEqual(g1.canvas, g1canvas, '#J …and was re-derived');
+  assert.equal(g1.raw, g1raw, '#J raw output is never touched');
+  assert.deepEqual([g1.mask.width, g1.mask.height], [g1.rect.w, g1.rect.h], '#J snapshot is local to the gen rect');
+  assert.equal(g0.mask, g0mask); assert.equal(g0.canvas, g0canvas, '#J other layers untouched');
+  assert.equal(fc.maskEditId, A.id, '#J mask-edit stays open to apply the same mask elsewhere');
+  assert.equal(fc.undoLog[fc.undoLog.length - 1].type, 'layer-mask', '#J apply is one undo step');
+  assert.ok(notes.some(m => /Mask applied to gen 2/.test(m)), '#J apply confirms which layer it hit');
+
+  // (5) paint once, apply to ANOTHER layer (button path)
+  key('['); assert.equal(A.gsel, 0);
+  assert.equal(fc.applyMaskToTarget(), true);
+  assert.notEqual(g0.mask, g0mask); assert.deepEqual([g0.mask.width, g0.mask.height], [g0.rect.w, g0.rect.h]);
+
+  // (6) one Undo per apply, in order
+  fc.undo();
+  assert.equal(g0.mask, g0mask); assert.equal(g0.canvas, g0canvas, '#J undo restores the last-applied layer');
+  assert.notEqual(g1.mask, g1mask, '#J …and only that layer');
+  fc.undo();
+  assert.equal(g1.mask, g1mask); assert.equal(g1.canvas, g1canvas, '#J second undo restores the first apply');
+
+  // (7) refusals: a gen with no raw can't be re-masked; no painted mask → nothing to apply
+  const legacy = { canvas: fakeEl('canvas'), rect: { x: A.x, y: A.y, w: 10, h: 10 } };
+  A.gens.push(legacy); A.gsel = A.gens.length - 1; fc.invalidateLayerPreview();
+  const n0 = fc.undoLog.length;
+  assert.equal(fc.applyMaskToTarget(), false);
+  assert.equal(fc.undoLog.length, n0, '#J refused apply logs nothing');
+  assert.ok(notes.some(m => /re-masking/.test(m)), '#J says why');
+  fc.updateStatusBar(); assert.ok(fc.el.statusBar.innerHTML.includes("can't be re-masked"), '#J status flags the legacy gen');
+  fc.render(); assert.equal(fc.layerPreview, null, '#J no preview for a gen without raw');
+  A.gens.pop(); A.gsel = 1; fc.invalidateLayerPreview();
+  const keepMask = A.maskCanvas; A.maskCanvas = null;
+  assert.equal(fc.applyMaskToTarget(), false);
+  assert.ok(notes.some(m => /Paint a mask first/.test(m)), '#J asks for a mask first');
+  A.maskCanvas = keepMask;
+
+  // (8) photo-layer target keeps the legacy meaning: Enter bakes the shared mask and leaves mask-edit
+  A.gsel = -1; fc.invalidateLayerPreview();
+  assert.equal(fc.maskTarget().kind, 'photo');
+  fc.updateStatusBar(); assert.ok(fc.el.statusBar.innerHTML.includes('masking photo'), '#J status names the photo layer');
+  key('Enter');
+  assert.equal(fc.maskEditId, null, '#J photo-target Enter = finish (unchanged behaviour)');
+
+  // (9) strip highlight follows the renderer's convention (-1 = photo shown): audit finding 7
+  const marks = () => fc.el.genStrip.children.slice(-A.gens.length).map(k => /current/.test(k.className));
+  fc.selectedRegionId = A.id;
+  A.gsel = -1; fc.renderGenStrip(); assert.deepEqual(marks(), A.gens.map(() => false), '#J no thumb highlighted while a photo layer shows');
+  A.gsel = 0; fc.renderGenStrip(); assert.deepEqual(marks(), A.gens.map((_, i) => i === 0), '#J exactly the shown gen is highlighted');
+  delete A.gsel; fc.renderGenStrip(); assert.deepEqual(marks(), A.gens.map(() => false), '#J gsel undefined highlights nothing (was: gen 0)');
+
+  // cleanup: leave the shared fixture as found
+  delete fc.jobs.note;
+  fc.drawMaskMode = false; fc.maskPaintCanvas = null; fc.maskPaintCtx = null; fc.maskEditId = null;
+  fc.selectedRegionId = null; fc.invalidateLayerPreview(); fc.undoLog.length = logLen;
+  A.gsel = saved.gsel; A.maskCanvas = saved.mask; A.status = saved.status;
+}
+
 // #D post-sequence: still no global pending anywhere.
 assert.equal(fc.pendingStore, undefined, '#D no pendingStore after full sequence');
 assert.equal('pending' in fc.stack, false, '#D no stack.pending after full sequence');

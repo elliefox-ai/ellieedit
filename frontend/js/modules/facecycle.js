@@ -5,7 +5,7 @@
 // (selected box → in-progress painted mask → last painted-mask region),
 // denoise slider driving BasicScheduler server-side.
 
-import { makeGenLayer, stepRing, followRegion, pickRepaintTarget } from './facecycle-layers.js';
+import { makeGenLayer, stepRing, followRegion, pickRepaintTarget, isRemaskable, activeLayer, describeLayer } from './facecycle-layers.js';
 import {} from './facecycle-sheets.js'; // controller retired 2026-10-16f (sheets → drawers); module kept for its tests
 import { registerModule } from '../shell.js';
 import { CanvasStack, drawFeatheredSource } from '../components/canvas-stack.js';
@@ -120,6 +120,7 @@ function panelHTML() {
       <button class="ee-btn" data-act="draw-mask">🖌️ Draw Mask</button>
       <label data-id="brush-controls" style="display:none">Brush <input type="range" data-id="brush-size" min="5" max="80" value="25"><span class="val" data-id="brush-size-val">25</span></label>
       <button class="ee-btn" data-act="erase" style="display:none">Erase: Off</button>
+      <button class="ee-btn primary" data-act="apply-mask" style="display:none" title="Apply the painted mask to the layer being shown (Enter). Cycle layers with [ ] or the strip, then apply again to try the same mask elsewhere.">✓ Apply to layer</button>
       <button class="ee-btn" data-act="remove-all">Remove All</button>
       <label title="Diff sensitivity — lower finds more regions">Δ <input type="range" data-id="threshold" min="3" max="80" value="20" style="max-width:90px"><span class="val" data-id="threshold-val">20</span></label>
       <label title="Minimum changed-region size (px)">min <input type="range" data-id="min-size" min="200" max="20000" value="1000" step="200" style="max-width:90px"><span class="val" data-id="min-size-val">1k</span></label>
@@ -190,7 +191,7 @@ export class FaceCycle {
       removeAllBtn: act('remove-all'),
       drawBoxBtn: act('draw-box'), drawMaskBtn: act('draw-mask'),
       brushControls: $('brush-controls'), brushSizeSlider: $('brush-size'),
-      brushSizeVal: $('brush-size-val'), eraseToggleBtn: act('erase'),
+      brushSizeVal: $('brush-size-val'), eraseToggleBtn: act('erase'), applyMaskBtn: act('apply-mask'),
       repaintPromptInput: $('repaint-prompt'),
       repaintSourceSelect: $('repaint-source'),
       repaintDrawer: $('repaint-drawer'), repaintGenerateBtn: act('generate-sheet'),
@@ -232,6 +233,7 @@ export class FaceCycle {
     this.strokeBBox = null;   // bbox of current paint strokes (auto-grow)
     this.paintArm = null;     // armed paint: { x0, y0, mode } — tap vs stroke disambiguation
     this.strokeUndo = null;   // snapshot taken at stroke start (mask-edit undo)
+    this.layerPreview = null; // F2b: { gen, canvas } — active gen ∩ working mask (display only)
     this.lastRunInfo = null;  // 'detail crop …' / 'full-image' status for the last generate
     this.BADGE_H = 20;
     this.RESIZE_TAB_SIZE = 10;
@@ -303,6 +305,7 @@ export class FaceCycle {
     this.el.drawBoxBtn.addEventListener('click', () => this.toggleDrawBox());
     this.el.drawMaskBtn.addEventListener('click', () => this.toggleDrawMask());
     this.el.eraseToggleBtn.addEventListener('click', () => this.toggleErase());
+    this.el.applyMaskBtn.addEventListener('click', () => this.applyMaskToTarget());
     this.el.brushSizeSlider.addEventListener('input', () => {
       this.brushSize = parseInt(this.el.brushSizeSlider.value);
       this.el.brushSizeVal.textContent = this.brushSize;
@@ -705,6 +708,18 @@ export class FaceCycle {
           : ' <span class="badge" style="color:#6c6c8e">⚡ select a region, draw a box (B) or paint a mask (M)</span>';
     }
 
+    // F2b: in mask-edit, always say WHICH layer the mask would apply to.
+    let layerBadge = '';
+    const mt = this.drawMaskMode ? this.maskTarget() : null;
+    if (mt) {
+      const lbl = describeLayer(mt.region, this.state.selections[mt.region.id] ?? this.state.baseVariant);
+      layerBadge = mt.kind === 'gen'
+        ? (isRemaskable(mt.gen)
+          ? ` <span class="badge" style="color:#7de08a">🎯 masking ${lbl} — Enter applies · [ ] changes layer</span>`
+          : ` <span class="badge" style="color:#e8b84d">🎯 ${lbl}: no raw output kept, can't be re-masked · [ ] changes layer</span>`)
+        : ` <span class="badge" style="color:#8ab4e8">🎯 masking ${lbl} (shared region mask, live) · [ ] picks a gen · Enter finishes</span>`;
+    }
+
     if (n === 0) {
       this.el.statusBar.innerHTML = '<span class="badge">' + (this.state.images.length < 2 ? 'Editor ready — draw a box (B) or click a region' : 'No changes detected') + '</span> <span class="help">' + (this.state.images.length < 2 ? 'Type a prompt (or leave empty), select a box, Generate to repaint.' : 'Try lowering sensitivity or min region size.') + '</span>' + statusBadge + maskHint + runBadge + gensBadge + receipt;
       return;
@@ -720,7 +735,7 @@ export class FaceCycle {
     let modeIndicator = '';
     if (this.drawBoxMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">✏️ box</span>';
     if (this.drawMaskMode) modeIndicator = ' <span class="badge" style="color:#e8b84d" title="Draw Mask — click a region to edit its mask · paint adds (box auto-grows) · Enter=apply · Esc=reset · E=erase · ,/. = brush size">🖌 mask</span>';
-    this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + statusBadge + maskHint + targetBadge + runBadge + gensBadge + receipt;
+    this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + statusBadge + maskHint + layerBadge + targetBadge + runBadge + gensBadge + receipt;
   }
 
   // ── Drawers (2026-10-16c): toggling flips `hidden` on a wrapper div only —
@@ -757,7 +772,8 @@ export class FaceCycle {
       }
       if (region.status === 'kept' && region.gens?.length && (region.gsel ?? -1) >= 0) {
         const gen = region.gens[region.gsel];
-        ctx.drawImage(gen.canvas, gen.rect.x, gen.rect.y, gen.rect.w, gen.rect.h);
+        const live = (!opts.exporting && this.maskEditId === region.id) ? this.livePreviewFor(region, gen) : null;
+        ctx.drawImage(live ?? gen.canvas, gen.rect.x, gen.rect.y, gen.rect.w, gen.rect.h);
       } else if (!opts.exporting && region.status === 'preview' && region.preview && region.preview.psel >= 0) {
         const pv = region.preview.variants[region.preview.psel];
         ctx.drawImage(pv, region.preview.rect.x, region.preview.rect.y, region.preview.rect.w, region.preview.rect.h);
@@ -1155,6 +1171,7 @@ export class FaceCycle {
           this.undoLog.push({ type: 'mask', region, before: null });   // undo = remove it
         }
         this.strokeBBox = null;
+        this.invalidateLayerPreview();   // F2b: next render rebuilds active gen ∩ mask
         this.stack.clearOverlay();
         this.updateStatusBar();
         this.render();
@@ -1265,6 +1282,7 @@ export class FaceCycle {
     if (!step) return;
     region.gsel = step.gsel;
     if (step.gsel === -1) this.state.selections[region.id] = step.photoSel;
+    this.invalidateLayerPreview();
     this.renderGenStrip();
     this.render();
     this.updateStatusBar();
@@ -1286,7 +1304,14 @@ export class FaceCycle {
     if (e.key === 'm' || e.key === 'M') { if (this.state.images.length) this.toggleDrawMask(); return; }
 
     if (this.drawMaskMode) {
-      if (e.key === 'Enter') { e.preventDefault(); this.finalizeMaskEdit(); this.render(); this.updateStatusBar(); return; }
+      if (e.key === 'Enter') { e.preventDefault(); this.applyMaskToTarget(); return; }
+      if (e.key === '[' || e.key === ']' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        // Cycling = switching the target layer. Acts on the region being
+        // mask-edited (not the Tab-focused one).
+        const r = this.maskEditRegion() ?? this.state.activeRegions.find(r => r.id === this.selectedRegionId);
+        if (r) { e.preventDefault(); this.cycleRegion(r, (e.key === '[' || e.key === 'ArrowLeft') ? -1 : 1); }
+        return;
+      }
       if (e.key === 'Escape') { e.preventDefault(); this.clearMaskCanvas(); return; }
       if (e.key === 'e' || e.key === 'E') { this.toggleErase(); return; }
       if (e.key === ',') {
@@ -1377,6 +1402,7 @@ export class FaceCycle {
       this.el.drawMaskBtn.classList.add('active-toggle');
       this.el.brushControls.style.display = '';
       this.el.eraseToggleBtn.style.display = '';
+      this.el.applyMaskBtn.style.display = '';
       this.stack.setCursor('crosshair');
       this.initMaskCanvas();
     } else {
@@ -1384,6 +1410,7 @@ export class FaceCycle {
       this.el.drawMaskBtn.classList.remove('active-toggle');
       this.el.brushControls.style.display = 'none';
       this.el.eraseToggleBtn.style.display = 'none';
+      this.el.applyMaskBtn.style.display = 'none';
       this.stack.setCursor('pointer');
       this.maskPaintCanvas = null;
       this.maskPaintCtx = null;
@@ -1502,6 +1529,7 @@ export class FaceCycle {
     this.maskEditId = null;
     this.strokeBBox = null;
     this.paintArm = null;
+    this.invalidateLayerPreview();
   }
 
   clearMaskCanvas() {
@@ -1511,6 +1539,7 @@ export class FaceCycle {
     const r = this.state.activeRegions.find(r => r.id === this.maskEditId);
     if (r && r.maskCanvas) this.maskPaintCtx.drawImage(r.maskCanvas, r.x, r.y);
     this.strokeBBox = null;
+    this.invalidateLayerPreview();
     this.stack.clearOverlay();
     this.render();
   }
@@ -1907,6 +1936,7 @@ export class FaceCycle {
     const region = entry.region;
     if (!this.state.activeRegions.includes(region)) return; // region deleted
     if (entry.type === 'mask') { this.undoMaskStroke(entry); return; }
+    if (entry.type === 'layer-mask') { this.undoLayerMask(entry); return; }
     const b = entry.before;
     region.gens = b.gens.slice();
     if (b.gsel >= 0) region.gsel = b.gsel; else delete region.gsel;
@@ -1923,6 +1953,81 @@ export class FaceCycle {
       region.preview = null;
       region.status = region.gens.length ? 'kept' : 'idle';
     }
+    this.render();
+    this.updateStatusBar();
+  }
+
+  // ── F2b: paint a mask once, apply it to a chosen layer ─────────────────────
+  maskEditRegion() {
+    return this.state.activeRegions.find(r => r.id === this.maskEditId) ?? null;
+  }
+
+  // The layer the mask would apply to = the region's ACTIVE ring layer.
+  maskTarget() {
+    const region = this.maskEditRegion();
+    if (!region) return null;
+    const photoSel = this.state.selections[region.id] ?? this.state.baseVariant;
+    return { region, ...activeLayer(region, photoSel) };
+  }
+
+  invalidateLayerPreview() { this.layerPreview = null; }
+
+  // Display-only: the target gen's RAW output cut by the WORKING mask — what
+  // Apply would produce. Built lazily and cached, so it is rebuilt once per
+  // stroke / target change (invalidated there), never per pointer-move, and it
+  // is never exported or fed to Repaint (both pass exporting:true).
+  livePreviewFor(region, gen) {
+    if (!isRemaskable(gen) || !region.maskCanvas || !this.maskPaintCanvas) return null;
+    if (this.layerPreview && this.layerPreview.gen === gen) return this.layerPreview.canvas;
+    const r = gen.rect;
+    const m = this.cropCanvas(this.maskPaintCanvas, r.x, r.y, r.w, r.h);
+    const canvas = this.composeLayer(gen.raw, r, m);
+    this.layerPreview = { gen, canvas };
+    return canvas;
+  }
+
+  // Apply (Enter / button). Photo layers use the region's shared mask, which is
+  // already live — so there Apply keeps its old meaning (bake + leave mask-edit).
+  // A gen layer gets its OWN snapshot of the mask and is re-derived from raw;
+  // mask-edit stays open so the same mask can be tried on another layer.
+  applyMaskToTarget() {
+    const t = this.maskTarget();
+    if (!t || t.kind === 'photo') {
+      this.finalizeMaskEdit();
+      this.invalidateLayerPreview();
+      this.render();
+      this.updateStatusBar();
+      return false;
+    }
+    const { region, gen, index } = t;
+    if (!isRemaskable(gen)) {
+      this.jobs.note(`gen ${index + 1} predates re-masking (no raw output kept) — it can't take a new mask`);
+      return false;
+    }
+    if (!region.maskCanvas || !this.maskPaintCanvas) {
+      this.jobs.note('Paint a mask first, then apply it to the layer');
+      return false;
+    }
+    const r = gen.rect;
+    const before = { mask: gen.mask, canvas: gen.canvas };
+    gen.mask = this.cropCanvas(this.maskPaintCanvas, r.x, r.y, r.w, r.h);
+    this.recomposeGen(gen);
+    this.undoLog.push({ type: 'layer-mask', region, gen, before, after: { mask: gen.mask, canvas: gen.canvas } });
+    this.invalidateLayerPreview();
+    this.renderGenStrip();
+    this.render();
+    this.updateStatusBar();
+    this.jobs.note(`Mask applied to gen ${index + 1} — cycle ([ ]) to another layer and apply again, or press M / right-click to finish`);
+    return true;
+  }
+
+  undoLayerMask(entry) {
+    const { region, gen } = entry;
+    if (!region.gens?.includes(gen)) return;   // that gen was deleted since
+    gen.mask = entry.before.mask;
+    gen.canvas = entry.before.canvas;
+    this.invalidateLayerPreview();
+    this.renderGenStrip();
     this.render();
     this.updateStatusBar();
   }
@@ -1962,6 +2067,7 @@ export class FaceCycle {
       else if (region.maskCanvas) this.maskPaintCtx.drawImage(region.maskCanvas, region.x, region.y);
     }
     this.strokeBBox = null;
+    this.invalidateLayerPreview();
     this.stack.clearOverlay();
     this.render();
     this.updateStatusBar();
@@ -1980,7 +2086,7 @@ export class FaceCycle {
     strip.appendChild(label);
     region.gens.forEach((gen, i) => {
       const wrap = document.createElement('div');
-      wrap.className = 'gen-thumb' + (i === (region.gsel ?? 0) ? ' current' : '');
+      wrap.className = 'gen-thumb' + (i === (region.gsel ?? -1) ? ' current' : '');
       const th = document.createElement('canvas');
       th.width = 64; th.height = 48;
       th.getContext('2d').drawImage(gen.canvas, 0, 0, 64, 48);
@@ -2001,7 +2107,7 @@ export class FaceCycle {
         this.updateStatusBar();
       });
       wrap.appendChild(del);
-      wrap.addEventListener('click', () => { region.gsel = i; this.render(); this.updateStatusBar(); });
+      wrap.addEventListener('click', () => { region.gsel = i; this.invalidateLayerPreview(); this.renderGenStrip(); this.render(); this.updateStatusBar(); });
       strip.appendChild(wrap);
     });
   }

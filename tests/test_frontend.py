@@ -196,7 +196,7 @@ OLD_IDS = ["threshold", "threshold-val", "min-size", "min-size-val", "max-size",
            "max-size-val", "brush-controls", "brush-size", "brush-size-val",
            "face-mode", "repaint-prompt", "denoise", "denoise-val", "seed-input",
            "randomize-seed", "detail-crop", "variant-count", "gen-strip", "repaint-source"]
-OLD_ACTS = ["detect", "click-add", "layer-toggle", "draw-box", "draw-mask", "erase", "remove-all",
+OLD_ACTS = ["detect", "click-add", "layer-toggle", "draw-box", "draw-mask", "erase", "apply-mask", "remove-all",
             "generate", "keep", "discard", "undo", "zoom-fit"]
 
 
@@ -224,7 +224,7 @@ def test_task7_every_control_keeps_its_id_and_lives_in_the_right_surface():
         assert html.count(f'data-act="{a}"') == 1, a
     # tools drawer is ONE row: draw tools, erase/brush, undo, Generate, keep/discard,
     # layers, zoom — plus the diff sliders (retired from the Detect sheet)
-    for x in ('data-act="draw-box"', 'data-act="draw-mask"', 'data-act="erase"',
+    for x in ('data-act="draw-box"', 'data-act="draw-mask"', 'data-act="erase"', 'data-act="apply-mask"',
               'data-id="brush-controls"', 'data-act="undo"', 'data-act="generate"',
               'data-act="keep"', 'data-act="discard"',
               'data-id="threshold"', 'data-id="min-size"', 'data-id="max-size"'):
@@ -328,3 +328,17 @@ def test_death_row_ui_fully_torn_down():
     # the precache/shell never referenced the removed module
     for name in ("sw.js",):
         assert "death-row" not in (HERE.parent / "frontend" / name).read_text()
+
+
+def test_paint_target_workflow_wiring():
+    """F2b (2026-10-21): explicit apply — Enter and a button share ONE handler;
+    cycling keys act on the mask-edit region; the gen strip highlights by the
+    renderer's convention (gsel -1 = a photo layer is showing)."""
+    src, html = _fc_html()
+    assert html.count('data-act="apply-mask"') == 1
+    assert src.count("this.applyMaskToTarget()") >= 2        # Enter + button
+    assert "this.maskEditRegion() ??" in src                   # [ ] target the edited region
+    assert "(i === (region.gsel ?? -1) ? ' current' : '')" in src
+    assert "region.gsel ?? 0)" not in src, "strip highlight must not default to gen 0"
+    # the live preview is display-only: it is gated on !opts.exporting
+    assert "!opts.exporting && this.maskEditId === region.id" in src

@@ -112,3 +112,22 @@ export function pickRepaintTarget({ regions, selectedId, paintBBox = null }) {
   }
   return { kind: 'none', region: null };
 }
+
+// ── F2b (2026-10-21): paint-target workflow ────────────────────────────────
+// While painting a mask, the region's ACTIVE ring layer is the target: the
+// gen currently showing (gsel >= 0) or else the selected photo variant. Cycling
+// the ring (strip thumb, [ ] keys) IS switching the target — no separate picker.
+export function activeLayer(region, photoSel) {
+  const gens = region.gens ?? [];
+  const gi = region.gsel ?? -1;
+  if (gi >= 0 && gens[gi]) return { kind: 'gen', index: gi, gen: gens[gi] };
+  return { kind: 'photo', variant: photoSel };
+}
+
+/** Human label for the status line: "gen 2 of 3" / "photo 1". */
+export function describeLayer(region, photoSel) {
+  const l = activeLayer(region, photoSel);
+  return l.kind === 'gen'
+    ? `gen ${l.index + 1} of ${region.gens.length}`
+    : `photo ${l.variant + 1}`;
+}

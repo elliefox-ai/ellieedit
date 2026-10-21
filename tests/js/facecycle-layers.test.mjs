@@ -1,7 +1,7 @@
 // FaceCycle layer model — pure logic (F1, 2026-10-21).
 import assert from 'node:assert/strict';
 import { makeGenLayer, isRemaskable, layerMask, ringEntries, activePosition, stepRing,
-  remapRect, followRegion, pickRepaintTarget }
+  remapRect, followRegion, pickRepaintTarget, activeLayer, describeLayer }
   from '../../frontend/js/modules/facecycle-layers.js';
 
 // ── factory: owns raw + mask snapshot; rect is copied, not aliased ──
@@ -91,6 +91,22 @@ assert.ok(remapRect({ x: 0, y: 0, w: 1, h: 1 }, box, { x: 100, y: 50, w: 1, h: 1
   assert.equal(scanned, 0, 'paint scan is lazy — not paid when a region is selected');
   pickRepaintTarget({ regions: regs, selectedId: null, paintBBox: () => { scanned++; return null; } });
   assert.equal(scanned, 1);
+}
+
+// ── F2b: the paint target is the region's ACTIVE ring layer ──
+{
+  const gens = [makeGenLayer({ rect, canvas: 1 }), makeGenLayer({ rect, canvas: 2 }), makeGenLayer({ rect, canvas: 3 })];
+  const r = { gens, gsel: 1 };
+  assert.deepEqual(activeLayer(r, 0), { kind: 'gen', index: 1, gen: gens[1] });
+  assert.equal(describeLayer(r, 0), 'gen 2 of 3');
+  r.gsel = -1;
+  assert.deepEqual(activeLayer(r, 2), { kind: 'photo', variant: 2 });
+  assert.equal(describeLayer(r, 2), 'photo 3');
+  delete r.gsel;
+  assert.equal(activeLayer(r, 0).kind, 'photo', 'gsel undefined → photo layer (matches the renderer)');
+  r.gsel = 7;
+  assert.equal(activeLayer(r, 1).kind, 'photo', 'stale gsel → photo, never a phantom gen');
+  assert.equal(activeLayer({}, 0).kind, 'photo', 'region with no gens');
 }
 
 console.log(`facecycle-layers.test.mjs: PASS (${cases} ring cases)`);
