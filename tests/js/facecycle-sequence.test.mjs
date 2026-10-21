@@ -178,6 +178,26 @@ assert.equal(A.gsel, 1, '#C tap cycles forward to gen 2');
 tap(insideA.x, insideA.y);
 assert.equal(A.gsel, -1, '#C cycle wraps through variant again');
 
+// #E layer model (F1, 2026-10-21): every kept gen OWNS its raw output + a mask
+// snapshot; its canvas is derived (raw ∩ mask) and re-derivable (re-maskable).
+for (const g of [...A.gens, ...B.gens]) {
+  assert.equal(g.kind, 'gen', '#E gen layers are tagged');
+  assert.ok(g.raw && g.raw !== g.canvas, '#E gen keeps its RAW output separate from the masked canvas');
+  assert.ok(g.mask, '#E gen keeps its mask snapshot');
+}
+{
+  const g = A.gens[0];
+  const before = g.canvas;
+  assert.equal(fc.recomposeGen(g), true, '#E recomposeGen re-derives from raw');
+  assert.notEqual(g.canvas, before, '#E recompose builds a fresh derived canvas');
+  const rc = ctxCache.get(g.canvas)._calls;
+  const drawRaw = rc.find(c => c[0] === 'drawImage' && c[1] === g.raw);
+  assert.ok(drawRaw && [drawRaw[2], drawRaw[3], drawRaw[4], drawRaw[5]].join() === [0, 0, g.rect.w, g.rect.h].join(),
+    '#E derived canvas is raw drawn at rect size');
+  assert.ok(rc.some(c => c[0] === 'drawImage' && c[1] === g.mask), '#E derived canvas is cut by the layer\'s OWN mask');
+  assert.equal(fc.recomposeGen({ canvas: before, rect: g.rect }), false, '#E legacy gen without raw cannot be re-masked');
+}
+
 // #D post-sequence: still no global pending anywhere.
 assert.equal(fc.pendingStore, undefined, '#D no pendingStore after full sequence');
 assert.equal('pending' in fc.stack, false, '#D no stack.pending after full sequence');

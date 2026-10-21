@@ -5,6 +5,7 @@
 // (selected box → in-progress painted mask → last painted-mask region),
 // denoise slider driving BasicScheduler server-side.
 
+import { makeGenLayer, stepRing } from './facecycle-layers.js';
 import {} from './facecycle-sheets.js'; // controller retired 2026-10-16f (sheets → drawers); module kept for its tests
 import { registerModule } from '../shell.js';
 import { CanvasStack, drawFeatheredSource } from '../components/canvas-stack.js';
@@ -1221,19 +1222,11 @@ export class FaceCycle {
     // Kept/idle: click cycles a combined ring of kept generations then photo
     // variants. A region with a single gen still responds to taps (gsel -1 =
     // variant shown; >= 0 = that gen drawn at its exact rect).
-    const gens = region.gens?.length ?? 0;
-    const n = this.state.images.length;
-    const total = gens + n;
-    if (total <= 1) return;
     const sel = this.state.selections[region.id] ?? this.state.baseVariant;
-    let pos = (region.gsel ?? -1) >= 0 ? region.gsel : gens + sel;
-    pos = ((pos + dir) % total + total) % total;
-    if (pos < gens) {
-      region.gsel = pos;
-    } else {
-      region.gsel = -1;
-      this.state.selections[region.id] = pos - gens;
-    }
+    const step = stepRing(region, this.state.images.length, sel, dir);
+    if (!step) return;
+    region.gsel = step.gsel;
+    if (step.gsel === -1) this.state.selections[region.id] = step.photoSel;
     this.renderGenStrip();
     this.render();
     this.updateStatusBar();
@@ -1502,11 +1495,21 @@ export class FaceCycle {
   // EXACT crop rect — masked to the painted mask, or feathered at the rect
   // edges. This canvas (plus rect) is what previews, what Keep stores, what
   // renders, and what Export paints. No re-projection ever happens.
-  buildPreviewCanvas(img, rect, maskLocal) {
+  // Layer pixels, split in two (F1, 2026-10-21): the RAW model output at rect
+  // size, and the DERIVED masked canvas. Keeping raw is what makes a generated
+  // layer re-maskable — the masked canvas is only ever a cache of raw ∩ mask.
+  makeRawLayer(img, rect) {
+    const c = document.createElement('canvas');
+    c.width = rect.w; c.height = rect.h;
+    c.getContext('2d').drawImage(img, 0, 0, rect.w, rect.h);
+    return c;
+  }
+
+  composeLayer(raw, rect, maskLocal) {
     const c = document.createElement('canvas');
     c.width = rect.w; c.height = rect.h;
     const g = c.getContext('2d');
-    g.drawImage(img, 0, 0, rect.w, rect.h);
+    g.drawImage(raw, 0, 0, rect.w, rect.h);
     if (maskLocal) {
       g.globalCompositeOperation = 'destination-in';
       g.drawImage(maskLocal, 0, 0);
@@ -1515,6 +1518,14 @@ export class FaceCycle {
       this.featherEdges(g, rect.w, rect.h);
     }
     return c;
+  }
+
+  // Re-derive a kept gen's masked canvas from its raw output + current mask.
+  // Returns false for legacy gens that never stored raw.
+  recomposeGen(gen) {
+    if (!gen || !gen.raw) return false;
+    gen.canvas = this.composeLayer(gen.raw, gen.rect, gen.mask);
+    return true;
   }
 
   // Feathered alpha at canvas edges (same profile as drawFeatheredSource),
@@ -1680,7 +1691,7 @@ export class FaceCycle {
     this.lastRunInfo = `${useDetail ? 'detail crop · enlarged 1.5×' : 'full native'} · ring ${Math.round(pct * 100)}%${prompt ? '' : ' · no prompt'}`;
 
     const rect = { x: cx, y: cy, w: cw, h: ch };
-    region.preview = { variants: [], psel: -1, rect, maskCanvas: maskLocal, outstanding: variantCount };
+    region.preview = { variants: [], raws: [], psel: -1, rect, maskCanvas: maskLocal, outstanding: variantCount };
     region.status = 'generating';
 
     this.el.generateBtn.disabled = true;
@@ -1709,7 +1720,9 @@ export class FaceCycle {
         const pv = region.preview;
         if (pv) pv.decoding = Math.max(0, (pv.decoding || 0) - 1);
         if (!pv) return; // discarded/replaced mid-flight; drop it
-        const c = this.buildPreviewCanvas(img, pv.rect, pv.maskCanvas);
+        const raw = this.makeRawLayer(img, pv.rect);
+        const c = this.composeLayer(raw, pv.rect, pv.maskCanvas);
+        (pv.raws ??= []).push(raw);   // parallel to pv.variants: index i ↔ variant i
         pv.variants.push(c);
         pv.psel = pv.variants.length - 1;
         region.status = 'preview';
@@ -1776,13 +1789,19 @@ export class FaceCycle {
       before: { status: region.status, gens: region.gens.slice(), gsel: region.gsel ?? -1 },
       after: null, // filled below
     };
-    region.gens.push({ canvas: pv.variants[pv.psel], rect: { ...pv.rect } });
+    // The gen layer owns its raw output + mask snapshot (re-maskable); its
+    // canvas is the exact previewed (derived) canvas, stored 1:1.
+    region.gens.push(makeGenLayer({
+      raw: pv.raws?.[pv.psel] ?? null, mask: pv.maskCanvas ?? null,
+      rect: pv.rect, canvas: pv.variants[pv.psel],
+    }));
     region.gsel = region.gens.length - 1;
     region.status = 'kept';
     region.preview = null; // preview consumed: the kept gen now carries it
     // Stash the kept variant so Undo can restore the exact preview transition.
     entry.after = { status: region.status, gens: region.gens.slice(), gsel: region.gsel };
     entry.keptVariant = pv.variants[pv.psel];
+    entry.keptRaw = pv.raws?.[pv.psel] ?? null;
     entry.keptRect = { ...pv.rect };
     entry.keptMask = pv.maskCanvas;
     this.undoLog.push(entry);
@@ -1833,7 +1852,7 @@ export class FaceCycle {
     if (entry.type === 'keep') {
       // Reverse the transition: back to preview with the exact kept variant.
       if (entry.keptVariant) {
-        region.preview = { variants: [entry.keptVariant], psel: 0, rect: entry.keptRect, maskCanvas: entry.keptMask ?? null, outstanding: 0 };
+        region.preview = { variants: [entry.keptVariant], raws: [entry.keptRaw ?? null], psel: 0, rect: entry.keptRect, maskCanvas: entry.keptMask ?? null, outstanding: 0 };
         region.status = 'preview';
       } else {
         region.preview = null;

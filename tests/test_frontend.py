@@ -26,6 +26,16 @@ def test_js_operator_sequence():
     assert "PASS" in r.stdout
 
 
+def test_js_layer_model():
+    """F1 (2026-10-21): pure layer/ring/mask-ownership logic (node)."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "facecycle-layers.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+    assert "PASS" in r.stdout
+
+
 def test_no_global_pending_preview():
     """Region-status refactor (2026-10-07h): the global pending preview store is
     deleted. Generation lifecycle lives on state.activeRegions[].status only."""
