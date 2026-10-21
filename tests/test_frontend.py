@@ -219,8 +219,15 @@ def test_task7_every_control_keeps_its_id_and_lives_in_the_right_surface():
               'data-id="threshold"', 'data-id="min-size"', 'data-id="max-size"'):
         assert x in band, x
     assert band.count('<div class="fc-row oneline"') == 1, "tools drawer must be a single row"
-    # 2026-10-20: one LINE, not just one row — it must never wrap (scrolls sideways instead)
-    assert ".fc-row.oneline { flex-wrap: nowrap;" in src, "tools row must not wrap"
+    # 2026-10-20 rev 23:25: compact single line on wide screens, but it WRAPS
+    # when narrow — no horizontal scrollbar (vertical space over scrolling).
+    rule = src[src.index(".fc-row.oneline {"):].split("}", 1)[0]
+    assert "flex-wrap: wrap" in rule and "nowrap" not in rule, "tools row must wrap"
+    assert "overflow-x" not in rule, "tools row must not scroll sideways"
+    # repaint drawer wears the same panel treatment as the Tools bar (header)
+    rp = src[src.index('.fc-drawer.fc-repaint:not([hidden])'):].split("}", 1)[0]
+    assert "#161628" in rp and "#2a2a44" in rp, "repaint drawer needs the tools-bar border"
+    assert 'class="fc-drawer fc-repaint" data-id="repaint-drawer"' in src
     # repaint drawer: prompt + repaint options + its own Generate (same handler)
     for x in ('data-id="repaint-prompt"', 'data-id="denoise"', 'data-id="seed-input"',
               'data-id="randomize-seed"', 'data-id="detail-crop"',

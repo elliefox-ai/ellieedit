@@ -21,8 +21,10 @@ function panelHTML() {
     }
     .fc-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
     .fc-row.top { justify-content: space-between; }
-    /* Tools drawer is a single line (2026-10-20): never wraps; scrolls sideways when narrow. */
-    .fc-row.oneline { flex-wrap: nowrap; gap: 8px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    /* Tools drawer (2026-10-20, rev 23:25): one compact line on wide screens;
+       when narrow it WRAPS to extra lines rather than scrolling sideways —
+       Alexander prefers vertical space over a scrollbar. */
+    .fc-row.oneline { flex-wrap: wrap; gap: 8px; }
     .fc-row.oneline > * { flex-shrink: 0; }
     .fc-row.oneline > .fc-gens { flex-shrink: 1; min-width: 0; }
     .fc-header h1 { font-size: 17px; font-weight: 600; color: #e0e0f0; }
@@ -92,6 +94,12 @@ function panelHTML() {
     /* 2026-10-16c — retracting drawers (tools band + media strip): toggling only
        flips the hidden attribute on a wrapper — never canvas/region/undo state. */
     .fc-drawer[hidden] { display:none; }
+    /* Repaint drawer (2026-10-20): same panel treatment as the Tools bar
+       (.fc-header: #161628 + #2a2a44 border). :not([hidden]) so the hidden
+       attribute still wins. */
+    .fc-drawer.fc-repaint:not([hidden]) {
+      display:flex; flex-direction:column; gap:8px; padding:10px 20px;
+      background:#161628; border-top:1px solid #2a2a44; border-bottom:1px solid #2a2a44; }
     .fc-drawer-toggle.active-toggle { border-color:#7a6aaa; color:#c8b8ee; }
   </style>
   <div class="fc-header">
@@ -136,7 +144,7 @@ function panelHTML() {
   </div>
   <div class="fc-main" data-id="main-view">
     <div class="fc-status" data-id="status-bar"></div>
-    <div class="fc-drawer" data-id="repaint-drawer" hidden>
+    <div class="fc-drawer fc-repaint" data-id="repaint-drawer" hidden>
       <div class="fc-row">
         <label style="flex:1">Prompt <input type="text" data-id="repaint-prompt" placeholder="repaint prompt… (select a box, then Generate)"></label>
         <button class="ee-btn primary" data-act="generate-sheet">⚡ Generate</button>
