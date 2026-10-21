@@ -229,6 +229,7 @@ export class FaceCycle {
     this.maskEditId = null;   // region id whose mask is being edited
     this.strokeBBox = null;   // bbox of current paint strokes (auto-grow)
     this.paintArm = null;     // armed paint: { x0, y0, mode } — tap vs stroke disambiguation
+    this.strokeUndo = null;   // snapshot taken at stroke start (mask-edit undo)
     this.lastRunInfo = null;  // 'detail crop …' / 'full-image' status for the last generate
     this.BADGE_H = 20;
     this.RESIZE_TAB_SIZE = 10;
@@ -1127,8 +1128,15 @@ export class FaceCycle {
         this.lastPaintX = null;
         this.lastPaintY = null;
         const r = this.state.activeRegions.find(r => r.id === this.maskEditId);
+        const snap = this.strokeUndo;
+        this.strokeUndo = null;
         if (r) {
           r.maskCanvas = this.cropCanvas(this.maskPaintCanvas, r.x, r.y, r.w, r.h);
+          if (snap && snap.region === r) {
+            this.undoLog.push({ type: 'mask', region: r,
+              before: { mask: snap.mask, box: snap.box },
+              after: { box: { x: r.x, y: r.y, w: r.w, h: r.h } } });
+          }
         } else if (this.strokeBBox) {
           // Fresh mask finished: create its box control from the stroke bbox.
           const pad = 2;
@@ -1142,6 +1150,7 @@ export class FaceCycle {
           this.state.selections[region.id] = this.state.baseVariant;
           this.selectedRegionId = region.id;
           this.maskEditId = region.id;
+          this.undoLog.push({ type: 'mask', region, before: null });   // undo = remove it
         }
         this.strokeBBox = null;
         this.stack.clearOverlay();
@@ -1226,6 +1235,7 @@ export class FaceCycle {
   onPointerCancel() {
     this.drawBoxDrag = null;
     this.isPainting = false;
+    this.strokeUndo = null;
     this.paintArm = null;
     this.lastPaintX = null;
     this.lastPaintY = null;
@@ -1444,8 +1454,19 @@ export class FaceCycle {
     return null;
   }
 
+  // Mask-edit undo (F1c, 2026-10-21): snapshot what the stroke is about to
+  // change. r.maskCanvas is only ever REPLACED (never painted in place), so a
+  // reference is a safe snapshot. Gens are unaffected — each owns its own mask.
+  captureStrokeUndo() {
+    const r = this.state.activeRegions.find(r => r.id === this.maskEditId);
+    return r
+      ? { region: r, mask: r.maskCanvas ?? null, box: { x: r.x, y: r.y, w: r.w, h: r.h } }
+      : { region: null };   // fresh mask: the stroke will CREATE its region
+  }
+
   beginPaint(x, y) {
     this.paintArm = null;
+    this.strokeUndo = this.captureStrokeUndo();
     this.isPainting = true;
     this.lastPaintX = x;
     this.lastPaintY = y;
@@ -1858,11 +1879,13 @@ export class FaceCycle {
   }
 
   undo() {
+    if (this.isPainting) return;   // never mid-stroke; the entry stays queued
     // Global stack of { region, before, after } status transitions.
     const entry = this.undoLog.pop();
     if (!entry) return;
     const region = entry.region;
     if (!this.state.activeRegions.includes(region)) return; // region deleted
+    if (entry.type === 'mask') { this.undoMaskStroke(entry); return; }
     const b = entry.before;
     region.gens = b.gens.slice();
     if (b.gsel >= 0) region.gsel = b.gsel; else delete region.gsel;
@@ -1879,6 +1902,46 @@ export class FaceCycle {
       region.preview = null;
       region.status = region.gens.length ? 'kept' : 'idle';
     }
+    this.render();
+    this.updateStatusBar();
+  }
+
+  // Reverse one mask stroke. The box delta is applied RELATIVE to where the box
+  // is now, so an (unlogged) move/resize since the stroke is not snapped back.
+  undoMaskStroke(entry) {
+    const region = entry.region;
+    const b = entry.before;
+    let removed = false;
+    if (!b) {
+      // The stroke that created this region. Remove it — unless it has since
+      // grown real content (gens / a live preview), which undo must not eat:
+      // then only its mask goes.
+      const inert = !region.gens?.length && !region.preview && region.status !== 'generating';
+      if (inert) {
+        this.state.activeRegions = this.state.activeRegions.filter(r => r !== region);
+        delete this.state.selections[region.id];
+        if (this.selectedRegionId === region.id) this.selectedRegionId = null;
+        this.el.exportBtn.disabled = this.state.activeRegions.length === 0;
+        removed = true;
+      } else {
+        region.maskCanvas = null;
+      }
+    } else {
+      const a = entry.after.box;
+      region.x = b.box.x + (region.x - a.x);
+      region.y = b.box.y + (region.y - a.y);
+      region.w = Math.max(1, b.box.w + (region.w - a.w));
+      region.h = Math.max(1, b.box.h + (region.h - a.h));
+      region.maskCanvas = b.mask;
+    }
+    // Re-sync the working paint canvas so the next stroke starts from the restored mask.
+    if ((removed || this.maskEditId === region.id) && this.maskPaintCtx) {
+      this.maskPaintCtx.clearRect(0, 0, this.state.width, this.state.height);
+      if (removed) this.maskEditId = null;
+      else if (region.maskCanvas) this.maskPaintCtx.drawImage(region.maskCanvas, region.x, region.y);
+    }
+    this.strokeBBox = null;
+    this.stack.clearOverlay();
     this.render();
     this.updateStatusBar();
   }

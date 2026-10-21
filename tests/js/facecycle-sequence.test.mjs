@@ -265,6 +265,73 @@ for (const g of [...A.gens, ...B.gens]) {
   fc.state.activeRegions.forEach((r, i) => { r.maskCanvas = hadMask[i]; });
 }
 
+// #H mask-edit undo (F1c, 2026-10-21): each paint stroke is one Undo step.
+{
+  const ev = { button: 0, preventDefault() {} };
+  const stroke = (x0, y0, x1, y1) => {            // pointer-down → drag → up, like a real stroke
+    fc.onPointerDown(ev, { x: x0, y: y0 });
+    fc.onPointerMove(ev, [{ x: (x0 + x1) / 2, y: (y0 + y1) / 2 }]);   // coalesced-points array
+    fc.onPointerMove(ev, [{ x: x1, y: y1 }]);
+    fc.onPointerUp(ev, { x: x1, y: y1 });
+  };
+  const nRegs = fc.state.activeRegions.length;
+  const logLen = fc.undoLog.length;
+  fc.drawMaskMode = true; fc.eraseMode = false; fc.initMaskCanvas();
+  fc.selectedRegionId = null; fc.maskEditId = null;
+
+  // (1) a stroke on empty space CREATES a region; Undo removes it again.
+  stroke(255, 20, 285, 50);
+  assert.equal(fc.state.activeRegions.length, nRegs + 1, '#H fresh stroke created a region');
+  const M = fc.state.activeRegions[fc.state.activeRegions.length - 1];
+  assert.ok(M.maskCanvas, '#H new region carries its mask');
+  assert.equal(fc.undoLog.length, logLen + 1, '#H the stroke is one undo step');
+  fc.undo();
+  assert.equal(fc.state.activeRegions.length, nRegs, '#H undo removed the stroke-created region');
+  assert.equal(fc.selectedRegionId, null); assert.equal(fc.maskEditId, null);
+  assert.equal(fc.undoLog.length, logLen);
+
+  // (2) an attach stroke that auto-GROWS the box: Undo restores mask object + box.
+  stroke(255, 20, 285, 50);
+  const R = fc.state.activeRegions[fc.state.activeRegions.length - 1];
+  const mask1 = R.maskCanvas, box1 = { x: R.x, y: R.y, w: R.w, h: R.h };
+  stroke(R.x + 2, R.y + 2, R.x + R.w + 30 > 299 ? 299 : R.x + R.w + 30, R.y + R.h + 30 > 199 ? 199 : R.y + R.h + 30);
+  assert.notEqual(R.maskCanvas, mask1, '#H second stroke replaced the mask');
+  assert.ok(R.w > box1.w || R.h > box1.h, '#H box auto-grew');
+  assert.equal(fc.undoLog.length, logLen + 2, '#H each stroke = one step');
+  fc.undo();
+  assert.equal(R.maskCanvas, mask1, '#H undo restored the previous mask');
+  assert.deepEqual({ x: R.x, y: R.y, w: R.w, h: R.h }, box1, '#H undo restored the previous box');
+
+  // (3) after a (non-logged) MOVE the box delta is undone relative, not snapped back.
+  stroke(R.x + 2, R.y + 2, Math.min(299, R.x + R.w + 25), Math.min(199, R.y + R.h + 25));
+  const grown = { x: R.x, y: R.y, w: R.w, h: R.h };
+  R.x -= 7; R.y -= 5;                       // a drag-move happened after the stroke
+  fc.undo();
+  assert.deepEqual({ x: R.x, y: R.y, w: R.w, h: R.h },
+    { x: box1.x - 7, y: box1.y - 5, w: box1.w, h: box1.h }, '#H undo keeps the region where the user moved it');
+  assert.ok(grown.w >= box1.w);
+
+  // (4) Undo never fires mid-stroke, and the entry survives it.
+  stroke(R.x + 2, R.y + 2, R.x + 12, R.y + 12);
+  const before = fc.undoLog.length;
+  fc.isPainting = true; fc.undo(); fc.isPainting = false;
+  assert.equal(fc.undoLog.length, before, '#H undo ignored mid-stroke');
+
+  // (5) a stroke-created region that has since gained a gen is NOT deleted by Undo.
+  fc.undoLog.length = logLen; fc.state.activeRegions.splice(nRegs);
+  fc.selectedRegionId = null; fc.maskEditId = null; fc.initMaskCanvas();
+  stroke(255, 20, 285, 50);
+  const N = fc.state.activeRegions[fc.state.activeRegions.length - 1];
+  N.gens = [{ canvas: fakeEl('canvas'), rect: { x: 1, y: 1, w: 2, h: 2 } }];
+  fc.undo();
+  assert.ok(fc.state.activeRegions.includes(N), '#H region with a gen survives undo');
+  assert.equal(N.maskCanvas, null, '#H …but its mask is reverted');
+
+  // cleanup: leave the shared fixture exactly as found for the checks below.
+  fc.undoLog.length = logLen; fc.state.activeRegions.splice(nRegs);
+  fc.drawMaskMode = false; fc.maskEditId = null; fc.selectedRegionId = null;
+}
+
 // #D post-sequence: still no global pending anywhere.
 assert.equal(fc.pendingStore, undefined, '#D no pendingStore after full sequence');
 assert.equal('pending' in fc.stack, false, '#D no stack.pending after full sequence');
