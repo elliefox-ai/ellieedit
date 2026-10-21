@@ -289,3 +289,24 @@ def test_detect_method_fully_removed():
     for gone in ("faceapi", "face-api", "loadFaceModels", "detectFaces", "detectFaceAtPoint",
                  "clickToAddMode", "detectBtn", "clickAddBtn", "rectOverlap"):
         assert gone not in src, gone
+
+
+def test_death_row_ui_fully_torn_down():
+    """Work order 2026-10-20 item 5: backend retired death-row rehydration
+    (fae8757), so the dead UI is gone. The /death-row/dismiss endpoint and the
+    ledger stay (backend untouched). Straggler '✓ in Library' chips share the
+    .ghost-chip class and are LIVE — they must survive."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    assert not (mods / "death-row.js").exists()
+    src = (mods / "dupe.js").read_text()
+    for gone in ("death-row", "dupe-deathbar", "dupe-death-", "dismiss-zero",
+                 "Dismiss all with no files", "rehydrate", "rehydrated",
+                 "queueCounts", "paintDeathBar", "dismissRows", "dr-section",
+                 "include_archived", "dupe-archived", "ghost-chip gone"):
+        assert gone not in src, gone
+    # live straggler chips + their CSS are untouched
+    assert ".ghost-chip.lib" in src and ".ghost-chip.straggler" in src
+    assert "stragglerChips(f)" in src
+    # the precache/shell never referenced the removed module
+    for name in ("sw.js",):
+        assert "death-row" not in (HERE.parent / "frontend" / name).read_text()

@@ -22,7 +22,6 @@
 // NOTHING persists before Commit; commit = verdict POST + send-pending.
 import { registerModule } from '../shell.js';
 import { sigIsOverride, sigChipText } from './dupe-signals.js';
-import { queueCounts, gb } from './death-row.js';
 import { zoomMembers, orderBySimilarity, twinInfo, nextUnhandled,
          TWIN_NEAR, listCacheDecision, listQuery, stragglerChips,
          stragglerProgressText } from './dupe-view.js';
@@ -281,18 +280,10 @@ registerModule({
          styles merely hide the affordances on coarse/no-hover devices. */
       .kbd-btn { min-width:34px; min-height:34px; padding:0 8px; font-size:12px;
                  flex-shrink:0; }
-      /* death-row mass action (2026-10-09b): sticky bottom bar, thumb-reachable */
-      .dupe-deathbar { position:sticky; bottom:0; z-index:45; display:flex; gap:12px;
-        align-items:center; justify-content:flex-end; flex-wrap:wrap;
-        padding:8px 12px calc(8px + env(safe-area-inset-bottom));
-        background:rgba(16,16,28,0.94); border-top:1px solid #6a2f2f; }
-      .dupe-death-note { flex:1; min-width:200px; font-size:12px; color:#8a8aaa; }
       .ghost-chip { display:inline-block; font-size:10px; padding:1px 7px;
         border-radius:8px; margin-left:5px; }
       .ghost-chip.lib { background:rgba(70,140,90,0.25); color:#9fd0ae; }
-      .ghost-chip.gone { background:rgba(120,120,140,0.2); color:#9a9ab2; }
       .ghost-chip.straggler { background:rgba(140,100,200,0.22); color:#c4aef0; }
-      .dupe-deathbar .ss-reject { font-weight:600; }
       .kbd-legend { position:absolute; z-index:60; right:12px; top:46px;
                     background:#1d1d33; border:1px solid #4a4a6c; border-radius:10px;
                     padding:10px 14px; font-size:12px; color:#d4d4e0;
@@ -316,10 +307,6 @@ registerModule({
         <span class="pill" data-f="resolved" title="committed families — browse read-only, or re-open for review">Committed</span>
         <span class="pill" data-f="all">All</span>
         <span class="pill" data-f="straggler" title="import batch — files the original scan never indexed, found by the straggler scan">Stragglers</span>
-        <label class="arch-toggle" id="dupe-arch-label" style="font-size:11px;color:#8a8aaa;display:flex;align-items:center;gap:4px;cursor:pointer">
-          <input type="checkbox" id="dupe-archived"> archived</label>
-        <button class="ee-btn" id="dupe-dismiss-zero" style="display:none;min-height:36px"
-          title="retire every death-row row with no files left — bookkeeping only, nothing is deleted">Dismiss all with no files</button>
         <span class="status" id="dupe-status"></span>
       </div>
       <div class="dupe-scroll" id="dupe-scroll">
@@ -335,16 +322,10 @@ registerModule({
         <input class="dupe-note" id="dupe-note" placeholder="note (optional)">
         <button class="ee-btn primary" id="dupe-commit">Commit &amp; next family ›</button>
       </div>
-      <div class="dupe-deathbar" id="dupe-deathbar" style="display:none">
-        <span class="dupe-death-note" id="dupe-death-note"></span>
-        <button class="ee-btn ss-reject" id="dupe-death-commit" style="min-height:44px"></button>
-      </div>
     </div>`;
 
     const el = {
       pills: [...panel.querySelectorAll('.dupe-top .pill')],
-      archived: panel.querySelector('#dupe-archived'),
-      dismissZero: panel.querySelector('#dupe-dismiss-zero'),
       status: panel.querySelector('#dupe-status'),
       list: panel.querySelector('#fam-list'),
       count: panel.querySelector('#dupe-count'),
@@ -356,14 +337,8 @@ registerModule({
       back: panel.querySelector('#dupe-back'),
       note: panel.querySelector('#dupe-note'),
       commit: panel.querySelector('#dupe-commit'),
-      deathbar: panel.querySelector('#dupe-deathbar'),
-      deathCommit: panel.querySelector('#dupe-death-commit'),
-      deathNote: panel.querySelector('#dupe-death-note'),
     };
     let filter = 'unresolved';
-    // include-archived query param (2026-10-09f): '1' reveals ghost death-row
-    // families whose members have all left the dupe roots.
-    const archQ = () => (el.archived && el.archived.checked) ? '1' : '0';
     let cursor = '';
     let exhausted = false;
     let current = null;        // detail family (API shape)
@@ -402,11 +377,6 @@ registerModule({
     let twinMap = new Map();
     // families deferred this session — skipped by Commit & next (step 4)
     const deferredFamilies = new Set();
-    // death-row rehydration (2026-10-09b): rehydrated families still
-    // UNCOMMITTED this session — the mass "send all" action covers exactly
-    // these; any family he re-commits via Enter drops out automatically.
-    const rehydrateQueue = new Set();
-    let lastDeathRow = 0;   // rehydrated drafts seen on the last unresolved listing
     // LIST CACHE (2026-10-08n): rendered listing payloads held in memory,
     // keyed by the index:ledger mtime key the server exposes on /status and
     // /families. Returning from a family (or re-activating the tab) with an
@@ -432,14 +402,6 @@ registerModule({
       filter = p.dataset.f;
       renderList();
     }));
-    // include-archived toggle (2026-10-09f): reveal death-row families whose
-    // members are all gone from disk. Bypasses the list cache — the toggle
-    // changes the query, not the data.
-    el.archived.addEventListener('change', () => {
-      listDirty = true;
-      listCache.delete(filter);
-      renderList();
-    });
     el.loadmore.addEventListener('click', () => renderList(cursor));
 
     // Straggler scan progress (2026-10-09g): one status poll on mount, then
@@ -511,78 +473,28 @@ registerModule({
       }
       const meta = document.createElement('div');
       meta.className = 'fam-meta';
-      // Ghost chips (2026-10-09f): historical members resolve their current
-      // state — kept+promoted → '✓ in Library', vanished → 'already
-      // deleted'. Only on-disk members get thumbs (above) and stay
-      // actionable; ghosts never enter the rehydrate marking queue.
-      let ghostChips = '';
-      if (f.rehydrated) {
-        const inLib = (f.members || []).filter(m => m.member_state === 'library');
-        const gone = (f.members || []).filter(m => m.member_state === 'deleted');
-        if (inLib.length) ghostChips += `<span class="ghost-chip lib" title="kept member now lives in the Library">✓ in Library ×${inLib.length}</span>`;
-        if (gone.length) ghostChips += `<span class="ghost-chip gone" title="member file already deleted">already deleted ×${gone.length}</span>`;
-      }
       // Straggler import batch (2026-10-09g): provenance badge + '✓ in
       // Library' reference chip for members whose counterpart lives in the
       // Library (reference only — never a member, never served).
-      ghostChips += stragglerChips(f);
+      const ghostChips = stragglerChips(f);
       meta.innerHTML =
         `<span>${f.id}</span><span>${f.size} members</span>` +
         (f.tiers || []).map(t => `<span class="tier-badge ${t}">${t}</span>`).join('') +
         (f.conflict ? '<span class="sig-flag" title="signal conflict — prior verdict splits members the hashes call near-identical">⚡</span>' : '') +
         (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '') +
-        (f.rehydrated ? `<span class="verdict-tag rejected" title="pre-marked draft from the prior verdict — nothing is committed until you commit it again">death row · ${f.rejected} rejected${f.archived ? ' · archived' : ''}</span>` : '') +
         ghostChips;
       card.append(strip, meta);
-      if (f.rehydrated) {
-        const x = document.createElement('button');
-        x.className = 'ee-btn';
-        x.textContent = '✕';
-        x.title = 'dismiss this death-row row (bookkeeping only — nothing is deleted)';
-        x.style.cssText = 'min-height:36px;min-width:36px;margin-left:auto';
-        x.addEventListener('click', e => { e.stopPropagation(); dismissRows([f.id]); });
-        meta.appendChild(x);
-      }
       card.addEventListener('click', () => renderDetail(f.id));
       return card;
-    }
-
-    // Death-row dismissal (Task 4): tombstone only — no unlink, no manifest.
-    async function dismissRows(ids, zeroFile = false) {
-      try {
-        const r = await api('/death-row/dismiss', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ families: ids, zero_file: zeroFile }),
-        });
-        (ids || []).forEach(id => rehydrateQueue.delete(id));
-        if (zeroFile) rehydrateQueue.clear();
-        deathSummary = null;
-        listDirty = true;
-        job(`death row: ${r.dismissed} dismissed`, 'ok');
-        renderList();            // refetch — rows disappear without a reload
-      } catch (e) { job(`dismiss: ${e.message}`, 'err'); }
-    }
-    el.dismissZero.addEventListener('click', () => {
-      if (!window.confirm('Retire every death-row row with no files left on disk? ' +
-        'Nothing is deleted — the rows just stop listing.')) return;
-      dismissRows([], true);
-    });
-    function paintDismissZero() {
-      el.dismissZero.style.display =
-        (el.archived.checked && filter === 'unresolved') ? '' : 'none';
     }
 
     function renderCountLine(shown, data) {
       // "showing 40 of 627 families" (2026-10-08n pagination UI)
       const target = (filter === 'all' || filter === 'straggler') ? data.total
         : (data.counts ? data.counts[filter] : null);
-      const dr = (filter === 'unresolved' && data.rehydrated) ? data.rehydrated : 0;
-      const real = shown - dr;           // list rows minus death-row drafts
-      el.count.textContent = dr
-        ? `${real} unresolved + ${dr} death-row drafts`
-        : (target != null && target !== shown)
-          ? `showing ${shown} of ${target} families`
-          : (shown ? `showing ${shown} families` : '');
+      el.count.textContent = (target != null && target !== shown)
+        ? `showing ${shown} of ${target} families`
+        : (shown ? `showing ${shown} families` : '');
     }
 
     function renderCards(items, data, append) {
@@ -595,18 +507,6 @@ registerModule({
       }
       for (const f of items) {
         try {
-          // Rehydrated death-row drafts are NOT part of the unresolved count:
-          // give them a labeled section so the queue never inflates silently
-          // (shadow-queue fix, 2026-10-13).
-          if (f.rehydrated && !grid.querySelector('.dr-section')) {
-            const hd = document.createElement('div');
-            hd.className = 'dr-section';
-            hd.style.cssText = 'grid-column:1/-1;padding:8px 4px;font-size:12px;' +
-              'color:#e8c37a;border-top:1px solid #7a5f1e';
-            hd.textContent = `Death row — ${data.rehydrated || ''} pre-marked drafts ` +
-              '(separate from the Unresolved count · nothing commits until you commit it)';
-            grid.appendChild(hd);
-          }
           grid.appendChild(cardFor(f));
         } catch (cardErr) {
           const ec = document.createElement('div');
@@ -617,9 +517,7 @@ registerModule({
           console.error('dupe card render failed', f.id, cardErr);
         }
       }
-      if (filter === 'unresolved') lastDeathRow = data.rehydrated || 0;
-      el.pills[0].textContent = `Unresolved (${data.counts.unresolved})` +
-        (lastDeathRow ? ` +${lastDeathRow} death row` : '');
+      el.pills[0].textContent = `Unresolved (${data.counts.unresolved})`;
       el.pills[1].textContent = `Committed (${data.counts.resolved})`;
       el.pills[2].textContent = `All (${data.total})`;
       if (el.pills[3]) el.pills[3].textContent = `Stragglers (${data.total})`;
@@ -635,7 +533,7 @@ registerModule({
       try {
         const [s, data] = await Promise.all([
           api('/status'),
-          api(`/families?state=${listQuery(filter).state}&source=${listQuery(filter).source}&cursor=&include_archived=${archQ()}`),
+          api(`/families?state=${listQuery(filter).state}&source=${listQuery(filter).source}&cursor=`),
         ]);
         if (seq !== viewSeq) return;      // user did something since — drop
         const freshKey = s.key || null;
@@ -650,7 +548,6 @@ registerModule({
           cursor = data.next_cursor || '';
           exhausted = !data.next_cursor;
           el.more.style.display = exhausted ? 'none' : 'flex';
-          paintDeathBar();
         }
       } catch (_) { /* stale cache is fine until the next real render */ }
     }
@@ -659,7 +556,6 @@ registerModule({
       const seq = ++viewSeq;
       trace(`renderList(seq=${seq})`);
       el.pills.forEach(p => p.classList.toggle('active', p.dataset.f === filter));
-      paintDismissZero();
       el.detail.classList.remove('open');
       el.list.classList.remove('open');
       el.bottom.style.display = 'none';
@@ -688,7 +584,6 @@ registerModule({
           exhausted = !cached.next_cursor;
           el.more.style.display = exhausted ? 'none' : 'flex';
           job('');
-          paintDeathBar();
           const mySeq = seq;
           backgroundRefresh(mySeq);
           return;
@@ -697,7 +592,7 @@ registerModule({
       job(firstPage ? 'loading families…' : 'loading more…');
       try {
         const q = listQuery(filter);
-        const data = await api(`/families?state=${q.state}&source=${q.source}&cursor=${encodeURIComponent(nextCursor)}&include_archived=${archQ()}`);
+        const data = await api(`/families?state=${q.state}&source=${q.source}&cursor=${encodeURIComponent(nextCursor)}`);
         if (seq !== viewSeq) { trace(`renderList(${seq}) stale — a newer render won`); return; }
         if (data.key) listKey = data.key;
         if (firstPage) listDirty = false;
@@ -714,67 +609,8 @@ registerModule({
         exhausted = !data.next_cursor;
         el.more.style.display = exhausted ? 'none' : 'flex';
         job('');
-        paintDeathBar();
       } catch (e) { job(`dupe: ${e.message}`, 'err'); }
     }
-
-    // ── DEATH-ROW MASS ACTION (2026-10-09b) ──────────────────────────
-    // "Send all to deletion queue": enqueues the still-rejected members of
-    // every rehydrated family still UNCOMMITTED this session. One confirm,
-    // exact counts (server 409-guarded), existing manifest semantics —
-    // nothing unlinks here; files stay on disk until queue purge.
-    let deathSummary = null;
-    let deathKey = null;
-    async function paintDeathBar() {
-      const bar = el.deathbar;
-      if (!bar) return;
-      if (!rehydrateQueue.size || current) { bar.style.display = 'none'; return; }
-      bar.style.display = 'flex';
-      el.deathCommit.disabled = true;
-      el.deathCommit.textContent = 'counting…';
-      try {
-        const key = listKey || '';
-        if (!deathSummary || deathKey !== key) {
-          deathSummary = await api('/death-row');
-          deathKey = key;
-        }
-        if (current) return;   // summary resolved after a detail opened
-        const rows = deathSummary.items.filter(r => rehydrateQueue.has(r.id));
-        const q = queueCounts(rows);
-        if (!q.files) { bar.style.display = 'none'; return; }
-        el.deathCommit.textContent =
-          `Send all to deletion queue (${q.files} files, ${gb(q.bytes)} GB)`;
-        el.deathCommit.disabled = false;
-        el.deathNote.textContent =
-          `${rows.length} pre-marked families — nothing deletes until you purge the queue`;
-      } catch (e) {
-        el.deathCommit.textContent = `death row: ${e.message}`;
-      }
-    }
-    el.deathCommit.addEventListener('click', async () => {
-      const rows = ((deathSummary && deathSummary.items) || [])
-        .filter(r => rehydrateQueue.has(r.id));
-      const q = queueCounts(rows);
-      if (!q.files) return;
-      if (!window.confirm(
-        `Queue ${q.files} rejected files (${gb(q.bytes)} GB) for deletion? ` +
-        'Nothing is deleted until you purge the queue.')) return;
-      try {
-        const r = await api('/death-row/commit', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ families: rows.map(x => x.id),
-                                 expected_files: q.files }),
-        });
-        rows.forEach(x => rehydrateQueue.delete(x.id));
-        listDirty = true;
-        deathSummary = null;   // queue changed — refetch on next paint
-        window.dispatchEvent(new CustomEvent('ellieedit:pending-changed'));
-        job(`death row: +${r.added} queued (${r.already_pending} already ` +
-            `queued, ${r.missing} missing)`, 'ok');
-        el.deathbar.style.display = 'none';
-        renderList();
-      } catch (e) { job(`death row commit: ${e.message}`, 'err'); }
-    });
 
     // ───────────────────────────────────────── STACK-SPREAD detail view ──
     const DRAFT_CLASSES = { kept: 'pick', pick: 'pick', rejected: 'reject', melded: 'meld', deferred: 'defer' };
@@ -2249,7 +2085,7 @@ registerModule({
           }
           job('re-opened — prior verdicts loaded as a draft · flip or commit');
         }
-        if (f.state === 'resolved' && !f.rehydrated) {
+        if (f.state === 'resolved') {
           committed = true;
           const vs = draft.verdicts;
           const c = Object.values(vs).filter(x => x === 'kept').length;
@@ -2258,17 +2094,10 @@ registerModule({
           const df = Object.values(vs).filter(x => x === 'deferred').length;
           commitSummary =
             `saved verdict: ${c} kept · ${r} rejected · ${mm} melded · ${df} deferred`;
-        } else if (f.rehydrated) {
-          // Death-row rehydration (2026-10-09b): the historical verdict map
-          // above is the CURRENT UNCOMMITTED draft — flip anything, then
-          // Commit writes the ledger as usual. Track it for the mass action.
-          rehydrateQueue.add(fid);
-          job(`death row draft — ${Object.values(draft.verdicts).filter(x => x === 'rejected').length} pre-rejected · flip or commit`);
         }
         el.list.classList.add('open');     // hide list (open = hidden)
         el.detail.classList.add('open');   // show detail
         el.bottom.style.display = 'flex';
-        el.deathbar.style.display = 'none';   // mass action is list-view only
         el.scroll.scrollTop = 0;
       // ZOOM-FIRST ENTRY (2026-10-08p): opening a family lands directly in
       // the working zoom view. The spread DOM is still built underneath as
@@ -2340,9 +2169,6 @@ registerModule({
         }
         committed = true;
         listDirty = true;   // listing state changed — next render refetches
-        // A manual re-commit (Enter) drops the family out of the death-row
-        // mass set — it's no longer an uncommitted pre-filled draft.
-        rehydrateQueue.delete(current.id);
         commitSummary = `${pendingNote} · ${keeps} picked · ${melds} melded · ${rejects} rejected`;
         renderCommitted(commitSummary);
         job(`committed — ${pendingNote}`, 'ok');
