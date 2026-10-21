@@ -195,7 +195,7 @@ def test_foxden_denoise_always_visible_always_sent_and_img2img_wiring():
 OLD_IDS = ["threshold", "threshold-val", "min-size", "min-size-val", "max-size",
            "max-size-val", "brush-controls", "brush-size", "brush-size-val",
            "face-mode", "repaint-prompt", "denoise", "denoise-val", "seed-input",
-           "randomize-seed", "detail-crop", "variant-count", "gen-strip"]
+           "randomize-seed", "detail-crop", "variant-count", "gen-strip", "repaint-source"]
 OLD_ACTS = ["detect", "click-add", "layer-toggle", "draw-box", "draw-mask", "erase", "remove-all",
             "generate", "keep", "discard", "undo", "zoom-fit"]
 
@@ -242,7 +242,7 @@ def test_task7_every_control_keeps_its_id_and_lives_in_the_right_surface():
     # repaint drawer: prompt + repaint options + its own Generate (same handler)
     for x in ('data-id="repaint-prompt"', 'data-id="denoise"', 'data-id="seed-input"',
               'data-id="randomize-seed"', 'data-id="detail-crop"',
-              'data-id="variant-count"', 'data-act="generate-sheet"'):
+              'data-id="variant-count"', 'data-id="repaint-source"', 'data-act="generate-sheet"'):
         assert x in rep, x
     # Detect UI is fully retired
     assert 'data-sheet=' not in html and 'sheet-backdrop' not in html

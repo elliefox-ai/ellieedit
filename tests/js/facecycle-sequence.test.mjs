@@ -332,6 +332,56 @@ for (const g of [...A.gens, ...B.gens]) {
   fc.drawMaskMode = false; fc.maskEditId = null; fc.selectedRegionId = null;
 }
 
+// #I Repaint source choice (F2a, D4, 2026-10-21): composite by default, base on request.
+{
+  const callsOf = cv => ctxCache.get(cv)._calls;
+  const drewGen = (cv, gen) => callsOf(cv).some(c => c[0] === 'drawImage' && c[1] === gen.canvas);
+  const spy = () => {
+    const seen = { composite: [], base: [] };
+    const origC = fc.compositeSourceCanvas, origB = fc.currentSourceCanvas;
+    fc.compositeSourceCanvas = function () { const c = origC.call(this); seen.composite.push(c); return c; };
+    fc.currentSourceCanvas = function () { const c = origB.call(this); seen.base.push(c); return c; };
+    seen.restore = () => { delete fc.compositeSourceCanvas; delete fc.currentSourceCanvas; };
+    return seen;
+  };
+  B.status = 'kept'; B.gsel = 0; B.preview = null;
+  const shown = B.gens[0];
+  assert.equal(fc.repaintSourceMode(), 'composite', '#I default is the current composite');
+
+  // (1) composite: the model sees what Export would produce — incl. the target's own shown gen.
+  fc.selectedRegionId = B.id;
+  let seen = spy();
+  await fc.generateRepaint(); await tick();
+  seen.restore();
+  assert.equal(seen.composite.length, 1, '#I composite source built once');
+  assert.ok(drewGen(seen.composite[0], shown), '#I composite carries the kept gen (generations chain)');
+  assert.ok(/source: current composite/.test(fc.lastRunInfo), '#I the run is labelled: current composite');
+  fc.commitPending();
+
+  // (2) base: pre-F2a behaviour — the untouched base photo only.
+  fc.el.repaintSourceSelect.value = 'base';
+  assert.equal(fc.repaintSourceMode(), 'base');
+  B.status = 'kept'; B.gsel = 0; B.preview = null; fc.selectedRegionId = B.id;
+  seen = spy();
+  await fc.generateRepaint(); await tick();
+  seen.restore();
+  assert.equal(seen.composite.length, 0, '#I base mode never builds the composite');
+  assert.equal(seen.base.length, 1);
+  assert.ok(!drewGen(seen.base[0], shown), '#I base source ignores kept gens');
+  assert.ok(/source: base photo/.test(fc.lastRunInfo), '#I the run is labelled: base photo');
+  fc.commitPending();
+  fc.el.repaintSourceSelect.value = 'composite';
+
+  // (3) the composite is the EXPORT composite: unkept previews never leak in.
+  const saved = { status: A.status, preview: A.preview, gsel: A.gsel };
+  const ghost = fakeEl('canvas');
+  A.status = 'preview'; A.preview = { variants: [ghost], raws: [null], psel: 0, rect: { x: 1, y: 1, w: 5, h: 5 }, maskCanvas: null, outstanding: 0 };
+  const comp = fc.compositeSourceCanvas();
+  assert.ok(!callsOf(comp).some(c => c[0] === 'drawImage' && c[1] === ghost), '#I unkept preview excluded from the source');
+  A.status = saved.status; A.preview = saved.preview; A.gsel = saved.gsel;
+  fc.selectedRegionId = null;
+}
+
 // #D post-sequence: still no global pending anywhere.
 assert.equal(fc.pendingStore, undefined, '#D no pendingStore after full sequence');
 assert.equal('pending' in fc.stack, false, '#D no stack.pending after full sequence');

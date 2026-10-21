@@ -151,6 +151,7 @@ function panelHTML() {
       </div>
       <div class="fc-row">
         <label>Denoise <input type="range" data-id="denoise" min="0.2" max="0.8" step="0.05" value="0.5" style="max-width:140px"><span class="val" data-id="denoise-val">0.5</span></label>
+        <label title="What the model sees. Current composite = exactly what Export would produce right now, so a new generation builds on the ones you've kept (generations chain). Base photo = ignore everything kept so far and start from the untouched base. Results differ per choice.">Source <select data-id="repaint-source"><option value="composite" selected>Current composite</option><option value="base">Base photo</option></select></label>
         <label>Variants <select data-id="variant-count"><option value="1" selected>1</option><option value="2">2</option><option value="4">4</option></select></label>
         <label>Seed <input type="number" data-id="seed-input" placeholder="random" style="max-width:110px"></label>
         <label><input type="checkbox" data-id="randomize-seed" checked> Randomize each</label>
@@ -191,6 +192,7 @@ export class FaceCycle {
       brushControls: $('brush-controls'), brushSizeSlider: $('brush-size'),
       brushSizeVal: $('brush-size-val'), eraseToggleBtn: act('erase'),
       repaintPromptInput: $('repaint-prompt'),
+      repaintSourceSelect: $('repaint-source'),
       repaintDrawer: $('repaint-drawer'), repaintGenerateBtn: act('generate-sheet'),
       denoiseSlider: $('denoise'), denoiseVal: $('denoise-val'), seedInput: $('seed-input'),
       randomizeSeed: $('randomize-seed'), detailCrop: $('detail-crop'),
@@ -1528,6 +1530,7 @@ export class FaceCycle {
     return m;
   }
 
+  // BASE source: the untouched base photo (the pre-F2a behavior).
   currentSourceCanvas() {
     const src = document.createElement('canvas');
     src.width = this.state.width;
@@ -1535,6 +1538,22 @@ export class FaceCycle {
     const sctx = src.getContext('2d');
     sctx.putImageData(this.state.images[this.state.baseVariant].processedData, 0, 0);
     return src;
+  }
+
+  // COMPOSITE source (F2a, D4 — the default): base photo + every region's
+  // kept state, built exactly the way Export builds its composite. Unkept
+  // previews are excluded, so what the model sees is what would be saved.
+  // The target region's own shown gen/photo is included on purpose: that is
+  // what lets a generation be refined by repainting on top of it.
+  compositeSourceCanvas() {
+    const src = this.currentSourceCanvas();
+    this.drawRegionState(src.getContext('2d'), { exporting: true });
+    return src;
+  }
+
+  // Per-run choice from the drawer; anything but an explicit 'base' is composite.
+  repaintSourceMode() {
+    return this.el.repaintSourceSelect?.value === 'base' ? 'base' : 'composite';
   }
 
   // Composite a raw response image into the region's preview variant at the
@@ -1706,7 +1725,9 @@ export class FaceCycle {
 
     const sendImg = document.createElement('canvas');
     sendImg.width = cw2; sendImg.height = ch2;
-    sendImg.getContext('2d').drawImage(this.currentSourceCanvas(), cx, cy, cw, ch, 0, 0, cw2, ch2);
+    const sourceMode = this.repaintSourceMode();
+    const sourceCanvas = sourceMode === 'base' ? this.currentSourceCanvas() : this.compositeSourceCanvas();
+    sendImg.getContext('2d').drawImage(sourceCanvas, cx, cy, cw, ch, 0, 0, cw2, ch2);
 
     const maskFull = maskCropped ? this.buildFullSizeMask(maskCropped, win.x, win.y) : this.boxMaskCanvas(win);
     const sendMask = document.createElement('canvas');
@@ -1726,7 +1747,7 @@ export class FaceCycle {
 
     const image_b64 = sendImg.toDataURL('image/png').split(',')[1];
     const mask_b64 = sendMask.toDataURL('image/png').split(',')[1];
-    this.lastRunInfo = `${useDetail ? 'detail crop · enlarged 1.5×' : 'full native'} · ring ${Math.round(pct * 100)}%${prompt ? '' : ' · no prompt'}`;
+    this.lastRunInfo = `${useDetail ? 'detail crop · enlarged 1.5×' : 'full native'} · ring ${Math.round(pct * 100)}% · source: ${sourceMode === 'base' ? 'base photo' : 'current composite'}${prompt ? '' : ' · no prompt'}`;
 
     const rect = { x: cx, y: cy, w: cw, h: ch };
     region.preview = { variants: [], raws: [], psel: -1, rect, maskCanvas: maskLocal, outstanding: variantCount };
