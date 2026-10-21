@@ -345,9 +345,15 @@ def _verdicts() -> dict:
 
 
 def _family_state(fid: str, verdicts: dict | None = None) -> str:
-    v = (verdicts or _verdicts()).get(fid)
+    """THE single source of truth for resolved-vs-unresolved (queue-hardening
+    invariant, 2026-10-20): a family with a resolved record OR a dismiss
+    tombstone is "resolved" and appears in NO actionable queue. Every listing,
+    count and status number must go through here — never re-derive it."""
+    v = (verdicts if verdicts is not None else _verdicts()).get(fid)
     if not v:
         return "unresolved"
+    if v.get("death_row_dismissed"):
+        return "resolved"      # tombstone = retired; only a real entry revives it
     members = v.get("members") or {}
     if not members or all(x == "deferred" for x in members.values()):
         # deferral is a note, not a decision; an empty map is a re-open
@@ -699,6 +705,13 @@ def families(state: str = "unresolved", cursor: str = "",
             dh = [r for r in dh if not r["archived"]]
         rows = rows + dh
         rehydrated = len(dh)
+    # QUEUE INVARIANT (2026-10-20): the unresolved queue holds ONLY families
+    # whose state is "unresolved". This guard runs after every row source (the
+    # retired rehydration block above included) so no future path can leave a
+    # resolved/tombstoned family lingering here while counts say otherwise.
+    if state == "unresolved":
+        rows = [r for r in rows
+                if _family_state(r["id"], verdicts) == "unresolved"]
     # Straggler import-batch filter (2026-10-09g): source=straggler narrows
     # to provenance-marked families before pagination/death-row handling.
     # 'straggler' is accepted as the client shorthand for the full marker.

@@ -984,53 +984,6 @@ def _majority_verdict(client, fid, keep=1, reject=2):
     return members
 
 
-def test_deathrow_rehydration_appended_sorted(env, client):
-    """Majority-rejected resolved families ride the unresolved queue after
-    the genuinely unresolved ones, biggest-rejected-first, flagged."""
-    root, _, _ = env
-    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)   # 2 rej
-    _majority_verdict(client, "fam-bbbbbbbbbbbb", keep=0, reject=1)   # 1 rej
-    lst = client.get("/api/dupe/families?state=unresolved").json()
-    ids = [it["id"] for it in lst["items"]]
-    # unresolved first, then rehydrated rows in rejected-desc order.
-    # fam-bbbbbbbbbbbb (member d.png gone from disk) is a GHOST family —
-    # hidden from the default list (2026-10-09f), revealed by the toggle.
-    assert ids[-1] == "fam-aaaaaaaaaaaa"
-    assert "fam-bbbbbbbbbbbb" not in ids
-    tail = lst["items"][-1:]
-    assert all(it["rehydrated"] and it["state"] == "unresolved" for it in tail)
-    assert tail[0]["rejected"] == 2 and tail[0]["kept"] == 1
-    assert lst["rehydrated"] == 1
-    assert lst["archived_hidden"] == 1
-    # counts stay honest: the rehydrated families are still resolved
-    assert lst["counts"] == {"unresolved": 1, "resolved": 2}
-    # the archived toggle reveals the ghost family, flagged + zero on disk
-    full = client.get(
-        "/api/dupe/families?state=unresolved&include_archived=1").json()
-    fids = [it["id"] for it in full["items"]]
-    assert "fam-bbbbbbbbbbbb" in fids
-    ghost_row = next(it for it in full["items"] if it["id"] == "fam-bbbbbbbbbbbb")
-    assert ghost_row["archived"] is True and ghost_row["on_disk"] == 0
-    assert full["rehydrated"] == 2 and full["archived_hidden"] == 1
-
-
-def test_deathrow_latest_verdict_wins(env, client):
-    """An overriding re-commit that flips the majority drops the family out
-    of the rehydration; a flip INTO majority-rejected pulls one back in."""
-    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
-    assert client.get("/api/dupe/families?state=unresolved").json()["rehydrated"] == 1
-    # override: now majority kept
-    client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict", json={
-        "members": {"a.png": "kept", "b.png": "kept", "sub/c.png": "rejected"}})
-    assert client.get("/api/dupe/families?state=unresolved").json()["rehydrated"] == 0
-    # flip back into majority-rejected
-    client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict", json={
-        "members": {"a.png": "rejected", "b.png": "rejected", "sub/c.png": "kept"}})
-    lst = client.get("/api/dupe/families?state=unresolved").json()
-    assert lst["rehydrated"] == 1
-    assert lst["items"][-1]["rejected"] == 2
-
-
 def test_deathrow_endpoints_never_write_ledger(env, client):
     """The rehydration view READS history; listing/detail/summary must not
     append a single ledger line."""
@@ -1116,51 +1069,6 @@ def test_deathrow_detail_carries_rehydrated_flag(env, client):
     # untouched family: no flag
     det2 = client.get("/api/dupe/families/fam-cccccccccccc").json()
     assert det2["rehydrated"] is False
-
-
-def test_deathrow_ghost_states_resolved(env, client, monkeypatch):
-    """2026-10-09f ghost resolution: kept member promoted to the Library
-    resolves 'library', vanished member resolves 'deleted', on-disk member
-    stays 'disk'; zero-on-disk families hide from the default list; /death-row
-    carries honest on_disk/archived flags. Read-only: no ledger writes."""
-    from backend.routers import library as lib
-    root, _, tmp = env
-    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
-    # promote the kept member (a.png) into the Library the way promote_move
-    # does — index record with promoted_from, file gone from the dupe root
-    lroot = tmp / "library"
-    lroot.mkdir(parents=True, exist_ok=True)
-    # patch the library module onto the tmp root (fixture doesn't touch it)
-    monkeypatch.setattr(lib, "LIBRARY_ROOT", lroot)
-    lib.append_index({"path": "kept/a.png", "tags": ["probe"],
-                      "promoted_from": "a.png", "sha256": "x" * 64})
-    (root / "a.png").unlink()
-    # fresh session: the per-process exists/ghost caches are TTL'd for the
-    # running server, so a test (like a server restart) starts clean
-    dupe_mod._exists_cache.clear()
-    dupe_mod._ghost_cache = None
-    before_ledger = (env[1].parent / "verdicts.jsonl")
-    n_before = len(before_ledger.read_text().splitlines())
-    lst = client.get("/api/dupe/families?state=unresolved").json()
-    # a.png -> library, others on disk: family stays in the default list
-    row = next(it for it in lst["items"] if it["id"] == "fam-aaaaaaaaaaaa")
-    states = {m["path"]: m["member_state"] for m in row["members"]}
-    verdicts_map = {m["path"]: m["verdict"] for m in row["members"]}
-    assert states.get("a.png") == "library"
-    assert verdicts_map.get("a.png") == "kept"
-    assert row["archived"] is False and row["on_disk"] >= 1
-    # detail carries the same chips data
-    det = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
-    dstates = {m["path"]: m["member_state"] for m in det["members"]}
-    assert dstates.get("a.png") == "library"
-    assert all(st in ("disk", "library", "deleted") for st in dstates.values())
-    # /death-row honest per-family on_disk + archived
-    dr = client.get("/api/dupe/death-row").json()
-    drow = next(r for r in dr["items"] if r["id"] == "fam-aaaaaaaaaaaa")
-    assert drow["on_disk"] == row["on_disk"] and drow["archived"] is False
-    # rendering wrote NOTHING to the ledger
-    n_after = len(before_ledger.read_text().splitlines())
-    assert n_after == n_before
 
 
 # ------------------------------------------------- member-root jail (09h)
@@ -1379,20 +1287,166 @@ def test_committed_detail_carries_frozen_verdicts(env, client):
     assert {p: v for p, v in det["verdicts"].items() if v} == members
 
 
-def test_rehydrated_rows_reported_separately_from_unresolved_count(env, client):
-    """Shadow-queue contract (2026-10-13): counts.unresolved never includes
-    death-row drafts, and the response says exactly how many extra
-    rehydrated rows ride the list so the client can label them."""
+# ============================================================================
+# Queue-hardening invariant (2026-10-20)
+#   A family with a resolved record (or a dismiss tombstone) appears in NO
+#   actionable queue. Replaces the 2026-10-09b/13 rehydration tests: death-row
+#   rehydration was retired (fae8757) and these now pin the opposite contract.
+# ============================================================================
+
+FIDS = ("fam-aaaaaaaaaaaa", "fam-bbbbbbbbbbbb", "fam-cccccccccccc")
+
+
+def _ids(client, **q):
+    """Every id the listing yields, walking pages with limit=1 + cursor so the
+    pagination path is covered too."""
+    qs = "&".join(f"{k}={v}" for k, v in q.items())
+    out, cursor = [], ""
+    for _ in range(20):
+        url = f"/api/dupe/families?{qs}&limit=1" + (f"&cursor={cursor}" if cursor else "")
+        d = client.get(url).json()
+        out += [it["id"] for it in d["items"]]
+        cursor = d["next_cursor"]
+        if not cursor:
+            return out
+    raise AssertionError("pagination did not terminate")
+
+
+def _assert_queue_invariant(client):
+    """Cross-check EVERY listing state against each other and the counts."""
+    status = client.get("/api/dupe/status").json()
+    lists = {st: client.get(f"/api/dupe/families?state={st}").json()
+             for st in ("unresolved", "resolved", "committed", "all")}
+    allrows = {it["id"]: it["state"] for it in lists["all"]["items"]}
+    resolved = {i for i, st in allrows.items() if st == "resolved"}
+    unresolved = {i for i, st in allrows.items() if st == "unresolved"}
+    assert resolved | unresolved == set(allrows) and not (resolved & unresolved)
+    # the actionable queue: exactly the unresolved families, nothing else
+    q = lists["unresolved"]
+    assert {it["id"] for it in q["items"]} == unresolved
+    assert all(it["state"] == "unresolved" for it in q["items"])
+    assert not any(it.get("rehydrated") for it in q["items"])
+    assert q["rehydrated"] == 0
+    assert len(q["items"]) == q["counts"]["unresolved"] == status["unresolved"]
+    assert {it["id"] for it in lists["resolved"]["items"]} == resolved
+    assert {it["id"] for it in lists["committed"]["items"]} == resolved
+    assert q["counts"]["resolved"] == status["resolved"] == len(resolved)
+    # every way of walking the queue agrees (paged, archived toggle, source)
+    assert set(_ids(client, state="unresolved")) == unresolved
+    assert set(_ids(client, state="unresolved", include_archived=1)) == unresolved
+    assert set(_ids(client, state="unresolved", source="straggler")) <= unresolved
+    # nothing resolved/tombstoned in the death-row queue's actionable output
+    # unless it is a live, un-dismissed majority-rejected row (its own contract)
+    for r in client.get("/api/dupe/death-row?include_archived=1").json()["items"]:
+        assert r["id"] in resolved
+
+
+@pytest.mark.parametrize("fid", FIDS)
+def test_resolved_family_in_no_actionable_queue(env, client, fid):
+    """THE invariant test: resolve a family -> it vanishes from every
+    actionable listing state; reopen -> it comes back and leaves the others."""
+    _assert_queue_invariant(client)
+    assert fid in _ids(client, state="unresolved")
+    members = {m["path"]: "rejected" for m in
+               client.get(f"/api/dupe/families/{fid}").json()["members"]}
+    members[next(iter(members))] = "kept"
+    assert client.post(f"/api/dupe/families/{fid}/verdict",
+                       json={"members": members}).json()["state"] == "resolved"
+    _assert_queue_invariant(client)
+    assert fid not in _ids(client, state="unresolved")
+    assert fid not in _ids(client, state="unresolved", include_archived=1)
+    assert fid in _ids(client, state="resolved")
+    assert client.get("/api/dupe/families?state=unresolved").json()["counts"]["unresolved"] == 2
+    # a real re-open revives it into the queue and out of resolved
+    assert client.post(f"/api/dupe/families/{fid}/reopen").status_code == 200
+    _assert_queue_invariant(client)
+    assert fid in _ids(client, state="unresolved")
+    assert fid not in _ids(client, state="resolved")
+
+
+def test_majority_rejected_family_does_not_linger_in_unresolved(env, client):
+    """The 2026-10-19 bug shape: a majority-rejected (death-row) family used to
+    ride the unresolved list while counts.unresolved excluded it."""
+    for fid, keep, reject in (("fam-aaaaaaaaaaaa", 1, 2), ("fam-bbbbbbbbbbbb", 0, 1)):
+        _majority_verdict(client, fid, keep=keep, reject=reject)
+    _assert_queue_invariant(client)
+    q = client.get("/api/dupe/families?state=unresolved&include_archived=1").json()
+    assert [it["id"] for it in q["items"]] == ["fam-cccccccccccc"]
+    assert q["counts"] == {"unresolved": 1, "resolved": 2}
+    # the verdict flips (latest wins) never move a resolved family back
+    client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict", json={
+        "members": {"a.png": "kept", "b.png": "kept", "sub/c.png": "rejected"}})
+    _assert_queue_invariant(client)
+    assert "fam-aaaaaaaaaaaa" not in _ids(client, state="unresolved")
+    # ...but pure deferral is a note, not a decision: back in the queue
+    client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict",
+                json={"members": {"a.png": "deferred"}})
+    _assert_queue_invariant(client)
+    assert "fam-aaaaaaaaaaaa" in _ids(client, state="unresolved")
+
+
+def test_dismiss_tombstone_is_resolved_everywhere(env, client):
+    """A dismiss tombstone retires the family from the death-row queue AND
+    keeps it out of the unresolved queue; a real entry revives it."""
     _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
-    d = client.get("/api/dupe/families?state=unresolved").json()
-    reh = [i for i in d["items"] if i.get("rehydrated")]
-    real = [i for i in d["items"] if not i.get("rehydrated")]
-    assert d["rehydrated"] == len(reh) == 1
-    assert len(real) == d["counts"]["unresolved"] == 2
-    assert len(d["items"]) == d["counts"]["unresolved"] + d["rehydrated"]
-    # dismissed -> the shadow row is gone; list and count agree exactly
-    client.post("/api/dupe/death-row/dismiss",
-                json={"families": ["fam-aaaaaaaaaaaa"]})
-    d2 = client.get("/api/dupe/families?state=unresolved").json()
-    assert d2["rehydrated"] == 0
-    assert len(d2["items"]) == d2["counts"]["unresolved"]
+    assert client.post("/api/dupe/death-row/dismiss",
+                       json={"families": ["fam-aaaaaaaaaaaa"]}).json() == {"dismissed": 1}
+    _assert_queue_invariant(client)
+    assert "fam-aaaaaaaaaaaa" not in _ids(client, state="unresolved")
+    assert client.get("/api/dupe/death-row").json()["families"] == 0
+    # hand-edited / torn-write shape: tombstone over a deferred-only record.
+    # Not reachable via the API, but the invariant must not depend on that.
+    dupe_mod.LEDGER.open("a").write(json.dumps(
+        {"family": "fam-bbbbbbbbbbbb", "members": {"d.png": "deferred"}}) + "\n")
+    dupe_mod.LEDGER.open("a").write(json.dumps(
+        {"family": "fam-bbbbbbbbbbbb", "death_row_dismissed": True,
+         "signal": "dismissed"}) + "\n")
+    _assert_queue_invariant(client)
+    assert "fam-bbbbbbbbbbbb" not in _ids(client, state="unresolved", include_archived=1)
+    # a real re-open supersedes the tombstone and the family is actionable again
+    client.post("/api/dupe/families/fam-aaaaaaaaaaaa/reopen")
+    _assert_queue_invariant(client)
+    assert "fam-aaaaaaaaaaaa" in _ids(client, state="unresolved")
+
+
+def test_guard_holds_even_if_a_row_source_leaks(env, client, monkeypatch):
+    """Defence in depth: if any code path ever feeds a resolved family into
+    the unresolved rows again (e.g. rehydration re-enabled), the final guard in
+    /families still drops it."""
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    real = dupe_mod._family_state
+    # simulate a leaky first pass: state filter says unresolved for everyone
+    calls = {"n": 0}
+
+    def leaky(fid, verdicts=None):
+        calls["n"] += 1
+        return "unresolved" if calls["n"] <= 3 else real(fid, verdicts)
+    monkeypatch.setattr(dupe_mod, "_family_state", leaky)
+    items = client.get("/api/dupe/families?state=unresolved").json()["items"]
+    assert "fam-aaaaaaaaaaaa" not in [it["id"] for it in items]
+
+
+def test_deathrow_member_ghost_states_resolved(env, client, monkeypatch):
+    """2026-10-09f ghost resolution (detail + /death-row only now): a kept
+    member promoted to the Library resolves 'library'; the family keeps honest
+    on_disk/archived flags; rendering writes nothing to the ledger."""
+    from backend.routers import library as lib
+    root, _, tmp = env
+    _majority_verdict(client, "fam-aaaaaaaaaaaa", keep=1, reject=2)
+    lroot = tmp / "library"
+    lroot.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(lib, "LIBRARY_ROOT", lroot)
+    lib.append_index({"path": "kept/a.png", "tags": ["probe"],
+                      "promoted_from": "a.png", "sha256": "x" * 64})
+    (root / "a.png").unlink()
+    dupe_mod._exists_cache.clear()
+    dupe_mod._ghost_cache = None
+    n_before = len((tmp / "verdicts.jsonl").read_text().splitlines())
+    det = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
+    dstates = {m["path"]: m["member_state"] for m in det["members"]}
+    assert dstates.get("a.png") == "library"
+    assert all(st in ("disk", "library", "deleted") for st in dstates.values())
+    dr = client.get("/api/dupe/death-row").json()
+    drow = next(r for r in dr["items"] if r["id"] == "fam-aaaaaaaaaaaa")
+    assert drow["on_disk"] >= 1 and drow["archived"] is False
+    assert len((tmp / "verdicts.jsonl").read_text().splitlines()) == n_before
