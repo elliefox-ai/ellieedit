@@ -115,7 +115,8 @@ def test_kept_gens_share_the_layers_row():
     row_end = html.index('data-id="repaint-drawer"')
     row = html[row_start:row_end]
     assert 'data-id="gen-strip"' in row, "gen strip must live inside the tools drawer row"
-    assert row.index('data-act="layer-toggle"') < row.index('data-id="gen-strip"')
+    # 2026-10-21: the vestigial 'Edit layer' toggle is gone; the strip follows undo
+    assert row.index('data-act="undo"') < row.index('data-id="gen-strip"')
     main = html[html.index('data-id="main-view"'):]
     assert 'data-id="gen-strip"' not in main, "no gens bar below the canvas"
     assert html.count('data-id="gen-strip"') == 1
@@ -195,8 +196,8 @@ OLD_IDS = ["threshold", "threshold-val", "min-size", "min-size-val", "max-size",
            "max-size-val", "brush-controls", "brush-size", "brush-size-val",
            "face-mode", "repaint-prompt", "denoise", "denoise-val", "seed-input",
            "randomize-seed", "detail-crop", "variant-count", "gen-strip"]
-OLD_ACTS = ["detect", "click-add", "draw-box", "draw-mask", "erase", "remove-all",
-            "generate", "keep", "discard", "undo", "layer-toggle", "zoom-fit"]
+OLD_ACTS = ["detect", "click-add", "layer-toggle", "draw-box", "draw-mask", "erase", "remove-all",
+            "generate", "keep", "discard", "undo", "zoom-fit"]
 
 
 def _fc_html():
@@ -217,7 +218,7 @@ def test_task7_every_control_keeps_its_id_and_lives_in_the_right_surface():
             continue
         assert html.count(f'data-id="{i}"') == 1, i
     for a in OLD_ACTS:
-        if a in ("detect", "click-add", "open-detect", "sheet-close"):
+        if a in ("detect", "click-add", "open-detect", "sheet-close", "layer-toggle"):
             assert html.count(f'data-act="{a}"') == 0, a
             continue
         assert html.count(f'data-act="{a}"') == 1, a

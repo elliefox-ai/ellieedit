@@ -68,3 +68,47 @@ export function stepRing(region, nImages, photoSel, dir) {
     ? { gsel: pos, photoSel }
     : { gsel: -1, photoSel: pos - gens };
 }
+
+// ── D5 (2026-10-21): gens FOLLOW their region's moves/resizes ──────────────
+// A layer's rect is absolute canvas geometry. When the region box goes from
+// `from` to `to` (explicit move/resize drags only — NOT mask auto-grow, which
+// changes the box without meaning "scale the pixels"), every layer geometry
+// is remapped through the same transform: translate by the box offset, scale
+// by the box's size ratio about its origin. Pure translation when only moved.
+export function remapRect(rect, from, to) {
+  const sx = from.w > 0 ? to.w / from.w : 1;
+  const sy = from.h > 0 ? to.h / from.h : 1;
+  return {
+    x: Math.round(to.x + (rect.x - from.x) * sx),
+    y: Math.round(to.y + (rect.y - from.y) * sy),
+    w: Math.max(1, Math.round(rect.w * sx)),
+    h: Math.max(1, Math.round(rect.h * sy)),
+  };
+}
+
+/** Remap a region's kept gens and any live preview rect. Returns true if
+ *  anything changed. Mutates rects in place (layer objects are shared by
+ *  reference with the undo log, so undo stays consistent). */
+export function followRegion(region, from, to) {
+  if (from.x === to.x && from.y === to.y && from.w === to.w && from.h === to.h) return false;
+  for (const gen of region.gens ?? []) gen.rect = remapRect(gen.rect, from, to);
+  if (region.preview?.rect) region.preview.rect = remapRect(region.preview.rect, from, to);
+  return true;
+}
+
+// ── Explicit Generate target (2026-10-21) ──────────────────────────────────
+// Priority, as generateRepaint always applied it — now one function so the
+// status line can show what Generate WILL do instead of leaving it hidden:
+//   selected box → in-progress painted mask → last region that has a mask.
+export function pickRepaintTarget({ regions, selectedId, paintBBox = null }) {
+  const sel = regions.find(r => r.id === selectedId);
+  if (sel) return { kind: 'selected', region: sel };
+  // paintBBox may be a thunk: scanning the paint canvas is only paid when
+  // nothing is selected (same laziness generateRepaint always had).
+  const bbox = typeof paintBBox === 'function' ? paintBBox() : paintBBox;
+  if (bbox) return { kind: 'paint', region: null, bbox };
+  for (let i = regions.length - 1; i >= 0; i--) {
+    if (regions[i].maskCanvas) return { kind: 'last-mask', region: regions[i] };
+  }
+  return { kind: 'none', region: null };
+}

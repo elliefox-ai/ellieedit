@@ -1,6 +1,7 @@
 // FaceCycle layer model — pure logic (F1, 2026-10-21).
 import assert from 'node:assert/strict';
-import { makeGenLayer, isRemaskable, layerMask, ringEntries, activePosition, stepRing }
+import { makeGenLayer, isRemaskable, layerMask, ringEntries, activePosition, stepRing,
+  remapRect, followRegion, pickRepaintTarget }
   from '../../frontend/js/modules/facecycle-layers.js';
 
 // ── factory: owns raw + mask snapshot; rect is copied, not aliased ──
@@ -54,4 +55,42 @@ assert.equal(stepRing({ gens: [] }, 1, 0, 1), null);
   for (let i = 0; i < 3; i++) { const st = stepRing(r, 1, sel, 1); r.gsel = st.gsel; sel = st.photoSel; seen.push(r.gsel); }
   assert.deepEqual(seen, [-1, 0, 1]);
 }
+// ── D5: remapRect / followRegion ──
+const box = { x: 100, y: 50, w: 80, h: 40 };
+// pure translation
+assert.deepEqual(remapRect({ x: 90, y: 40, w: 100, h: 60 }, box, { x: 130, y: 45, w: 80, h: 40 }),
+  { x: 120, y: 35, w: 100, h: 60 });
+// scale about the box origin: x2 wide, same tall
+assert.deepEqual(remapRect({ x: 90, y: 40, w: 100, h: 60 }, box, { x: 100, y: 50, w: 160, h: 40 }),
+  { x: 80, y: 40, w: 200, h: 60 });
+// identity + degenerate source box never produce NaN/0-size
+assert.deepEqual(remapRect({ x: 1, y: 2, w: 3, h: 4 }, box, box), { x: 1, y: 2, w: 3, h: 4 });
+assert.deepEqual(remapRect({ x: 1, y: 2, w: 3, h: 4 }, { x: 0, y: 0, w: 0, h: 0 }, { x: 5, y: 5, w: 10, h: 10 }),
+  { x: 6, y: 7, w: 3, h: 4 });
+assert.ok(remapRect({ x: 0, y: 0, w: 1, h: 1 }, box, { x: 100, y: 50, w: 1, h: 1 }).w >= 1, 'never collapses to 0');
+{
+  const r = { gens: [makeGenLayer({ rect: { x: 90, y: 40, w: 100, h: 60 }, canvas: 1 })], preview: { rect: { x: 10, y: 10, w: 20, h: 20 } } };
+  assert.equal(followRegion(r, box, box), false, 'unchanged box → nothing to do');
+  assert.equal(followRegion(r, box, { x: 110, y: 50, w: 80, h: 40 }), true);
+  assert.deepEqual(r.gens[0].rect, { x: 100, y: 40, w: 100, h: 60 });
+  assert.deepEqual(r.preview.rect, { x: 20, y: 10, w: 20, h: 20 }, 'live preview follows too');
+  assert.equal(followRegion({}, box, { x: 0, y: 0, w: 80, h: 40 }), true, 'region with no gens/preview is fine');
+}
+
+// ── explicit Generate target: selected → paint → last mask → none ──
+{
+  const a = { id: 1, maskCanvas: null }, b = { id: 2, maskCanvas: { m: 1 } }, c = { id: 3, maskCanvas: { m: 2 } };
+  const regs = [a, b, c];
+  assert.deepEqual(pickRepaintTarget({ regions: regs, selectedId: 1, paintBBox: { x: 0 } }), { kind: 'selected', region: a });
+  assert.equal(pickRepaintTarget({ regions: regs, selectedId: null, paintBBox: { x: 1, y: 2, w: 3, h: 4 } }).kind, 'paint');
+  assert.equal(pickRepaintTarget({ regions: regs, selectedId: null }).region, c, 'last masked region wins');
+  assert.equal(pickRepaintTarget({ regions: [a], selectedId: null }).kind, 'none');
+  assert.equal(pickRepaintTarget({ regions: [], selectedId: 9 }).kind, 'none', 'stale selection id → falls through');
+  let scanned = 0;
+  pickRepaintTarget({ regions: regs, selectedId: 1, paintBBox: () => { scanned++; return null; } });
+  assert.equal(scanned, 0, 'paint scan is lazy — not paid when a region is selected');
+  pickRepaintTarget({ regions: regs, selectedId: null, paintBBox: () => { scanned++; return null; } });
+  assert.equal(scanned, 1);
+}
+
 console.log(`facecycle-layers.test.mjs: PASS (${cases} ring cases)`);

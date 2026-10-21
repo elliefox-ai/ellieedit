@@ -5,7 +5,7 @@
 // (selected box → in-progress painted mask → last painted-mask region),
 // denoise slider driving BasicScheduler server-side.
 
-import { makeGenLayer, stepRing } from './facecycle-layers.js';
+import { makeGenLayer, stepRing, followRegion, pickRepaintTarget } from './facecycle-layers.js';
 import {} from './facecycle-sheets.js'; // controller retired 2026-10-16f (sheets → drawers); module kept for its tests
 import { registerModule } from '../shell.js';
 import { CanvasStack, drawFeatheredSource } from '../components/canvas-stack.js';
@@ -61,7 +61,7 @@ function panelHTML() {
       overflow-x: auto; border: 1px solid #2a2a44; transition: border-color .2s, background .2s;
     }
     .fc-thumbs.drag-over { border-color: #7a6aaa; background: rgba(90,74,138,0.08); }
-    /* Task 10: kept gens live IN the layers row (keep/discard/undo/layer-toggle),
+    /* Task 10: kept gens live IN the layers row (keep/discard/undo),
        right-aligned — no extra bar, no canvas-height cost. */
     .fc-zoom { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:#9a9ab8; }
     .fc-zoom input[type=range] { width: 90px; }
@@ -128,7 +128,6 @@ function panelHTML() {
       <button class="ee-btn" data-act="keep">✓ Keep</button>
       <button class="ee-btn" data-act="discard">✕ Discard</button>
       <button class="ee-btn" data-act="undo">↩ Undo</button>
-      <button class="ee-btn" data-act="layer-toggle">👁 Edit layer: On</button>
       <span class="fc-zoom" title="Zoom the working image (two-finger drag pans on touch)">🔍
         <input type="range" data-id="zoom-slider" min="25" max="300" step="5" value="100" aria-label="Zoom">
         <span class="val" data-id="zoom-val">Fit</span>
@@ -198,7 +197,6 @@ export class FaceCycle {
       variantCountSelect: $('variant-count'), genStrip: $('gen-strip'),
       generateBtn: act('generate'),
       keepBtn: act('keep'), discardBtn: act('discard'), undoBtn: act('undo'),
-      layerToggleBtn: act('layer-toggle'),
       zoomSlider: $('zoom-slider'), zoomVal: $('zoom-val'), zoomFitBtn: act('zoom-fit'),
       threshold: $('threshold'), thresholdVal: $('threshold-val'),
       minSize: $('min-size'), minSizeVal: $('min-size-val'),
@@ -323,7 +321,6 @@ export class FaceCycle {
     this.el.keepBtn.addEventListener('click', () => this.commitPending());
     this.el.discardBtn.addEventListener('click', () => this.discardAction());
     this.el.undoBtn.addEventListener('click', () => this.undo());
-    this.el.layerToggleBtn.addEventListener('click', () => this.toggleLayer());
     this.el.exportBtn.addEventListener('click', () => this.exportComposite());
     // ── Dupe→Meld explicit exits (2026-10-08g) ──────────────────────
     this.el.meldSaveBtn.addEventListener('click', () => this.meldSaveBack());
@@ -416,11 +413,7 @@ export class FaceCycle {
     this.state.selections = {};
     this.state.baseVariant = 0;
     this.stack.baseData = null;
-    this.stack.editLayer = null;
-    this.stack.editLayerVisible = true;
     this.undoLog = [];
-    this.el.layerToggleBtn.textContent = '👁 Edit layer: On';
-    this.el.layerToggleBtn.classList.remove('active-toggle');
     this.nextRegionId = 0;
     this.selectedRegionId = null;
     this.prov = null;
@@ -644,7 +637,6 @@ export class FaceCycle {
     const manualRegions = this.state.activeRegions.filter(r => r.manual);
     const autoRegions = this.computeDiff();
     this.state.activeRegions = [...autoRegions, ...manualRegions];
-    this.stack.ensureEditLayer();
     this.state.baseVariant = 0;
     for (const r of this.state.activeRegions) {
       if (this.state.selections[r.id] === undefined) this.state.selections[r.id] = this.state.baseVariant;
@@ -698,6 +690,18 @@ export class FaceCycle {
       ? ' <span class="badge" style="color:#e87ad0">box selected — Generate overrides painted mask</span>'
       : '';
 
+    // Explicit Generate target (2026-10-21): never leave it hidden which region
+    // Generate will repaint — especially the "last masked region" fallback.
+    let targetBadge = '';
+    if (n > 0 && status !== 'generating' && status !== 'preview' && !(this.drawMaskMode && this.isPainting)) {
+      const tgt = pickRepaintTarget({ regions: this.state.activeRegions, selectedId: this.selectedRegionId });
+      targetBadge = tgt.kind === 'selected'
+        ? ` <span class="badge" style="color:#8ab4e8">⚡ repaints region ${this.getRegionNumber(tgt.region)}</span>`
+        : tgt.kind === 'last-mask'
+          ? ` <span class="badge" style="color:#e8b84d" title="Nothing is selected, so Generate falls back to the last region that has a painted mask. Click a region to choose.">⚡ nothing selected → repaints region ${this.getRegionNumber(tgt.region)} (last masked)</span>`
+          : ' <span class="badge" style="color:#6c6c8e">⚡ select a region, draw a box (B) or paint a mask (M)</span>';
+    }
+
     if (n === 0) {
       this.el.statusBar.innerHTML = '<span class="badge">' + (this.state.images.length < 2 ? 'Editor ready — draw a box (B) or click a region' : 'No changes detected') + '</span> <span class="help">' + (this.state.images.length < 2 ? 'Type a prompt (or leave empty), select a box, Generate to repaint.' : 'Try lowering sensitivity or min region size.') + '</span>' + statusBadge + maskHint + runBadge + gensBadge + receipt;
       return;
@@ -713,7 +717,7 @@ export class FaceCycle {
     let modeIndicator = '';
     if (this.drawBoxMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">✏️ box</span>';
     if (this.drawMaskMode) modeIndicator = ' <span class="badge" style="color:#e8b84d" title="Draw Mask — click a region to edit its mask · paint adds (box auto-grows) · Enter=apply · Esc=reset · E=erase · ,/. = brush size">🖌 mask</span>';
-    this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + statusBadge + maskHint + runBadge + gensBadge + receipt;
+    this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + statusBadge + maskHint + targetBadge + runBadge + gensBadge + receipt;
   }
 
   // ── Drawers (2026-10-16c): toggling flips `hidden` on a wrapper div only —
@@ -750,10 +754,10 @@ export class FaceCycle {
       }
       if (region.status === 'kept' && region.gens?.length && (region.gsel ?? -1) >= 0) {
         const gen = region.gens[region.gsel];
-        ctx.drawImage(gen.canvas, gen.rect.x, gen.rect.y);
+        ctx.drawImage(gen.canvas, gen.rect.x, gen.rect.y, gen.rect.w, gen.rect.h);
       } else if (!opts.exporting && region.status === 'preview' && region.preview && region.preview.psel >= 0) {
         const pv = region.preview.variants[region.preview.psel];
-        ctx.drawImage(pv, region.preview.rect.x, region.preview.rect.y);
+        ctx.drawImage(pv, region.preview.rect.x, region.preview.rect.y, region.preview.rect.w, region.preview.rect.h);
       }
     }
   }
@@ -1179,16 +1183,38 @@ export class FaceCycle {
       return;
     }
     if (this.moveDrag) {
+      const d = this.moveDrag;
+      const r = this.state.activeRegions.find(r => r.id === d.regionId);
+      if (r) this.followBoxChange(r, { x: d.startRegionX, y: d.startRegionY, w: r.w, h: r.h });
       this.moveDrag = null;
       this.stack.clearOverlay();
       this.render();
       return;
     }
     if (this.resizeDrag) {
+      const d = this.resizeDrag;
+      const r = this.state.activeRegions.find(r => r.id === d.regionId);
+      if (r) this.followBoxChange(r, { x: r.x, y: r.y, w: d.startW, h: d.startH });
       this.resizeDrag = null;
       this.stack.clearOverlay();
       this.render();
     }
+  }
+
+  // D5: kept gens (and a live preview) follow the region box after an explicit
+  // move/resize drag. Undo entries that carry a previewed rect follow too, so
+  // Undo-Keep restores the preview where the region now is.
+  followBoxChange(region, from) {
+    const to = { x: region.x, y: region.y, w: region.w, h: region.h };
+    if (!followRegion(region, from, to)) return false;
+    for (const e of this.undoLog) {
+      if (e.region === region && e.keptRect) {
+        const tmp = { gens: [], preview: { rect: e.keptRect } };
+        followRegion(tmp, from, to);
+        e.keptRect = tmp.preview.rect;
+      }
+    }
+    return true;
   }
 
   onPointerLeave() {
@@ -1487,7 +1513,6 @@ export class FaceCycle {
     src.height = this.state.height;
     const sctx = src.getContext('2d');
     sctx.putImageData(this.state.images[this.state.baseVariant].processedData, 0, 0);
-    if (this.stack.editLayer) sctx.drawImage(this.stack.editLayer, 0, 0);
     return src;
   }
 
@@ -1512,7 +1537,7 @@ export class FaceCycle {
     g.drawImage(raw, 0, 0, rect.w, rect.h);
     if (maskLocal) {
       g.globalCompositeOperation = 'destination-in';
-      g.drawImage(maskLocal, 0, 0);
+      g.drawImage(maskLocal, 0, 0, rect.w, rect.h);   // scaled: stays aligned after a resize
       g.globalCompositeOperation = 'source-over';
     } else {
       this.featherEdges(g, rect.w, rect.h);
@@ -1591,28 +1616,20 @@ export class FaceCycle {
     // Source priority: selected box → in-progress painted mask → last
     // painted-mask region. Every generation lands on a region — if none exists
     // yet, its region is created NOW (single source of truth).
-    let region = this.state.activeRegions.find(r => r.id === this.selectedRegionId);
+    const pick = pickRepaintTarget({
+      regions: this.state.activeRegions,
+      selectedId: this.selectedRegionId,
+      paintBBox: () => (this.drawMaskMode ? this.scanPaintBBox() : null),
+    });
+    let region = pick.region;
     let win = null;
     let maskCropped = null;
     if (region) {
       win = { x: Math.round(region.x), y: Math.round(region.y), w: Math.round(region.w), h: Math.round(region.h) };
-      if (region.maskCanvas) maskCropped = region.maskCanvas;
-    } else {
-      const bbox = this.drawMaskMode ? this.scanPaintBBox() : null;
-      if (bbox) {
-        win = bbox;
-        maskCropped = this.cropCanvas(this.maskPaintCanvas, bbox.x, bbox.y, bbox.w, bbox.h);
-      } else {
-        for (let i = this.state.activeRegions.length - 1; i >= 0; i--) {
-          const r = this.state.activeRegions[i];
-          if (r.maskCanvas) {
-            region = r;
-            win = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.w), h: Math.round(r.h) };
-            maskCropped = r.maskCanvas;
-            break;
-          }
-        }
-      }
+      maskCropped = region.maskCanvas ?? null;
+    } else if (pick.kind === 'paint') {
+      win = pick.bbox;
+      maskCropped = this.cropCanvas(this.maskPaintCanvas, win.x, win.y, win.w, win.h);
     }
     if (!win) {
       this.jobs.note('Draw a box (B) or paint a mask (M) to generate');
@@ -1905,13 +1922,6 @@ export class FaceCycle {
     });
   }
 
-  toggleLayer() {
-    this.stack.editLayerVisible = !this.stack.editLayerVisible;
-    this.el.layerToggleBtn.textContent = this.stack.editLayerVisible ? '👁 Edit layer: On' : '👁 Edit layer: Off';
-    this.el.layerToggleBtn.classList.toggle('active-toggle', !this.stack.editLayerVisible);
-    this.render();
-  }
-
   // ── Dupe→Meld (2026-10-08g) ─────────────────────────────────────────
   // Explicit exits for a meld batch. Save back posts the blend to the
   // server (new auto-named gallery-root file + ledger ACCEPTED + every
@@ -2073,7 +2083,6 @@ export class FaceCycle {
     const ectx = exp.getContext('2d');
     const baseV = this.state.baseVariant;
     ectx.putImageData(this.state.images[baseV].processedData, 0, 0);
-    if (this.stack.editLayer) ectx.drawImage(this.stack.editLayer, 0, 0);
     this.drawRegionState(ectx, { exporting: true });
     return new Promise(res => exp.toBlob(res, 'image/png'));
   }
@@ -2085,7 +2094,6 @@ export class FaceCycle {
     const ectx = exp.getContext('2d');
     const baseV = this.state.baseVariant;
     ectx.putImageData(this.state.images[baseV].processedData, 0, 0);
-    if (this.stack.editLayer) ectx.drawImage(this.stack.editLayer, 0, 0);
     this.drawRegionState(ectx, { exporting: true });
     exp.toBlob(blob => {
       const url = URL.createObjectURL(blob);

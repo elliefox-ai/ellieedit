@@ -198,6 +198,73 @@ for (const g of [...A.gens, ...B.gens]) {
   assert.equal(fc.recomposeGen({ canvas: before, rect: g.rect }), false, '#E legacy gen without raw cannot be re-masked');
 }
 
+// #F D5 (2026-10-21): kept gens FOLLOW their region's explicit move/resize drags.
+{
+  const endDrag = (kind, r, startGeom) => {
+    if (kind === 'move') fc.moveDrag = { regionId: r.id, startMouseX: 0, startMouseY: 0, startRegionX: startGeom.x, startRegionY: startGeom.y, moved: true };
+    else fc.resizeDrag = { regionId: r.id, startMouseX: 0, startMouseY: 0, startW: startGeom.w, startH: startGeom.h, moved: true };
+    fc.onPointerUp({}, { x: 0, y: 0 });
+  };
+  const rects0 = A.gens.map(g => ({ ...g.rect }));
+  // MOVE: box +25,-10 → every gen translates by exactly that, size untouched.
+  const g0 = { x: A.x, y: A.y, w: A.w, h: A.h };
+  A.x += 25; A.y -= 10;
+  endDrag('move', A, g0);
+  A.gens.forEach((g, i) => assert.deepEqual(g.rect, { x: rects0[i].x + 25, y: rects0[i].y - 10, w: rects0[i].w, h: rects0[i].h }, `#F move: gen ${i} translated with its region`));
+  // RESIZE: width x2 about the box origin → gen x-offset and width double, y/h unchanged.
+  const rects1 = A.gens.map(g => ({ ...g.rect }));
+  const g1 = { x: A.x, y: A.y, w: A.w, h: A.h };
+  A.w = g1.w * 2;
+  endDrag('resize', A, g1);
+  A.gens.forEach((g, i) => assert.deepEqual(g.rect,
+    { x: A.x + (rects1[i].x - A.x) * 2, y: rects1[i].y, w: rects1[i].w * 2, h: rects1[i].h }, `#F resize: gen ${i} scaled with its region`));
+  // The renderer draws the gen at its (now scaled) stored size.
+  A.gsel = 0; fc.render();
+  const dr = [...fc.stack.ctx._calls].reverse().find(c => c[0] === 'drawImage' && c[1] === A.gens[0].canvas);
+  assert.ok(dr, '#F renderer draws the followed gen');
+  assert.deepEqual(dr.slice(2, 6), [A.gens[0].rect.x, A.gens[0].rect.y, A.gens[0].rect.w, A.gens[0].rect.h], '#F drawn at the followed rect');
+  // A drag that does not change the box moves nothing.
+  const snap = A.gens.map(g => ({ ...g.rect }));
+  endDrag('move', A, { x: A.x, y: A.y, w: A.w, h: A.h });
+  A.gens.forEach((g, i) => assert.deepEqual(g.rect, snap[i], '#F no-op drag leaves gens alone'));
+  // Mask auto-grow is NOT a resize drag: growing the box must not scale gens.
+  const before = A.gens.map(g => ({ ...g.rect }));
+  A.w += 40; // what autoGrowBox does while painting — no drag involved
+  A.gens.forEach((g, i) => assert.deepEqual(g.rect, before[i], '#F auto-grow leaves gens alone'));
+  A.w -= 40;
+
+  // A live preview follows too, and Undo-Keep restores it where the region now is.
+  tap(insideB.x, insideB.y);
+  await fc.generateRepaint(); await tick();
+  assert.equal(B.status, 'preview');
+  fc.commitPending();
+  const keptAt = { ...B.gens[B.gens.length - 1].rect };
+  const gb = { x: B.x, y: B.y, w: B.w, h: B.h };
+  B.x += 10;
+  endDrag('move', B, gb);
+  assert.equal(B.gens[B.gens.length - 1].rect.x, keptAt.x + 10, '#F new gen followed the move');
+  fc.undo();
+  assert.equal(B.status, 'preview', '#F undo-keep restores the preview');
+  assert.equal(B.preview.rect.x, keptAt.x + 10, '#F restored preview sits where the region now is');
+  fc.commitPending();
+}
+
+// #G explicit Generate target (2026-10-21): the status line says what will be repainted.
+{
+  const status = () => fc.el.statusBar.innerHTML;
+  fc.selectedRegionId = A.id; fc.updateStatusBar();
+  assert.ok(status().includes(`repaints region ${fc.getRegionNumber(A)}`), '#G selected region is named');
+  const hadMask = fc.state.activeRegions.map(r => r.maskCanvas);
+  fc.state.activeRegions.forEach(r => { r.maskCanvas = null; });
+  fc.selectedRegionId = null; fc.updateStatusBar();
+  assert.ok(status().includes('select a region'), '#G nothing to repaint says so');
+  B.maskCanvas = fakeEl('canvas'); fc.updateStatusBar();
+  assert.ok(status().includes('nothing selected') && status().includes(`region ${fc.getRegionNumber(B)}`) && status().includes('last masked'),
+    '#G the hidden last-masked fallback is now spelled out');
+  B.maskCanvas = null;
+  fc.state.activeRegions.forEach((r, i) => { r.maskCanvas = hadMask[i]; });
+}
+
 // #D post-sequence: still no global pending anywhere.
 assert.equal(fc.pendingStore, undefined, '#D no pendingStore after full sequence');
 assert.equal('pending' in fc.stack, false, '#D no stack.pending after full sequence');
