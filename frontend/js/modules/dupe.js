@@ -24,6 +24,7 @@ import { registerModule } from '../shell.js';
 import { sigIsOverride, sigChipText } from './dupe-signals.js';
 import { zoomMembers, orderBySimilarity, twinInfo, nextUnhandled,
          TWIN_NEAR, listCacheDecision, listQuery, stragglerChips,
+         proposalChip, proposalPanelHtml, groupByDate,
          stragglerProgressText } from './dupe-view.js';
 
 const api = (p, opts) => fetch(`/api/dupe${p}`, opts).then(r => {
@@ -284,6 +285,19 @@ registerModule({
         border-radius:8px; margin-left:5px; }
       .ghost-chip.lib { background:rgba(70,140,90,0.25); color:#9fd0ae; }
       .ghost-chip.straggler { background:rgba(140,100,200,0.22); color:#c4aef0; }
+      .ghost-chip.proposal { background:rgba(232,161,58,0.2); color:#e8c37a; }
+      .seg { display:inline-flex; margin-left:6px; border:1px solid #2a2a44; border-radius:14px; overflow:hidden; }
+      .seg-btn { padding:3px 10px; font-size:12px; cursor:pointer; color:#8a8aaa; user-select:none; }
+      .seg-btn.active { background:#2a2a44; color:#e8e8f4; }
+      .dupe-day { margin:6px 0 10px; }
+      .dupe-day > summary { cursor:pointer; padding:4px 8px; font-size:12px; color:#b8b8d0; }
+      .ss-proposal { margin:6px 12px 0; padding:8px 10px; background:#2a220f55; border:1px solid #5a4620;
+        border-radius:8px; font-size:12px; color:#d4d4e0; flex-shrink:0; }
+      .ss-proposal-pair { display:flex; gap:10px; margin:6px 0; }
+      .ss-proposal figure { margin:0; flex:1 1 0; min-width:0; text-align:center; }
+      .ss-proposal img { max-width:100%; max-height:150px; border-radius:6px; object-fit:contain; }
+      .ss-proposal .ph { height:90px; display:flex; align-items:center; justify-content:center; color:#7a7a9a; }
+      .ss-proposal figcaption, .ss-proposal-hint { font-size:11px; color:#9a9ab8; overflow:hidden; text-overflow:ellipsis; }
       .kbd-legend { position:absolute; z-index:60; right:12px; top:46px;
                     background:#1d1d33; border:1px solid #4a4a6c; border-radius:10px;
                     padding:10px 14px; font-size:12px; color:#d4d4e0;
@@ -307,6 +321,9 @@ registerModule({
         <span class="pill" data-f="resolved" title="committed families — browse read-only, or re-open for review">Committed</span>
         <span class="pill" data-f="all">All</span>
         <span class="pill" data-f="straggler" title="import batch — files the original scan never indexed, found by the straggler scan">Stragglers</span>
+        <span class="seg" id="dupe-viewseg" title="browse the same queue by family or by date">
+          <span class="seg-btn active" data-v="families">Families</span><span class="seg-btn" data-v="dates">Dates</span>
+        </span>
         <span class="status" id="dupe-status"></span>
       </div>
       <div class="dupe-scroll" id="dupe-scroll">
@@ -337,7 +354,11 @@ registerModule({
       back: panel.querySelector('#dupe-back'),
       note: panel.querySelector('#dupe-note'),
       commit: panel.querySelector('#dupe-commit'),
+      seg: [...panel.querySelectorAll('#dupe-viewseg .seg-btn')],
     };
+    let viewMode = 'families';   // 'families' | 'dates' (inc.3: pure regrouping)
+    let shownItems = [];         // rows currently listed (re-grouped by Dates)
+    let lastListData = null;
     let filter = 'unresolved';
     let cursor = '';
     let exhausted = false;
@@ -403,6 +424,12 @@ registerModule({
       renderList();
     }));
     el.loadmore.addEventListener('click', () => renderList(cursor));
+    el.seg.forEach(b => b.addEventListener('click', () => {
+      if (viewMode === b.dataset.v) return;
+      viewMode = b.dataset.v;
+      el.seg.forEach(x => x.classList.toggle('active', x.dataset.v === viewMode));
+      if (lastListData && !current) renderCards(shownItems.slice(), lastListData, false);
+    }));
 
     // Straggler scan progress (2026-10-09g): one status poll on mount, then
     // every 5s while a scan runs. Shows in the job bar either way — inline
@@ -482,7 +509,7 @@ registerModule({
         (f.tiers || []).map(t => `<span class="tier-badge ${t}">${t}</span>`).join('') +
         (f.conflict ? '<span class="sig-flag" title="signal conflict — prior verdict splits members the hashes call near-identical">⚡</span>' : '') +
         (f.state === 'resolved' ? '<span class="verdict-tag kept">resolved</span>' : '') +
-        ghostChips;
+        ghostChips + proposalChip(f);
       card.append(strip, meta);
       card.addEventListener('click', () => renderDetail(f.id));
       return card;
@@ -497,31 +524,58 @@ registerModule({
         : (shown ? `showing ${shown} families` : '');
     }
 
+    function safeCard(f, grid) {
+      try {
+        grid.appendChild(cardFor(f));
+      } catch (cardErr) {
+        const ec = document.createElement('div');
+        ec.className = 'fam-card';
+        ec.style.color = '#e87a7a';
+        ec.textContent = `card error (${f.id}): ${cardErr.message}`;
+        grid.appendChild(ec);
+        console.error('dupe card render failed', f.id, cardErr);
+      }
+    }
+
     function renderCards(items, data, append) {
+      shownItems = append ? shownItems.concat(items) : items.slice();
+      lastListData = data;
       let grid = el.list.querySelector('.fam-grid');
-      if (!append || !grid) {
+      if (viewMode === 'dates') {
+        // Dates view: same rows, regrouped by member mtime into collapsible
+        // day buckets. Read-oriented — cards open the same detail/verdicts.
         el.list.innerHTML = '';
         grid = document.createElement('div');
-        grid.className = 'fam-grid';
+        grid.className = 'fam-grid dates';
+        grid.style.display = 'block';
         el.list.appendChild(grid);
-      }
-      for (const f of items) {
-        try {
-          grid.appendChild(cardFor(f));
-        } catch (cardErr) {
-          const ec = document.createElement('div');
-          ec.className = 'fam-card';
-          ec.style.color = '#e87a7a';
-          ec.textContent = `card error (${f.id}): ${cardErr.message}`;
-          grid.appendChild(ec);
-          console.error('dupe card render failed', f.id, cardErr);
+        for (const g of groupByDate(shownItems)) {
+          const det = document.createElement('details');
+          det.className = 'dupe-day';
+          det.open = true;
+          const sum = document.createElement('summary');
+          sum.textContent = `${g.day || 'undated'} · ${g.items.length} ` +
+            `famil${g.items.length === 1 ? 'y' : 'ies'}`;
+          const inner = document.createElement('div');
+          inner.className = 'fam-grid';
+          det.append(sum, inner);
+          for (const f of g.items) safeCard(f, inner);
+          grid.appendChild(det);
         }
+      } else {
+        if (!append || !grid || grid.classList.contains('dates')) {
+          el.list.innerHTML = '';
+          grid = document.createElement('div');
+          grid.className = 'fam-grid';
+          el.list.appendChild(grid);
+        }
+        for (const f of items) safeCard(f, grid);
       }
       el.pills[0].textContent = `Unresolved (${data.counts.unresolved})`;
       el.pills[1].textContent = `Committed (${data.counts.resolved})`;
       el.pills[2].textContent = `All (${data.total})`;
       if (el.pills[3]) el.pills[3].textContent = `Stragglers (${data.total})`;
-      renderCountLine(grid.children.length, data);
+      renderCountLine(shownItems.length, data);
     }
 
     async function backgroundRefresh(seq) {
@@ -880,7 +934,34 @@ registerModule({
       return bar;
     }
 
+    function renderProposalPanel() {
+      // v2 membership proposal (inc.3): side-by-side of the new file and the
+      // matched member of the established family. Spread/committed path —
+      // the zoom overlay mounts its own strip (proposalStrip) over this.
+      let box = el.detail.querySelector(':scope > #ss-proposal');
+      const pm = current && current.proposed_merge;
+      if (!pm) { if (box) box.remove(); return; }
+      if (!box) {
+        box = document.createElement('div');
+        box.id = 'ss-proposal';
+        box.className = 'ss-proposal';
+        el.detail.insertBefore(box, el.detail.firstChild);
+      }
+      box.innerHTML = proposalPanelHtml(pm, current.members);
+    }
+
+    function proposalStrip() {
+      const pm = current && current.proposed_merge;
+      if (!pm) return null;
+      const d = document.createElement('div');
+      d.className = 'ss-proposal';
+      d.dataset.zoomProposal = '1';
+      d.innerHTML = proposalPanelHtml(pm, current.members);
+      return d;
+    }
+
     function renderSignalsBar() {
+      renderProposalPanel();
       // History chips + conflict lines render in committed mode too — a
       // resolved family being revisited is exactly where prior disagreements
       // matter. Only the Apply suggestion stays gated to uncommitted detail.
@@ -1330,7 +1411,8 @@ registerModule({
       const countLine = document.createElement('div');
       countLine.style.cssText = 'display:flex;gap:10px;align-items:center;justify-content:center;flex-shrink:0;';
       countLine.append(commitNext, count);
-      ov.append(top, stage, countLine);
+      const pStrip = proposalStrip();
+      ov.append(top, ...(pStrip ? [pStrip] : []), stage, countLine);
       el.detail.appendChild(ov);
       paint();
     }
