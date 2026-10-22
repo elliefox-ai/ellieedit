@@ -77,6 +77,7 @@ Promise.all([
   import(`./modules/review.js?v=${BUILD}`),
   import(`./modules/dupe.js?v=${BUILD}`),
   import(`./modules/foxden.js?v=${BUILD}`),
+  import(`./modules/puppet.js?v=${BUILD}`),
   import(`./modules/library.js?v=${BUILD}`),
   import(`./modules/update.js?v=${BUILD}`),
 ]).then(() => {
