@@ -1,6 +1,8 @@
 # DESIGN — Increment 3: cluster engine adoption (Meld → EllieEdit)
 
-**Status:** design only, no code. 2026-10-22, build 2026-10-22b, HEAD 5e868ca.
+**Status:** design rev.2 — revised per Alexander's rulings of 2026-10-22
+(blend engines, incremental scan, aspect gate dropped, dual views).
+Design only, no code. 2026-10-22, HEAD 42cee02.
 **Sources:** SALVAGE.md §1/§5 (meld repo), WORKORDER-2026-10-22 (inc.3 scope),
 `backend/routers/dupe.py`, `backend/dupe_scan.py` (straggler engine),
 `frontend/js/modules/dupe.js` / `dupe-view.js` / `dupe-signals.js`.
@@ -33,22 +35,25 @@ source, tiers, members: [{path, dhash, phash, size, mtime, (library_match)}],
 edges, related}`. Members carry both hex hashes already — the dupe surface
 has been hash-native from the start.
 
-### Where Meld's pipeline slots in: **augment, not replace**
+### Where Meld's pipeline slots in: **augment, not replace** (RULED 2026-10-22)
 
 The natural seam is `backend/dupe_scan.py`, which is already an in-process
-Python scan engine writing to the same family tree. Recommendation:
+Python scan engine writing to the same family tree. Ruling: the existing
+dupe_scan engine **stays primary** — nothing is replaced or retired.
 
-- **Extend `dupe_scan.py` into a v2 cluster engine** (new module
-  `backend/cluster_engine.py` imported by it, keeping the straggler
-  scan's provenance/jail/cache behavior), rather than touching
-  `routers/dupe.py`'s scan endpoints' contract or the external dupelib
-  path. The router stays the thin HTTP surface it is.
-- The Meld additions (coarse/style channel, log-space aspect gate,
-  greedy 1:1 pair view) become *additional signals* layered on the existing
-  family model — the style channel catches same-composition-different-style
-  pairs that T1/T2 hashes structurally cannot.
-- Keep the dupelib external scan for bulk/initial indexing; the new engine
-  handles incremental adoption and the style channel.
+- **`dupe_scan.py` keeps its T1/T2 union-find scan as the primary
+  clustering engine.** Meld's refinements are **added as supplementary
+  signal** on top: the coarse/style channel (catches
+  same-composition-different-style pairs that T1/T2 hashes structurally
+  cannot), Meld's DC-dropped phash variant for Meld-mode pairing, and the
+  greedy 1:1 pair view. Implemented in a new module
+  `backend/cluster_engine.py` imported by `dupe_scan.py`, keeping the
+  straggler scan's provenance/jail/cache behavior. The router
+  (`routers/dupe.py`) stays the thin HTTP surface it is.
+- **The external dupelib tool is not retired.** `POST /api/dupe/scan`
+  remains the bulk/initial indexing path indefinitely. All three scan
+  paths (dupelib, straggler scan, supplementary Meld signal) coexist by
+  `source` rows in the same `index.json`.
 
 ### Server-side vs client-side — resolved: **server-side, in Python**
 
@@ -70,12 +75,12 @@ only.
 |---|---|---|
 | dhash 64-bit (gray, 9×8, INTER_AREA, packbits) | **Reimplement** in `cluster_engine.py`, aligned to existing hashes | Note: `dupe_scan.py` already has a dhash; Meld's differs only in interpolation (cv2 INTER_AREA vs PIL BILINEAR). Keep ONE implementation (PIL-based, as today) — don't fork. Distances/tolerances unchanged. |
 | phash 63-bit (DCT 32×32, drop DC, median bits) | **Reimplement as an additive signal** | ⚠️ **FLAG (code/SALVAGE disagreement):** dupelib/dupe_scan phash is **64-bit incl. DC**; Meld's is **63-bit dropping DC and thresholding at median**. These are *different hashes* — distances are not comparable. Design: compute Meld's DC-dropped variant alongside the existing one; keep the existing 64-bit hash as the T1/T2 tier source (families/edges/library cache depend on it) and use the 63-bit variant only for Meld-mode pairing. Never mix the two in one distance. |
-| coarse style signature (16×16 blurred, mean-centered, L2-norm; dot = Pearson r; min_corr 0.55) | **Reimplement (new)** | No equivalent exists in EllieEdit. Needs float32 storage (256 floats/file). Base64 in the cache blob like Meld's `files.json`. This is the only genuinely new capability. Style pairs with r > 0.999 are excluded (SALVAGE §5.7) — near-identical structure is dhash's job. |
+| coarse style signature (16×16 blurred, mean-centered, L2-norm; dot = Pearson r; min_corr 0.55) | **Reimplement (new)** | No equivalent exists in EllieEdit. Needs float32 storage (256 floats/file). Base64 in the cache blob like Meld's `files.json`. This is the only genuinely new capability. Style pairs with r > 0.999 are excluded (SALVAGE §5.7) — near-identical structure is dhash's job. **Ships conservative: threshold 0.7+ (not Meld's 0.55), calibrated later against signals/override telemetry (RULED 2026-10-22).** |
 | Chunked Hamming distance (CH=512, unpackbits) | **Reuse pattern as-is** | Direct numpy port; dupe_scan already has the same idea with bitwise_count. 512-chunk budget kept for memory on the 6k-file pool. |
-| Edge filter `(d<=tol) & (d>=1) & i<j & aspect` | **Adopt with the d≥1 trap designed around** — see §3a | Meld defaults: dhash tol 6/64, phash tol 10/63, ar_tol 0.15. |
-| Log-space aspect gate `|log ari − log arj| <= log1p(ar_tol)` | **Adopt (new)** | EllieEdit has no aspect gate at all today; 4:5 vs 5:4 twins currently cluster together. Requires storing `ar` per file (Meld's `IMREAD_REDUCED_COLOR_4` preserves w/h; PIL resize to square patches must use the *original* dims — compute ar before any resize). `ar_tol <= 0` disables. |
+| Edge filter `(d<=tol) & (d>=1) & i<j` | **Adopt with the d≥1 trap designed around** — see §3a | Meld defaults: dhash tol 6/64, phash tol 10/63. |
+| Log-space aspect gate | **Considered and dropped from scope (Alexander, 2026-10-22).** Rationale: the corpus is restyles of the same scene — mixed orientations are not a concern; the gate's cost (a stored `ar` per file, a new cache field, a new test dimension) buys nothing on this pool. Revisit only if the pool ever mixes genuinely different scenes at different crops. |
 | Greedy 1:1 pairing (sort by distance, take if both endpoints free) | **Adopt** as the *pair-review surface* | Families remain the review unit; greedy pairs become `edges` entries with `mode` recorded (`exact/phash/style`), matching Meld's pair record shape. One pair per member keeps the meld canvas 1:1 (meld already caps at MELD_MAX=8). |
-| Connected-component clustering via union-find over the filtered edges | **Adopt, replacing nothing** | dupe_scan already union-finds; the change is the edge predicate (adds aspect gate, style channel) and the d==0 inclusion rule — see §3a. Components map to family ids as in §3. |
+| Connected-component clustering via union-find over the filtered edges | **Adopt, replacing nothing** | dupe_scan already union-finds; the change is the edge predicate (adds the style channel) and the d==0 inclusion rule — see §3a. Components map to family ids as in §3. |
 
 **Dropped:** Meld's `.meld/` state/cache files, `done_map` pair-keyed
 bookkeeping (`a|||b`), recycle pass, thumbnails-in-scan (dupe view has its own
@@ -93,8 +98,8 @@ include d==0, or identical twins land in different families (SALVAGE §5.6).
 Concretely:
 
 - **Two edge sets from one distance computation:**
-  - `pair_edges`: `(d <= tol) & (d >= 1) & i<j & aspect_pass` (+ style
-    channel `0.55 <= r <= 0.999`) → greedy 1:1 → family `edges`.
+  - `pair_edges`: `(d <= tol) & (d >= 1) & i<j` (+ style
+    channel `0.7 <= r <= 0.999` at ship, calibrated later) → greedy 1:1 → family `edges`.
   - `cluster_edges`: same predicate **minus `d >= 1`** → union-find →
     family membership.
 - Note the *existing* straggler engine gets this right by accident
@@ -135,6 +140,52 @@ opinion. Rules for the new engine and any migration:
   == "unresolved"]`) needs no change because the engine adds no new row
   source to `/families` — it only mutates `index.json`.
 
+### (c) Scan mode: incremental, past reviews untouched (RULED 2026-10-22)
+
+The engine runs **incrementally**: it scans only files not already
+covered by a family whose id is content-stable, and it **never rewrites
+past reviews**. Existing verdict-era and committed families are untouched
+on disk and in the ledger. A full rebuild exists as an explicit, opt-in
+command for the day the clustering logic itself changes — never as part
+of routine scans.
+
+#### New image meets an existing family
+
+The designed answer to "how does a NEW image whose near-duplicate
+partners already live in an EXISTING family get integrated?":
+
+1. **Hash-match against existing family members.** For each new file,
+   the engine computes its hashes, then looks them up against the
+   family tree: every existing family's member hashes are already in
+   the family JSONs (and the cache), and the engine checks the new
+   file's distance to each family's members under the same T1/T2 (+
+   supplementary style) predicate used for clustering.
+2. **Propose family membership, don't merge silently.** If the new file
+   matches ≥1 member of exactly one existing family, the engine emits a
+   **membership proposal**: a family JSON for the new file annotated
+   with `proposed_merge: {family_id, matched_member, distance}` — the
+   new file appears in the queue as its own (trivial) family pointing
+   at the established one. It is **not** appended to the existing
+   family's member list automatically: that would change the existing
+   family's content-derived id, silently re-opening a committed review
+   (the accepted cost from §3b — membership change = re-review). A
+   proposal preserves the committed family exactly as reviewed.
+3. **What the user sees.** The new image shows up in the unresolved
+   queue with a visible "proposed merge into fam-xxxx" badge and a
+   side-by-side with the matched member. One verdict resolves it:
+   *merge* (engine appends the member, writes the new-family id, and
+   the ledger records the supersession) or *separate* (it stays its own
+   family; the ledger records the refusal and the same proposal never
+   re-fires for that pair).
+4. **Queue invariant respected.** The engine still only writes family
+   JSONs + index rows and never touches the ledger or computes state;
+   `_family_state()` remains the sole resolver. A proposal family is
+   just another unresolved row until the user rules on it.
+5. **Ambiguity rule.** If the new file matches members of *multiple*
+   existing families, no proposal is emitted — it enters as a plain
+   new family (letting the reviewer see all neighbors naturally) rather
+   than guessing which family it belongs to.
+
 ---
 
 ## 4. Migration & coexistence
@@ -154,10 +205,11 @@ opinion. Rules for the new engine and any migration:
 ### Cache schema versioning
 
 - Extend the straggler cache (`hashes` table keyed path+size+mtime) with new
-  columns/keys for `phash63`, `coarse` (float32 blob), `ar`. Adopt Meld's
+  columns/keys for `phash63` and `coarse` (float32 blob). (The aspect gate is
+  dropped, so no `ar` field.) Adopt Meld's
   presence-check guard verbatim (SALVAGE §1.1 / §5.9): **a cache entry is
   valid only if `key` matches AND the new fields are present** — missing
-  `phash63`/`coarse`/`ar` ⇒ recompute that file, not fatal. Add a schema
+  `phash63`/`coarse` ⇒ recompute that file, not fatal. Add a schema
   version int to the store header so future field additions retire rows
   wholesale instead of per-field probing.
 - Coexisting hash dialects (64-bit incl-DC tier hash vs 63-bit Meld-mode
@@ -183,8 +235,11 @@ pattern). The workorder's synthetic-folder smoke test is gate 0.
   or returns None).
 - **T2 pair-exclusion:** two identical images produce **no** greedy pair but
   **one** family (trap a, named test).
-- **T3 aspect gate:** 4:5 vs 5:4 twins at equal distance are gated apart;
-  `ar_tol=0` disables the gate (log-space symmetry asserted both directions).
+- **T3 membership proposal (new-image integration, §3c):** a new file
+  near-duplicating a member of exactly one existing family produces a
+  proposal row (`proposed_merge` populated) and does NOT modify the
+  existing family's JSON or id; a file matching members of two families
+  produces no proposal; a resolved proposal does not re-fire on rescan.
 - **T4 greedy 1:1:** chain a–b (d=2), b–c (d=1) yields pair (b,c) not
   (a,b); no member appears in two pairs.
 - **T5 queue invariant (trap b, named test):** after an engine rescan that
@@ -193,37 +248,61 @@ pattern). The workorder's synthetic-folder smoke test is gate 0.
   the rescan keeps its committed state; a family that gained a member
   re-enters unresolved with a new id while the old id's ledger entry is
   untouched.
-- **T6 cache guard:** entry with matching key but missing `phash63`/`ar`
+- **T6 cache guard:** entry with matching key but missing `phash63`/`coarse`
   is recomputed (SALVAGE §5.9), not trusted; store schema bump retires old
   rows.
 - **T7 idempotence:** engine run twice → same ids, same index rows, ledger
-  byte-identical (untouched).
+  byte-identical (untouched). Incremental run over an already-scanned pool
+  touches zero existing families.
 
 ---
 
-## 6. Open questions for Alexander
+## 6. Open questions — RULED (Alexander, 2026-10-22)
 
-1. **Re-scan vs incremental?** Does the v2 engine re-cluster the *whole*
-   pool (correct global clusters, but new ids for any family that changes ⇒
-   re-review of some committed families), or run incrementally (only new
-   files, stable old ids, but clusters frozen at first-scan membership)?
-   Recommendation: incremental with an opt-in full rebuild command.
-2. **Is this THE scan engine?** If the dupe cluster engine becomes the
-   canonical scanner for both dupe review and future scene/meld use, do we
-   retire the external dupelib subprocess path (`/api/dupe/scan`), or keep
-   both indefinitely? Keeping both means three hash dialects in one cache
-   (dupelib, straggler, v2) — a real complexity cost.
-3. **Aspect gate defaults:** Meld's ar_tol=0.15 was tuned on art renders.
-   Acceptable for the photo-heavy DupeReview pool, or should the gate ship
-   disabled (ar_tol=0) until we see what it does to the 627 existing
-   families?
-4. **Style-channel threshold:** min_corr 0.55 (Meld's default) on a pool
-   this size will generate style families that may be mostly noise. Ship at
-   0.55, or start conservative (0.7+) and calibrate against the
-   signals/override telemetry?
-5. **Where do style-only families surface?** A new `source` means a new
-   filter chip in the dupe UI. Fold them into the main unresolved queue, or
-   keep them behind the source filter until calibrated (my recommendation)?
+1. **Re-scan vs incremental?** **RULED: incremental.** Past reviews are
+   never rewritten; full rebuild is an explicit opt-in command only.
+2. **Is this THE scan engine?** **RULED: no.** The existing dupe_scan
+   engine stays primary; Meld's refinements are added as supplementary
+   signal; the external dupelib tool is not retired.
+3. **Aspect gate defaults?** **RULED: dropped from scope entirely.** The
+   corpus is restyles of the same scene; mixed orientations are not a
+   concern (see §2 disposition table).
+4. **Style-channel threshold?** **RULED: keep the channel, ship
+   conservative** (0.7+ rather than Meld's 0.55) and calibrate later
+   against signals/override telemetry.
+5. **Where do style-only families surface?** **RULED: dual views (§7)** —
+   families and dates are browsing views over the same queue; style-only
+   results stay reachable but are not the main queue.
+
+Remaining genuinely open (new, small):
+
+- Where does the opt-in full-rebuild command live — a router endpoint
+  with a confirm flag, or CLI-only (`python -m backend.dupe_scan
+  --rebuild`)?
+- Does the dates view need a dedicated index (mtime → family ids) or is
+  regrouping family JSONs at request time fast enough at 6k files?
+
+## 7. Views: families AND dates (frontend)
+
+Alexander wants multiple **groupings as views** over the same dupe
+queue — neither is the main queue; both are lenses on the unresolved
+set produced by `_family_state()`.
+
+- **Families view** (exists today): the current dupe view — family
+  cards, greedy pairs on the meld-style canvas, verdict controls. This
+  remains the review surface where verdicts are cast.
+- **Dates view** (new idea): a date-grouped browsing view. Families are
+  bucketed by member mtime (family JSONs already carry `mtime` per
+  member); the UI shows a collapsible day-grouped timeline — "what did
+  I scan/review on Oct 14" — each group linking into the family cards.
+  Read-oriented: good for "what's new since my last session" and for
+  spotting scan batches; it casts no verdicts of its own (expanded
+  cards can reuse the existing controls).
+- Implementation-wise both views consume the same `/families` payload;
+  dates view is a pure frontend regrouping (group by max/median member
+  mtime) with no backend change unless the mtime scan proves slow (open
+  question above). Toggle lives in the existing dupe view header as a
+  Families | Dates segmented control.
 
 ---
 
