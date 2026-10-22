@@ -6,6 +6,7 @@
 // denoise slider driving BasicScheduler server-side.
 
 import { makeGenLayer, stepRing, followRegion, pickRepaintTarget, isRemaskable, activeLayer, describeLayer } from './facecycle-layers.js';
+import { divergenceMask } from './meld-divergence.js';
 import {} from './facecycle-sheets.js'; // controller retired 2026-10-16f (sheets → drawers); module kept for its tests
 import { registerModule } from '../shell.js';
 import { CanvasStack, drawFeatheredSource } from '../components/canvas-stack.js';
@@ -120,6 +121,7 @@ function panelHTML() {
       <button class="ee-btn" data-act="draw-mask">🖌️ Draw Mask</button>
       <label data-id="brush-controls" style="display:none">Brush <input type="range" data-id="brush-size" min="5" max="80" value="25"><span class="val" data-id="brush-size-val">25</span></label>
       <button class="ee-btn" data-act="erase" style="display:none">Erase: Off</button>
+      <button class="ee-btn" data-act="preseed-mask" style="display:none" title="Meld pre-seed: paint a divergence suggestion mask (|A−B| differences between base and the first other image) into the working mask — then refine it with the brush (Meld salvage §3)">Pre-seed Δ</button>
       <button class="ee-btn primary" data-act="apply-mask" style="display:none" title="Apply the painted mask to the layer being shown (Enter). Cycle layers with [ ] or the strip, then apply again to try the same mask elsewhere.">✓ Apply to layer</button>
       <button class="ee-btn" data-act="remove-all">Remove All</button>
       <label title="Diff sensitivity — lower finds more regions">Δ <input type="range" data-id="threshold" min="3" max="80" value="20" style="max-width:90px"><span class="val" data-id="threshold-val">20</span></label>
@@ -192,6 +194,7 @@ export class FaceCycle {
       drawBoxBtn: act('draw-box'), drawMaskBtn: act('draw-mask'),
       brushControls: $('brush-controls'), brushSizeSlider: $('brush-size'),
       brushSizeVal: $('brush-size-val'), eraseToggleBtn: act('erase'), applyMaskBtn: act('apply-mask'),
+      preseedMaskBtn: act('preseed-mask'),
       repaintPromptInput: $('repaint-prompt'),
       repaintSourceSelect: $('repaint-source'),
       repaintDrawer: $('repaint-drawer'), repaintGenerateBtn: act('generate-sheet'),
@@ -306,6 +309,8 @@ export class FaceCycle {
     this.el.drawMaskBtn.addEventListener('click', () => this.toggleDrawMask());
     this.el.eraseToggleBtn.addEventListener('click', () => this.toggleErase());
     this.el.applyMaskBtn.addEventListener('click', () => this.applyMaskToTarget());
+    // Meld pre-seed (Increment 1, SALVAGE §3): divergence suggestion mask.
+    this.el.preseedMaskBtn.addEventListener('click', () => this.preseedMask());
     this.el.brushSizeSlider.addEventListener('input', () => {
       this.brushSize = parseInt(this.el.brushSizeSlider.value);
       this.el.brushSizeVal.textContent = this.brushSize;
@@ -1402,6 +1407,7 @@ export class FaceCycle {
       this.el.drawMaskBtn.classList.add('active-toggle');
       this.el.brushControls.style.display = '';
       this.el.eraseToggleBtn.style.display = '';
+      this.syncPreseedBtn();
       this.el.applyMaskBtn.style.display = '';
       this.stack.setCursor('crosshair');
       this.initMaskCanvas();
@@ -1410,6 +1416,7 @@ export class FaceCycle {
       this.el.drawMaskBtn.classList.remove('active-toggle');
       this.el.brushControls.style.display = 'none';
       this.el.eraseToggleBtn.style.display = 'none';
+      this.el.preseedMaskBtn.style.display = 'none';
       this.el.applyMaskBtn.style.display = 'none';
       this.stack.setCursor('pointer');
       this.maskPaintCanvas = null;
@@ -1542,6 +1549,52 @@ export class FaceCycle {
     this.invalidateLayerPreview();
     this.stack.clearOverlay();
     this.render();
+  }
+
+  // ── Meld pre-seed (Increment 1, SALVAGE §3 /api/diff) ───────────────────
+  // One button: compute the divergence suggestion mask between the base
+  // variant and the first other loaded image, paint it into the working mask
+  // canvas as a fully editable starting state. The algorithm is the exact
+  // port in meld-divergence.js (σ=2 blur, max(8.0, 6·MAD), 9×9 dilate).
+  syncPreseedBtn() {
+    const b = this.el.preseedMaskBtn;
+    if (!b) return;
+    const ok = this.state.images.length >= 2 && !this.isPainting;
+    b.disabled = !ok;
+    b.title = ok
+      ? 'Meld pre-seed: paint a divergence suggestion mask (|A−B| differences between base and the first other image) into the working mask — then refine it with the brush (Meld salvage §3)'
+      : 'Pre-seed needs two loaded images (base variant + one other)';
+  }
+
+  preseedMask() {
+    if (!this.drawMaskMode || !this.maskPaintCtx) return;
+    if (this.state.images.length < 2) return;
+    this.initMaskCanvas();
+    const w = this.state.width, h = this.state.height;
+    const a = this.state.images[this.state.baseVariant];
+    const b = this.state.images.find((_, i) => i !== this.state.baseVariant);
+    const { mask, count } = divergenceMask(a.processedData, b.processedData, w, h);
+    // Undo: snapshot the working canvas BEFORE overwriting it. Distinct entry
+    // type — undoMaskStroke restores region masks, this restores the canvas.
+    const snap = document.createElement('canvas');
+    snap.width = w; snap.height = h;
+    snap.getContext('2d').drawImage(this.maskPaintCanvas, 0, 0);
+    this.undoLog.push({ type: 'preseed', canvas: snap });
+    // Paint suggestion in the brush's own paint color (magenta, matching
+    // paintBrush) so the working mask stays uniform for apply/export.
+    const out = this.maskPaintCtx.createImageData(w, h);
+    for (let i = 0, p = 0; i < mask.length; i++, p += 4) {
+      if (mask[i]) {
+        out.data[p] = 255; out.data[p + 1] = 100; out.data[p + 2] = 255; out.data[p + 3] = 255;
+      }
+    }
+    this.maskPaintCtx.clearRect(0, 0, w, h);
+    this.maskPaintCtx.putImageData(out, 0, 0);
+    this.strokeBBox = null;
+    this.invalidateLayerPreview();
+    this.render();
+    this.updateStatusBar();
+    if (window.elliejob) window.elliejob(`pre-seed painted (${count} px diverge) — refine it`);
   }
 
   // ── Repaint (ComfyUI Krea2 inpaint via EllieEdit relay) ──
@@ -1933,6 +1986,17 @@ export class FaceCycle {
     // Global stack of { region, before, after } status transitions.
     const entry = this.undoLog.pop();
     if (!entry) return;
+    if (entry.type === 'preseed') {
+      // Meld pre-seed undo: restore the working mask canvas snapshot.
+      if (this.maskPaintCtx && entry.canvas) {
+        this.maskPaintCtx.clearRect(0, 0, this.state.width, this.state.height);
+        this.maskPaintCtx.drawImage(entry.canvas, 0, 0);
+        this.strokeBBox = null;
+        this.invalidateLayerPreview();
+        this.render();
+      }
+      return;
+    }
     const region = entry.region;
     if (!this.state.activeRegions.includes(region)) return; // region deleted
     if (entry.type === 'mask') { this.undoMaskStroke(entry); return; }
