@@ -482,8 +482,34 @@ def main(argv=None):
     ap.add_argument("--library", default=str(LIBRARY_ROOT))
     ap.add_argument("--limit", type=int, default=0,
                     help="cap library files hashed (0 = all)")
+    ap.add_argument("--engine", choices=["v1", "v2", "both"], default="v1",
+                    help="v1 straggler scan (default) | v2 incremental "
+                         "cluster engine | both")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="v2 FULL rebuild (CLI-only, explicit opt-in): drops "
+                         "this engine's own UNRESOLVED families and rescans; "
+                         "resolved/committed families are protected")
     args = ap.parse_args(argv)
     roots = [{"label": f"root{i}", "root": r} for i, r in enumerate(args.roots)]
+    if args.rebuild or args.engine in ("v2", "both"):
+        from . import cluster_engine as ce
+        from .routers import dupe as dr
+        verdicts = dr._verdicts()
+        protected = {f["id"] for f in dr._index().get("families", [])
+                     if dr._family_state(f["id"], verdicts) == "resolved"}
+        if args.engine == "both":
+            v1 = scan_stragglers(roots, DUPE_ROOT, DUPE_DATA, LEDGER,
+                                 Path(args.library), library_limit=args.limit)
+            print(json.dumps(v1, indent=1))
+        ce.apply_decisions(DUPE_ROOT, DUPE_DATA, dr._proposal_decisions(verdicts))
+        v2 = ce.scan_incremental(
+            roots, DUPE_ROOT, DUPE_DATA, skip_paths=ledger_paths(LEDGER, DUPE_ROOT),
+            protected_ids=protected, rebuild=args.rebuild,
+            progress=lambda p: print(f"\r{p['phase']} {p['done']}/{p['total']}",
+                                     end="", flush=True))
+        print()
+        print(json.dumps(v2, indent=1))
+        return
     summary = scan_stragglers(roots, DUPE_ROOT, DUPE_DATA, LEDGER,
                               Path(args.library), library_limit=args.limit,
                               progress=lambda p: print(
