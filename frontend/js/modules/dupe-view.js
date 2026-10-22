@@ -183,3 +183,79 @@ export function stragglerProgressText(s) {
   if (!p) return "straggler scan: starting…";
   return `straggler scan: ${p.phase} ${p.done}/${p.total}`;
 }
+
+// ── INC.3: membership proposals + Dates view (2026-10-22) ───────────────
+// Pure, DOM-free, node-tested (tests/js/dupe-proposal.test.mjs).
+
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// Card chip for a v2 membership proposal ('' for every other family).
+export function proposalChip(f) {
+  const pm = f && f.proposed_merge;
+  if (!pm || !pm.family_id) return '';
+  return `<span class="ghost-chip proposal" title="a near-duplicate of a member of an ` +
+    `established family — rule on it in the detail view">` +
+    `proposed merge → ${esc(pm.family_id)}</span>`;
+}
+
+// Verdict vocabulary for a proposal, in the existing controls' own words:
+// melded = merge into the proposed family · kept = stays its own family ·
+// rejected = the new file is a discard (no merge).
+export const PROPOSAL_HINT =
+  'Meld = merge into the family · Keep = stays separate · Reject = discard the new file';
+
+// Side-by-side strip: the new file(s) next to the matched member of the
+// established family. `pm` is the detail payload's proposed_merge (with the
+// server-built `matched` member view); `members` the family's own members.
+export function proposalPanelHtml(pm, members) {
+  if (!pm || !pm.family_id) return '';
+  const mine = (Array.isArray(members) ? members : [])[0];
+  const fig = (m, cap) => m && m.thumb
+    ? `<figure><img src="${esc(m.thumb)}" alt="${esc(cap)}">` +
+      `<figcaption>${esc(cap)}</figcaption></figure>`
+    : `<figure><div class="ph">no preview</div><figcaption>${esc(cap)}</figcaption></figure>`;
+  const extra = (members || []).length > 1 ? ` (+${members.length - 1} more)` : '';
+  const d = typeof pm.distance === 'number' ? ` · distance ${pm.distance}` : '';
+  return `<div class="ss-proposal-head">Proposed merge into ` +
+    `<b>${esc(pm.family_id)}</b>${esc(d)}</div>` +
+    `<div class="ss-proposal-pair">` +
+    fig(mine, `new: ${(mine && mine.name) || ''}${extra}`) +
+    fig(pm.matched, `in family: ${(pm.matched && pm.matched.name) || pm.matched_member || ''}`) +
+    `</div><div class="ss-proposal-hint">${esc(PROPOSAL_HINT)}</div>`;
+}
+
+// Dates view: representative time of a family = MEDIAN member mtime (epoch
+// seconds) over the members the listing carries; null when none has one.
+export function familyMtime(f) {
+  const ts = ((f && f.members) || []).map(m => m && m.mtime)
+    .filter(t => typeof t === 'number' && isFinite(t) && t > 0).sort((a, b) => a - b);
+  if (!ts.length) return null;
+  const mid = Math.floor(ts.length / 2);
+  return ts.length % 2 ? ts[mid] : (ts[mid - 1] + ts[mid]) / 2;
+}
+
+export function dayKey(epochSec) {
+  const d = new Date(epochSec * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// Group family rows into day buckets: newest day first, newest family first
+// inside a day, undated families last. Pure regrouping — never mutates rows,
+// never drops one, casts no verdicts.
+export function groupByDate(items) {
+  const rows = (Array.isArray(items) ? items : []).map(f => ({ f, t: familyMtime(f) }));
+  const days = new Map();
+  const undated = [];
+  for (const r of rows) {
+    if (r.t == null) { undated.push(r); continue; }
+    const k = dayKey(r.t);
+    if (!days.has(k)) days.set(k, []);
+    days.get(k).push(r);
+  }
+  const out = [...days.keys()].sort().reverse().map(k => ({
+    day: k, items: days.get(k).sort((a, b) => b.t - a.t).map(r => r.f) }));
+  if (undated.length) out.push({ day: null, items: undated.map(r => r.f) });
+  return out;
+}

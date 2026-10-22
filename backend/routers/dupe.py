@@ -591,6 +591,46 @@ class StragglerBody(BaseModel):
     background: bool = False
     roots: list[str] | None = None          # default: DupeReview + gather staging
     library_limit: int = 0                  # probe knob: cap library hashing
+    # inc.3: "v1" (default, unchanged straggler scan) | "v2" (incremental
+    # cluster engine only) | "both" (v1 then the v2 supplementary pass).
+    engine: str = "v1"
+
+
+def _proposal_decisions(verdicts: dict | None = None) -> dict[str, str]:
+    """{proposal_family_id: merge|separate|rejected} for proposal families the
+    operator has RULED on. Resolution goes through _family_state (the sole
+    resolver); only the verb mapping lives here. melded = merge into the
+    proposed family; kept = stays its own family (separate); rejected = the
+    new file is a discard, not a merge."""
+    verdicts = verdicts if verdicts is not None else _verdicts()
+    out: dict[str, str] = {}
+    try:
+        rows = _index().get("families", [])
+    except HTTPException:
+        return out
+    for f in rows:
+        if not f.get("proposed_merge") or f.get("source") != "cluster-engine-v2":
+            continue
+        if _family_state(f["id"], verdicts) != "resolved":
+            continue
+        vals = set((verdicts.get(f["id"], {}).get("members") or {}).values())
+        out[f["id"]] = ("merge" if "melded" in vals
+                        else "separate" if "kept" in vals else "rejected")
+    return out
+
+
+def _run_cluster_v2(roots: list[dict]) -> dict:
+    """v2 incremental pass. Ledger knowledge is read HERE and handed to the
+    engine as plain data; the engine itself never touches the ledger."""
+    from backend import cluster_engine as ce
+    from backend import dupe_scan as engine
+    merged = ce.apply_decisions(DUPE_ROOT, DUPE_DATA, _proposal_decisions())
+    skip = engine.ledger_paths(LEDGER, DUPE_ROOT)
+    out = ce.scan_incremental(
+        roots, DUPE_ROOT, DUPE_DATA, skip_paths=skip,
+        progress=lambda p: _straggler_state.update(progress=p))
+    out["merged"] = merged["merged"]
+    return out
 
 
 @router.post("/scan-stragglers")
@@ -611,10 +651,14 @@ def scan_stragglers_ep(body: StragglerBody):
     def run():
         _straggler_state.update(running=True, progress=None, last=None)
         try:
-            summary = engine.scan_stragglers(
-                roots, DUPE_ROOT, DUPE_DATA, LEDGER, Path(LIBRARY_ROOT),
-                library_limit=body.library_limit,
-                progress=lambda p: _straggler_state.update(progress=p))
+            summary = {}
+            if body.engine in ("v1", "both"):
+                summary = engine.scan_stragglers(
+                    roots, DUPE_ROOT, DUPE_DATA, LEDGER, Path(LIBRARY_ROOT),
+                    library_limit=body.library_limit,
+                    progress=lambda p: _straggler_state.update(progress=p))
+            if body.engine in ("v2", "both"):
+                summary["v2"] = _run_cluster_v2(roots)
             _straggler_state["last"] = summary
         except Exception as e:
             log.exception("straggler scan failed")
@@ -666,6 +710,8 @@ def families(state: str = "unresolved", cursor: str = "",
             # reference chip (reference only — never a member).
             "source": f.get("source", ""),
             "library_matches": f.get("library_matches", 0),
+            # inc.3: v2 membership proposal pointer (index row only, O(1))
+            "proposed_merge": f.get("proposed_merge"),
             # Signal-conflict flag (2026-10-08d): the latest verdict SPLITS
             # members (kept AND rejected) while the index tier list claims a
             # strict near-identity tier exists in the family. O(1) per card
@@ -1013,6 +1059,7 @@ def family_detail(fid: str):
         "prior_verdicts": _prior_decided(fid) if fam_verdict.get("reopened") else {},
         "members": [{k: v for k, v in m.items() if k != "_p"} for m in members],
         "edges": fam.get("edges", []),
+        "proposed_merge": _proposal_detail(fam),
         "related": [
             {"family": r.get("related_family"), "tier": r.get("tier"),
              "distance": r.get("distance")}
@@ -1024,6 +1071,23 @@ def family_detail(fid: str):
         "verdicts": {m["path"]: fam_verdict.get("members", {}).get(m["path"])
                      for m in members},
     }
+
+
+def _proposal_detail(fam: dict) -> dict | None:
+    """Proposal annotation + a client-shaped matched-member view so the UI can
+    render the side-by-side without a second lookup. None for plain families."""
+    pm = fam.get("proposed_merge")
+    if not pm:
+        return None
+    out = dict(pm)
+    mp = str(pm.get("matched_member", "")).replace("\\", "/")
+    if mp:
+        out["matched"] = _member_view({"path": mp})
+        try:
+            jailed(mp)
+        except HTTPException:
+            out["matched"]["thumb"] = None
+    return out
 
 
 def _prior_decided(fid: str) -> dict:
@@ -1245,6 +1309,14 @@ def post_verdict(fid: str, body: VerdictBody):
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     with LEDGER.open("a") as fh:            # append-only by design
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    if fam.get("proposed_merge"):
+        # inc.3: a ruled proposal materialises immediately (melded = merge).
+        # Best effort — the verdict is already durably in the ledger.
+        try:
+            from backend import cluster_engine as _ce
+            _ce.apply_decisions(DUPE_ROOT, DUPE_DATA, _proposal_decisions())
+        except Exception:
+            log.exception("proposal merge apply failed (verdict is recorded)")
     return {"ok": True, "state": _family_state(fid), "entry": entry}
 
 
