@@ -509,15 +509,18 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
                         "distance": m["distance"],
                         "new_member": (m["new"]["rel"] if m["new"]["jailed"]
                                        else m["new"]["abs"])}
-        if len(g) == 1 and proposal is None:
+        if len(g) == 1 and not fams:
             continue                                   # lone, unmatched: no family
+        # lone file matching >1 existing family (ambiguity rule, §3c.5) falls
+        # through as a plain single-member family: no proposal, reviewer sees
+        # it in the queue next to all its neighbours.
         members_it = [pool[i] for i in g]
         pos = {i: k for k, i in enumerate(g)}
         edges = [{**e, "a": pos[e["a"]], "b": pos[e["b"]]}
                  for e in pairs if e["a"] in pos and e["b"] in pos]
         tiers = sorted({_TIER_BY_CODE[c] for a, b, c in cluster_edges
                         if a in pos and b in pos})
-        if proposal and not tiers:
+        if not tiers:                                  # single-member families
             tiers = [TIER_REGIONAL]
         fid_new = _family_id(m["abs"] for m in members_it)
         if fid_new in existing_ids or (families_dir / f"{fid_new}.json").exists():
