@@ -459,6 +459,14 @@ def api(world, monkeypatch):
     monkeypatch.setattr(dm, "DUPE_DATA", world["data"])
     monkeypatch.setattr(dm, "LEDGER", world["ledger"])
     monkeypatch.setattr(lib_mod, "LIBRARY_ROOT", world["tmp"] / "lib")
+    # The endpoint's DEFAULT roots include the gather staging dir
+    # (dupe_scan.DEFAULT_GATHER_ROOT = /mnt/shared/_DupeGatherer/staging).
+    # On a real tree that directory exists and holds thousands of images, so
+    # a default-roots scan would pull them into this test's temp family tree
+    # (T5 failed operator-side with a surplus family). Pin it to a path that
+    # cannot exist so the scan sees ONLY the fixture's DupeReview root.
+    monkeypatch.setattr(ds, "DEFAULT_GATHER_ROOT",
+                        str(world["tmp"] / "no-gather-staging"))
     return TestClient(app)
 
 
@@ -534,3 +542,18 @@ def test_separate_verdict_keeps_its_own_family(api, world):
     _scan_v2(api, world)
     assert len(_fams(world)) == n                           # never re-fires
     assert not any(f.get("merged_from") for f in _fams(world).values())
+
+
+def test_http_fixture_isolated_from_real_gather_staging(api, world):
+    """Regression guard for the operator-side T5 failure: default-roots scans
+    must never reach the real /mnt/shared staging tree."""
+    assert not str(ds.DEFAULT_GATHER_ROOT).startswith("/mnt/shared")
+    assert not Path(ds.DEFAULT_GATHER_ROOT).exists()
+    # even with a populated *real-looking* sibling dir elsewhere, only the
+    # fixture root is scanned
+    stray = world["tmp"] / "stray"
+    _save(_img(901), stray / "x1.png")
+    _save(_img(901), stray / "x2.png")
+    _save(_img(902), world["dupe"] / "only.png")
+    s = _scan_v2(api, world)
+    assert s["pool"] == 1 and s["families"] == 0
