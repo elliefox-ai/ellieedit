@@ -472,6 +472,12 @@ export class FaceCycle {
       return;
     }
 
+    // Blend contract C1 (Meld salvage §2): working space = the smaller member,
+    // downscale-only — never invent pixels. Dims above come from the smallest
+    // loaded image, so the cover-crop below only ever shrinks (scale >= 1 is
+    // impossible to reverse). The center-crop differs from Meld's aspect-true
+    // INTER_AREA fit, which is benign here: dupe-family members are near-twins,
+    // so the crop trims at most a hairline, and export uses this same space.
     this.state.width = Math.floor(minW / 2) * 2;
     this.state.height = Math.floor(minH / 2) * 2;
     this.stack.setSize(this.state.width, this.state.height);
@@ -1653,6 +1659,9 @@ export class FaceCycle {
   }
 
   composeLayer(raw, rect, maskLocal) {
+    // Blend contract C3 ordering (Meld salvage §2): mask first, then feather —
+    // mask∩ via destination-in, gradient feather after. The dupe blend has no
+    // edge-stop cap; if one is ever added it must apply BEFORE any feather.
     const c = document.createElement('canvas');
     c.width = rect.w; c.height = rect.h;
     const g = c.getContext('2d');
@@ -2330,6 +2339,8 @@ export class FaceCycle {
   }
 
   exportBlob() {
+    // C1 parity: the saved PNG is composited at the SAME state.width×height the
+    // preview paints — what you see is exactly what saves (Meld salvage §2).
     if (!this.state.images.length) return Promise.resolve(null);
     const exp = document.createElement('canvas');
     exp.width = this.state.width;

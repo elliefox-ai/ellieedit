@@ -1378,6 +1378,10 @@ def meld_save(fid: str, body: MeldSaveBody, request: Request = None):
     if bad:
         raise HTTPException(400, f"path not a family member: {bad[0]}")
     import base64 as _b64
+    # Mask contract C5 (Meld salvage §2): no painted mask crosses this boundary
+    # — only the finished blend PNG. Decode is deliberately STRICTER than Meld's
+    # tolerant decode_mask: validate=True base64 + PNG IHDR magic, 400 on any
+    # mismatch (a corrupt save must fail loudly, not half-write).
     try:
         data = _b64.b64decode(body.image_b64, validate=True)
     except Exception:

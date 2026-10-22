@@ -66,3 +66,21 @@ hash/cluster functions before any cutover; full suites pass.
 
 ---
 *Order: 1 → 2 → 3. Increment 1 landed 2026-10-22 (commit `dupe: meld integration inc.1`).*
+
+## Increment 2 — audit results (2026-10-22)
+
+Audited the dupe→FaceCycle blend path (facecycle.js load/compose/export +
+`/api/dupe/families/{fid}/meld-save`) against SALVAGE §2. Verdicts:
+
+| Contract | Verdict | Note |
+|---|---|---|
+| C1 resolution parity | HOLDS (benign diff) | Working space = smallest loaded member (even-floored); non-matching images cover-crop into it, always downscale-only since state dims are the per-axis minimum. Export composites at the same state.width×height as preview. Cover-crop vs Meld's aspect-true INTER_AREA fit is benign: dupe members are near-twins, so the trim is hairline. Commented at load + exportBlob. |
+| C2 exact LAB seam match | N/A | No seam_match in the dupe blend; FaceCycle composites whole masked layers, not per-pixel donor color transfer. Design note per workorder. |
+| C3 cap-before-feather | HOLDS (vacuously) | No edge-stop cap exists in the dupe path; ordering is mask∩ (destination-in) then gradient feather, no cap to reorder. Commented at composeLayer so any future cap lands before feather. |
+| C4 invert semantics | N/A | No invert in the dupe blend; masks only ever add/erase paint. |
+| C5 mask decode tolerances | HOLDS (stricter) | No painted mask crosses meld-save — only the finished blend PNG, decoded with validate=True base64 + PNG IHDR check (400 on any mismatch). Stricter than Meld's tolerant decode_mask is correct here: a corrupt save must fail loudly. Commented at the route. |
+| C6 containment preview-side | N/A | No edge-stop containment in the dupe path; pre-seed (inc.1) is a paint suggestion, not containment. |
+| C7 retouch layer pasted 1:1 | N/A | Retouch layer retired in Meld §4; dupe blend has no separate retouch surface. |
+
+No wrong-save divergences found — no behavior changes, tests unchanged (full
+JS + pytest suites pass). Landing = durable contract comments + this table.
