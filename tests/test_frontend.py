@@ -342,3 +342,34 @@ def test_paint_target_workflow_wiring():
     assert "region.gsel ?? 0)" not in src, "strip highlight must not default to gen 0"
     # the live preview is display-only: it is gated on !opts.exporting
     assert "!opts.exporting && this.maskEditId === region.id" in src
+
+
+# ------------------------------------------------------- Puppet Theater (2026-10-22)
+def test_js_puppet_core():
+    """Pure logic: transform math, z-order, mask compositing, denoise fence."""
+    r = subprocess.run(
+        ["node", "--test", str(HERE / "js" / "puppet-core.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+    assert "fail 0" in r.stdout
+
+
+def test_puppet_module_wiring_and_fence():
+    """Shell imports the module (build marker NOT bumped by the builder —
+    the operator bumps on landing); the module registers as a stage with a
+    mask tool and a fenced final pass, and never ships a d0.8 default."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    src = (mods / "puppet.js").read_text()
+    core = (mods / "puppet-core.js").read_text()
+    shell = (HERE.parent / "frontend" / "js" / "shell.js").read_text()
+    assert "modules/puppet.js" in shell
+    assert "name: 'puppet'" in src and "registerModule" in src
+    for needle in ('data-id="stage"', 'data-id="llist"', 'data-tool="erase"',
+                   'data-tool="restore"', 'data-id="render"', 'data-id="expng"',
+                   'data-id="exjson"', 'data-id="pvaccept"', 'data-id="pvdiscard"',
+                   "/rmbg", "clampDenoise"):
+        assert needle in src, needle
+    assert "DENOISE_MIN = 0.4" in core and "DENOISE_MAX = 0.5" in core
+    assert 'min="0.4" max="0.5"' in src          # the slider itself is fenced
+    assert (mods / "puppet.css").exists()
