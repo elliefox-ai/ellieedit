@@ -4,3 +4,7 @@ httpx
 pytest
 pillow
 numpy
+# Puppet Theater rmbg endpoint (lazy-imported; app and tests run without it,
+# and the u2net model is only used when already cached — see puppet.py)
+rembg
+onnxruntime
