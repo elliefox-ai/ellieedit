@@ -70,15 +70,22 @@ def dhash(img) -> int:
     return int(np.packbits(bits.astype(np.uint8)).tobytes().hex(), 16)
 
 
-def phash(img) -> int:
-    """64-bit DCT phash (top-left 8x8 incl DC) — dupelib.hashes.phash."""
+def dct_low(img) -> np.ndarray:
+    """Top-left 8x8 block of the 32x32 grayscale DCT (DC included). Shared by
+    the 64-bit phash here and the cluster engine's 63-bit DC-dropped variant
+    so there is exactly ONE DCT recipe (inc.3: no forked hashing)."""
     k = np.arange(32)[:, None]
     x = np.arange(32)[None, :]
     m = np.cos(np.pi / 32 * (x + 0.5) * k)
     m[0] *= 1.0 / np.sqrt(2)
     g = img.convert("L").resize((32, 32), Image.BILINEAR)
     dct = m @ np.asarray(g, dtype=np.float64) @ m.T
-    low = dct[:8, :8]
+    return dct[:8, :8]
+
+
+def phash(img) -> int:
+    """64-bit DCT phash (top-left 8x8 incl DC) — dupelib.hashes.phash."""
+    low = dct_low(img)
     med = np.median(low)
     return int(np.packbits((low > med).astype(np.uint8)).tobytes().hex(), 16)
 
