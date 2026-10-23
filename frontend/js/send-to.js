@@ -90,3 +90,20 @@ export function receiptText(count, source, as) {
 export function gate(busyReason) {
   return busyReason ? { ok: false, reason: busyReason } : { ok: true };
 }
+
+// The shell's whole decision, DOM-free so it is testable: validate the
+// payload, check the target tab exists, ask the target's gate. Returns
+// { error } (toast it, stay on the source tab) or { route } (activate the
+// target, then dispatch route.events). `receivers` is a Map of
+// name → { canAccept(route) → { ok, reason? } }.
+export function planSend(detail, { available = [], receivers = new Map() } = {}) {
+  const route = routeSend(detail);
+  if (route.error) return { error: route.error };
+  if (!available.includes(route.target)) return { error: `The ${route.target} tab isn't available.` };
+  const rx = receivers.get(route.target);
+  const verdict = rx && typeof rx.canAccept === 'function' ? rx.canAccept(route) : { ok: true };
+  if (verdict && verdict.ok === false) {
+    return { error: verdict.reason || 'That tab cannot accept right now.' };
+  }
+  return { route };
+}

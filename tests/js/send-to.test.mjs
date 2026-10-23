@@ -2,7 +2,7 @@
 // Run: node --test tests/js/send-to.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { routeSend, normalizeSend, nameFromUrl, receiptText, gate,
+import { routeSend, planSend, normalizeSend, nameFromUrl, receiptText, gate,
   SEND_TARGETS, FACECYCLE_MAX } from '../../frontend/js/send-to.js';
 import { planFaceCycleHandoff } from '../../frontend/js/handoff.js';
 
@@ -94,4 +94,25 @@ test('receipt text names the source and the mode', () => {
 test('gate: a busy reason rejects, none accepts', () => {
   assert.deepEqual(gate(''), { ok: true });
   assert.deepEqual(gate('mid-render'), { ok: false, reason: 'mid-render' });
+});
+
+test('planSend: unknown tab, validation errors and gate refusals all stay on the source tab', () => {
+  const available = ['gallery', 'puppet', 'foxden', 'facecycle', 'update'];
+  const ok = { target: 'puppet', urls: [G] };
+  assert.equal(planSend(ok, { available }).route.target, 'puppet');          // no gate registered → accepted
+  assert.match(planSend(ok, { available: ['gallery'] }).error, /isn't available/);
+  assert.match(planSend({ target: 'puppet', urls: [] }, { available }).error, /Nothing to send/);
+  const receivers = new Map([['puppet', { canAccept: () => ({ ok: false, reason: 'Puppet is mid-render.' }) }]]);
+  const r = planSend(ok, { available, receivers });
+  assert.equal(r.error, 'Puppet is mid-render.');
+  assert.ok(!r.route);                                                        // nothing to activate or dispatch
+  // a gate with no reason still refuses, with a generic message
+  const r2 = planSend(ok, { available, receivers: new Map([['puppet', { canAccept: () => ({ ok: false }) }]]) });
+  assert.match(r2.error, /cannot accept right now/);
+  // another target's gate does not affect this one; an accepting gate passes
+  assert.ok(planSend({ target: 'foxden', urls: [G] }, { available, receivers }).route);
+  const seen = [];
+  const rx2 = new Map([['foxden', { canAccept: route => { seen.push(route.target); return { ok: true }; } }]]);
+  assert.ok(planSend({ target: 'foxden', urls: [G] }, { available, receivers: rx2 }).route);
+  assert.deepEqual(seen, ['foxden']);
 });

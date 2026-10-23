@@ -9,7 +9,7 @@
 // instantly visible.
 const BUILD = '2026-10-23c';
 
-import { routeSend } from './send-to.js';
+import { planSend } from './send-to.js';
 
 const registry = [];
 const mounted = new Map(); // name -> { panelEl }
@@ -92,16 +92,10 @@ window.addEventListener('ellieedit:activate', e => {
 // target's own event. A refusal stays on the SOURCE tab with a toast —
 // never a silent drop, never a tab switch for nothing.
 window.addEventListener('ellieedit:send-to', e => {
-  const route = routeSend(e.detail);
-  if (route.error) { toast(route.error, true); return; }
-  if (!registry.some(d => d.name === route.target)) {
-    toast(`The ${route.target} tab isn't available.`, true); return;
-  }
-  const rx = receivers.get(route.target);
-  const verdict = rx && rx.canAccept ? rx.canAccept(route) : { ok: true };
-  if (verdict && verdict.ok === false) { toast(verdict.reason || 'That tab cannot accept right now.', true); return; }
-  activate(route.target);
-  for (const ev of route.events) window.dispatchEvent(new CustomEvent(ev.type, { detail: ev.detail }));
+  const plan = planSend(e.detail, { available: registry.map(d => d.name), receivers });
+  if (plan.error) { toast(plan.error, true); return; }
+  activate(plan.route.target);
+  for (const ev of plan.route.events) window.dispatchEvent(new CustomEvent(ev.type, { detail: ev.detail }));
 });
 
 // Import modules (self-registering) then build.

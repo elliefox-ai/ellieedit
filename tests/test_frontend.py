@@ -514,17 +514,19 @@ def test_send_to_gate_covers_new_files():
     assert "ok js/components/send-menu.js" in r.stdout
 
 
-def test_shell_routes_send_to_and_refuses_before_switching_tabs():
+def test_shell_routes_send_to_through_the_pure_planner():
     sh = _src("shell.js")
     assert "export function registerReceiver" in sh
+    assert "import { planSend } from './send-to.js'" in sh
     assert "window.addEventListener('ellieedit:send-to'" in sh
     h = sh[sh.index("window.addEventListener('ellieedit:send-to'"):]
     h = h[:h.index("// Import modules")]
     # a refusal toasts and returns BEFORE the target tab is activated
-    assert h.index("canAccept") < h.index("activate(route.target)")
-    assert h.index("toast(verdict.reason") < h.index("activate(route.target)")
+    assert h.index("toast(plan.error") < h.index("activate(plan.route.target)")
     # activate first, THEN forward (FaceCycle's listener ignores a hidden panel)
-    assert h.index("activate(route.target)") < h.index("window.dispatchEvent(new CustomEvent(ev.type")
+    assert h.index("activate(plan.route.target)") < h.index("window.dispatchEvent(new CustomEvent(ev.type")
+    # the receivers map handed to the planner is the one registerReceiver fills
+    assert "receivers });" in h and "receivers.set(name" in sh
     # existing activation event still there
     assert "window.addEventListener('ellieedit:activate'" in sh
 
