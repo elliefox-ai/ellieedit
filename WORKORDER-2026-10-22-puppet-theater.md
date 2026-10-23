@@ -116,3 +116,58 @@ A new suite surface ("Puppet Theater") in EllieEdit:
 
 **Layer-handling alterations** (Alexander wants to discuss — DESIGN SESSION, don't build yet):
 - "some alterations in how we handle layers and stuff" — unspecified; ask him tomorrow before writing any spec.
+
+---
+
+# INCREMENT 2 — v1.3: layer interaction + per-mode graphs
+
+**Date:** 2026-10-23 · **Builder:** echo · **Status:** Ready for build.
+**Base:** current `master` (post 1a16574). Branch off master, same delivery
+discipline as increment 1 (git bundle / patch series, no build bumps, no
+restarts, suites green at handoff).
+
+## Design decisions (Alexander, 2026-10-23 — do not revisit)
+
+- **Fill target by selection:** no layer selected → fill applies to the
+  background; a layer selected → fill applies to that layer. The layer's
+  canvas may need extending to cover the mask region (grow to full project
+  bounds; extension is permanent).
+- **Fill on layer sees the SUBJECT, not the scene:** the layer's own pixels
+  are the inpaint input. Subject matching is what matters at this stage;
+  lighting/style coherence is the final pass's job. No stack-below reference.
+- **No stamping:** accepting a fill on a layer must keep the result ON that
+  layer. Current behavior stamps the layer onto the background — defect, fix.
+- **Merge down:** a layer merges into the layer below it (background if it is
+  the lowest). The erase masks of BOTH layers are consolidated into the
+  merged result; the source layer is removed. Straight alpha-over at current
+  opacity.
+- **Focus stickiness:** when a layer is selected, a pointer-down anywhere
+  inside its bounds (including fully transparent/erased pixels) keeps it
+  selected. Hit-test fallback to underlying layers only for clicks outside
+  the selected layer's bounds.
+
+## Also in scope: per-mode Klein graphs (from v1.2.1 addendum)
+
+- Final pass (mode 'all'): reference graph — ReferenceLatent + ColorMatchV2.
+  Already implemented and deployed 2026-10-22 (commit 2b37c48, backend/comfy.py).
+  Do not regress; tests/test_comfy.py pins the wiring.
+- Fill Area (mode 'fill'): dedicated masked-inpaint graph — mask-fenced, no
+  ReferenceLatent on the positive (it dominates the prompt at cfg 1.0), plus
+  ImageComposite-back so unmasked pixels stay pixel-exact. Prompt must obey.
+
+## Acceptance checklist (operator-side, after land)
+
+1. Fill with nothing selected changes only the background; layers untouched.
+2. Select a puppet, paint a mask, fill → new pixels appear on the layer only;
+   background and other layers unchanged; no stamp-to-background on accept.
+3. Fill on a layer works even when the mask region extends past the layer's
+   current bounds (canvas auto-extends; result stays on the layer).
+4. Merge down: top layer disappears, its visible pixels + erase mask
+   consolidated into the layer below (or background); merged layer remains
+   individually erasable/restorable.
+5. With a layer selected, drag/paint starting on a transparent region of that
+   layer keeps the selection on it.
+6. Final pass unchanged (reference graph, context pixel-exact); Fill Area now
+   obeys prompt inside the mask while locked pixels stay exact.
+7. Full pytest + tests/js suites green; prior acceptance items 1–6 of
+   increment 1 still pass.
