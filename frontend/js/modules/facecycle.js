@@ -364,7 +364,7 @@ export class FaceCycle {
     //   Save back (write blend + collapse, server-side meld-save) or Cancel
     //   (return marking NOTHING — no manifest, no ledger writes).
     window.addEventListener('ellieedit:facecycle-handoff', this.onHandoffEvent = async e => {
-      const { urls, names, meld, provenance } = e.detail || {};
+      const { urls, names, meld, provenance, source } = e.detail || {};
       if (!Array.isArray(urls) || !urls.length) return;
       if (!this.panel.classList.contains('active')) return;
       try {
@@ -391,7 +391,8 @@ export class FaceCycle {
         const mid = (s, max = 34) => s.length <= max ? s : s.slice(0, Math.ceil(max / 2) - 1) + '…' + s.slice(-Math.floor(max / 2));
         const list = files.map(f => mid(f.name)).join(', ');
         const full = files.map(f => f.name).join(', ');
-        const src = meld ? 'Dupe family' : 'Gallery';
+        // v1.4: other tabs (FoxDen…) name themselves via detail.source; no source = Gallery (back-compat).
+        const src = meld ? 'Dupe family' : (source || 'Gallery');
         // Kept so the receipt SURVIVES the analyze pass overwriting the status
         // band (updateStatusBar re-renders it with the middle-ellipsized names).
         this.handoffReceipt = { src, list, full: full.replace(/"/g, '&quot;') };
