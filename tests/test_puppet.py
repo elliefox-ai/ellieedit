@@ -246,6 +246,7 @@ def test_render_fences_denoise_and_uses_full_mask(client, monkeypatch):
         return png_bytes((40, 40), (9, 9, 9, 255))
 
     monkeypatch.setattr("backend.comfy.comfy_repaint", fake_repaint)
+    monkeypatch.setattr("backend.comfy.comfy_repaint_klein", fake_repaint)
     r = client.post(f"/api/puppet/projects/{pid}/render",
                     json={"prompt": "golden hour", "denoise": 0.8, "seed": 7})
     assert r.status_code == 200, r.text
@@ -275,6 +276,7 @@ def test_render_failure_is_502_not_silence(client, monkeypatch):
         raise RuntimeError("ComfyUI down")
 
     monkeypatch.setattr("backend.comfy.comfy_repaint", boom)
+    monkeypatch.setattr("backend.comfy.comfy_repaint_klein", boom)
     r = client.post(f"/api/puppet/projects/{pid}/render", json={})
     assert r.status_code == 502
     assert "ComfyUI down" in r.json()["detail"]
@@ -358,6 +360,7 @@ def _capture_repaint(monkeypatch):
         return png_bytes((40, 40), (9, 9, 9, 255))
 
     monkeypatch.setattr("backend.comfy.comfy_repaint", fake_repaint)
+    monkeypatch.setattr("backend.comfy.comfy_repaint_klein", fake_repaint)
     return seen
 
 
@@ -495,3 +498,77 @@ def test_saved_project_assets_all_fetchable(client):
         r = client.get(f"/api/puppet/projects/{pid}/assets/{f}")
         assert r.status_code == 200, f
         assert r.content.startswith(b"\x89PNG"), f
+
+
+# ------------------------------------------------- v1.2: engines + render layers
+
+def _engine_mocks(monkeypatch):
+    calls = {"klein": [], "krea2": []}
+
+    def mk(tag):
+        def fake(image_b64, mask_b64, prompt, denoise=0.45, seed=0, timeout=600):
+            calls[tag].append({"denoise": denoise, "prompt": prompt, "seed": seed})
+            return png_bytes((40, 40), (9, 9, 9, 255))
+        return fake
+
+    monkeypatch.setattr("backend.comfy.comfy_repaint_klein", mk("klein"))
+    monkeypatch.setattr("backend.comfy.comfy_repaint", mk("krea2"))
+    return calls
+
+
+def test_engine_default_is_klein_krea2_selectable(client, monkeypatch):
+    pid = _fill_project(client)
+    calls = _engine_mocks(monkeypatch)
+    # omitted engine -> Klein (Alexander: preserves context better)
+    r = client.post(f"/api/puppet/projects/{pid}/render", json={})
+    assert r.json()["engine"] == "klein"
+    assert len(calls["klein"]) == 1 and len(calls["krea2"]) == 0
+    # explicit Krea2 -> the old path
+    r = client.post(f"/api/puppet/projects/{pid}/render", json={"engine": "krea2"})
+    assert r.json()["engine"] == "krea2"
+    assert len(calls["krea2"]) == 1
+    # garbage engine -> Klein, never an error, never a silent third path
+    r = client.post(f"/api/puppet/projects/{pid}/render", json={"engine": "sdxl-turbo"})
+    assert r.json()["engine"] == "klein"
+    assert len(calls["klein"]) == 2
+
+
+def test_engine_fence_holds_on_both_paths(client, monkeypatch):
+    pid = _fill_project(client)
+    calls = _engine_mocks(monkeypatch)
+    for engine in ("klein", "krea2"):
+        client.post(f"/api/puppet/projects/{pid}/render",
+                    json={"engine": engine, "denoise": 0.95})
+        client.post(f"/api/puppet/projects/{pid}/render",
+                    json={"engine": engine, "denoise": 0.05})
+        got = [c["denoise"] for c in calls[engine]]
+        assert got == [0.8, 0.2], (engine, got)   # the 0.2-0.8 fence, both engines
+
+
+def test_config_advertises_engines(client):
+    j = client.get("/api/puppet/config").json()
+    assert j["default_engine"] == "klein"
+    assert j["engines"] == ["klein", "krea2"]
+
+
+def test_render_layer_round_trips_like_any_layer(client):
+    """v1.2 item 3 at the data level: an accepted render is a layer whose
+    asset/source are the render file; it saves, reloads and composites on
+    top exactly like a dropped puppet."""
+    pid = make_project(client)
+    base = add_asset(client, pid, "source", png_bytes((20, 20), (255, 0, 0, 255)))
+    top = add_asset(client, pid, "render", png_bytes((40, 40), (0, 0, 255, 255)))
+    state = {"name": "Iter", "canvas": {"width": 40, "height": 40,
+                                        "background": {"type": "none", "asset": None}},
+             "layers": [
+                 {"id": "p", "asset": base["file"], "source": base["file"],
+                  "x": 0, "y": 0, "w": 20, "h": 20},
+                 {"id": "r1", "name": "Render 1", "asset": top["file"],
+                  "source": top["file"], "x": 0, "y": 0, "w": 40, "h": 40}]}
+    client.put(f"/api/puppet/projects/{pid}", json={"state": state})
+    saved = client.get(f"/api/puppet/projects/{pid}").json()["state"]
+    assert saved["layers"][1]["asset"] == top["file"]
+    assert saved["layers"][1]["source"] == top["file"]
+    im = puppet.composite_image(pid, puppet.validate_state(saved))
+    assert im.getpixel((5, 5)) == (0, 0, 255, 255)   # render layer paints over
+    assert im.getpixel((30, 30)) == (0, 0, 255, 255)

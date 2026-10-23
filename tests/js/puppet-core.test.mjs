@@ -8,6 +8,7 @@ import { clampDenoise, presetSize, normalizeLayer, normalizeState, defaultState,
   hitLayer, topmostAt, handlePositions, resizeRect, rotationFromPointer,
   pointerAngle, applyMaskToAlpha, brushAlpha, History,
   grayMaskIsEmpty, resolveRenderMask, planRestore, runRestore,
+  stageHintVisible, makeRenderLayer, unionClipAlpha, gateStampAlpha,
   DENOISE_MIN, DENOISE_MAX } from '../../frontend/js/modules/puppet-core.js';
 
 const L = (id, over = {}) => normalizeLayer({ id, x: 0, y: 0, w: 100, h: 50, ...over });
@@ -251,4 +252,47 @@ test('runRestore: pixels or it did not happen — retry, then source fallback', 
   assert.equal(res.fine.tries, 2);                 // one retry was enough
   assert.equal(res.gone.ok, false);                // reported, never faked
   assert.equal(res.gone.file, null);
+});
+
+// ------------------------------------------------------- v1.2 additions
+
+test('stageHintVisible: only a truly empty stage, or any drag-over', () => {
+  assert.equal(stageHintVisible({ layerCount: 0, hasBackground: false, dragOver: false }), true);
+  assert.equal(stageHintVisible({ layerCount: 0, hasBackground: true, dragOver: false }), false);
+  assert.equal(stageHintVisible({ layerCount: 2, hasBackground: false, dragOver: false }), false);
+  assert.equal(stageHintVisible({ layerCount: 2, hasBackground: true, dragOver: false }), false);
+  assert.equal(stageHintVisible({ layerCount: 2, hasBackground: true, dragOver: true }), true);
+  assert.equal(stageHintVisible({ layerCount: 0, hasBackground: false, dragOver: true }), true);
+  assert.equal(stageHintVisible(), true);
+});
+
+test('makeRenderLayer: full-canvas top layer, numbered, round-trip refs', () => {
+  const st = normalizeState({ canvas: { width: 1152, height: 768 },
+    layers: [{ id: 'a', name: 'puppet' }, { id: 'b', name: 'Render 1' }] });
+  const l = makeRenderLayer(st, { id: 'r2', asset: 'render-abc.png' });
+  assert.equal(l.name, 'Render 2');
+  assert.equal(l.asset, 'render-abc.png');
+  assert.equal(l.source, 'render-abc.png');        // save/reload like any layer
+  assert.deepEqual([l.x, l.y, l.w, l.h], [0, 0, 1152, 768]);
+  assert.equal(l.natural_w, 1152);
+  assert.equal(l.visible, true);
+  const first = makeRenderLayer(normalizeState({ layers: [] }), { id: 'r1', asset: 'render-x.png' });
+  assert.equal(first.name, 'Render 1');
+});
+
+test('scoped fill gate: paint admits from footprint or existing fill only', () => {
+  // union: layer alpha admits; existing fill admits; neither blocks
+  assert.equal(unionClipAlpha(200, 0), 200);
+  assert.equal(unionClipAlpha(0, 200), 200);
+  assert.equal(unionClipAlpha(0, 0), 0);
+  assert.equal(unionClipAlpha(90, 130), 130);
+  // gate: stamp scaled by clip — empty space blocks a fresh stamp fully,
+  // the puppet admits it fully, soft edges scale proportionally
+  assert.equal(gateStampAlpha(255, 0), 0);
+  assert.equal(gateStampAlpha(255, 255), 255);
+  assert.equal(gateStampAlpha(255, 128), 128);
+  assert.equal(gateStampAlpha(200, 128), 100);
+  // growth semantics: once painted, that point's fill admits the next stamp
+  const fillAfter = 255;                            // just painted here
+  assert.equal(gateStampAlpha(255, unionClipAlpha(0, fillAfter)), 255);
 });

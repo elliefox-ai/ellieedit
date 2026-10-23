@@ -399,3 +399,24 @@ def test_puppet_v11_fill_area_and_cutout_wiring():
     # rmbg survives exactly where Amendment D puts it: the Cut Out action
     cut_fn = src.split('async function cutOut')[1].split('function restoreCut')[0]
     assert 'rmbg(' in cut_fn and 'cutPending' in cut_fn
+
+
+def test_puppet_v12_iterative_wiring():
+    """v1.2: engine picker (Klein default), accept-as-layer (NOT a
+    background stamp), scoped Fill Area plumbing, hint predicate in use."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    src = (mods / "puppet.js").read_text()
+    core = (mods / "puppet-core.js").read_text()
+    for needle in ('data-engine="klein"', 'data-engine="krea2"',
+                   "let engine = 'klein'", 'engine,', 'makeRenderLayer',
+                   'stageHintVisible', 'buildClipCanvas', 'stampFillGated',
+                   'Accept as new layer'):
+        assert needle in src, needle
+    for needle in ('stageHintVisible', 'makeRenderLayer', 'unionClipAlpha',
+                   'gateStampAlpha'):
+        assert needle in core, needle
+    # the accept path must not stamp the background anymore
+    accept_fn = src.split("el.pvaccept.addEventListener('click'")[1].split("});")[0]
+    assert 'makeRenderLayer' in accept_fn
+    assert 'canvas.background' not in accept_fn
+    assert 'visible = false' not in accept_fn        # layers stay live now
