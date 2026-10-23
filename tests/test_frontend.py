@@ -458,3 +458,18 @@ def test_puppet_v131_erase_is_a_layer_tool_and_cutout_lives_in_tools():
         assert needle in src, needle
     assert 'cutBtn' not in src                      # rows are slim now
     assert '✂ Cut Out' in src                      # (the Tools button)
+
+
+def test_puppet_v132_merge_down_recipe():
+    """v1.3.2 (Alexander's report + recipe): merge down must ADD the two
+    rasters, ADD the two masks into one combined mask, and apply it via
+    the survivor's live mask channel — synchronously, with no
+    pre-extension (the v1.3 race that made merged layers vanish)."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    src = (mods / "puppet.js").read_text()
+    body = src.split("async function mergeDown")[1].split("// Targeted Fill")[0]
+    assert "effectiveMaskCanvas" in src
+    assert "extendLayerToCanvas(below)" not in body      # the race is gone
+    assert body.count("loadLayerImage") == 1             # one reload only
+    assert "rb.mask = K" in body                         # mask stays LIVE
+    assert "resetMask(rb, W, H); rb.maskDirty = true" not in body  # not wiped

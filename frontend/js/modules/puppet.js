@@ -1007,11 +1007,15 @@ registerModule({
       return true;
     }
 
-    // Merge down (v1.3): the layer's visible pixels alpha-over onto the
-    // layer below (which is extended to full bounds by the merge), or
-    // onto the background when it is the lowest layer. Both layers' erase
-    // masks are consolidated — they live in the merged pixels now — and
-    // the surviving layer keeps a fresh, fully-working mask channel.
+    // Merge down: the two layers' RASTERS are added (each drawn at its
+    // stage transform, alpha-over), their MASKS are added the same way
+    // into one combined canvas-space mask, and that mask becomes the
+    // surviving layer's live mask channel — the merged layer displays
+    // through it and stays erasable/restorable (Alexander's recipe,
+    // v1.3.2). Fully synchronous with exactly ONE image reload: the
+    // v1.3 version pre-extended the layer below, whose async reload
+    // raced the merged reload and could repaint the survivor WITHOUT
+    // the merged layer — the disappearing-character bug.
     async function mergeDown(layer) {
       const idx = state.layers.indexOf(layer);
       if (idx < 0) return;
@@ -1023,23 +1027,36 @@ registerModule({
         if (below) {
           const rb = runtimeFor(below);
           if (!rb.img) { say(`“${below.name}” has no pixels to merge into.`, 'err'); return; }
-          const m = document.createElement('canvas');
-          m.width = W; m.height = H;
-          const mx = m.getContext('2d');
-          extendLayerToCanvas(below);         // full bounds: appearance == source
-          drawLayerAppearance(mx, below);
-          drawLayerAppearance(mx, layer);     // alpha-over at stage transforms
-          rb.sourceDataUrl = m.toDataURL('image/png');
+          // 1) rasters added
+          const R = document.createElement('canvas');
+          R.width = W; R.height = H;
+          const rx = R.getContext('2d');
+          drawAtTransform(rx, rb.img, below);
+          drawAtTransform(rx, r.img, layer);
+          // 2) masks added (each layer's effective mask: cutout × erase,
+          //    accumulated alpha-over in canvas space)
+          const K = document.createElement('canvas');
+          K.width = W; K.height = H;
+          const kx = K.getContext('2d');
+          const effB = effectiveMaskCanvas(below);
+          if (effB) drawAtTransform(kx, effB, below);
+          const effL = effectiveMaskCanvas(layer);
+          if (effL) drawAtTransform(kx, effL, layer);
+          // 3) the survivor: merged raster as its source at full bounds,
+          //    combined mask as its live mask channel (applied by the
+          //    normal display pipeline), cut channel folded into K.
+          rb.sourceDataUrl = R.toDataURL('image/png');
           below.source = null; below.asset = null;
           below.natural_w = W; below.natural_h = H;
           below.x = 0; below.y = 0; below.w = W; below.h = H; below.rotation = 0;
-          resetMask(rb, W, H); rb.maskDirty = true; below.mask = null;
+          rb.mask = K; rb.mctx = K.getContext('2d');
+          rb.maskTouched = true; rb.maskDirty = true; below.mask = null;
           resetCut(rb, W, H); rb.cutDirty = true; below.cutout = null;
           loadLayerImage(below, rb.sourceDataUrl);
           state.layers = state.layers.filter(l => l.id !== layer.id);
           if (selectedId === layer.id) selectedId = below.id;
           commit(); renderStage();
-          say(`Merged “${layer.name}” down into “${below.name}” — masks consolidated; “${below.name}” is still erasable.`, 'ok');
+          say(`Merged “${layer.name}” down into “${below.name}” — rasters and masks combined; “${below.name}” keeps the merged mask and stays erasable.`, 'ok');
         } else {
           const m = document.createElement('canvas');
           m.width = W; m.height = H;
@@ -1485,15 +1502,34 @@ registerModule({
     const stampCv = document.createElement('canvas');
     // Draw a layer's current stage appearance (display canvas, masks
     // applied, at its stage transform) into a canvas-sized context.
-    function drawLayerAppearance(cx2, layer) {
-      const r = rt.get(layer.id);
-      if (!r || !r.cv || !r.cv.width) return;
+    function drawAtTransform(cx2, src, layer) {
       const c = layerCenterOf(layer);
       cx2.save();
       cx2.translate(c.x, c.y);
       cx2.rotate((layer.rotation || 0) * Math.PI / 180);
-      cx2.drawImage(r.cv, -layer.w / 2, -layer.h / 2, layer.w, layer.h);
+      cx2.drawImage(src, -layer.w / 2, -layer.h / 2, layer.w, layer.h);
       cx2.restore();
+    }
+    function drawLayerAppearance(cx2, layer) {
+      const r = rt.get(layer.id);
+      if (!r || !r.cv || !r.cv.width) return;
+      drawAtTransform(cx2, r.cv, layer);
+    }
+    // A layer's EFFECTIVE mask in its own natural space: white RGB whose
+    // alpha is cutout × erase — the layer's total visibility map.
+    function effectiveMaskCanvas(layer) {
+      const r = rt.get(layer.id);
+      if (!r) return null;
+      const nw = Math.max(1, layer.natural_w || (r.img ? r.img.naturalWidth : r.mask.width));
+      const nh = Math.max(1, layer.natural_h || (r.img ? r.img.naturalHeight : r.mask.height));
+      const t = document.createElement('canvas');
+      t.width = nw; t.height = nh;
+      const tx = t.getContext('2d');
+      tx.fillStyle = '#fff'; tx.fillRect(0, 0, nw, nh);
+      tx.globalCompositeOperation = 'destination-in';
+      if (r.cutTouched) tx.drawImage(r.cut, 0, 0, nw, nh);
+      tx.drawImage(r.mask, 0, 0, nw, nh);
+      return t;
     }
     function buildClipCanvas(layer) {
       const w = state.canvas.width, h = state.canvas.height;
