@@ -281,6 +281,24 @@ export function topmostAt(layers, px, py) {
   return null;
 }
 
+/** Topmost visible layer whose BOUNDS contain the point — bounds, not
+ * alpha (v1.3 focus stickiness): a pointer-down on a selected layer's
+ * fully transparent or erased region still belongs to that layer; only
+ * clicks outside its bounds may fall through to layers underneath. */
+export function topmostBoundsAt(layers, px, py) {
+  return topmostAt(layers, px, py);
+}
+
+/** Is the layer already extended to full project bounds (the Fill
+ * precondition): full-canvas rect, unrotated. */
+export function layerIsFullBounds(layer, canvas) {
+  return !!layer && !!canvas
+    && Math.round(layer.x) === 0 && Math.round(layer.y) === 0
+    && Math.round(layer.w) === Math.round(canvas.width)
+    && Math.round(layer.h) === Math.round(canvas.height)
+    && ((layer.rotation || 0) % 360) === 0;
+}
+
 export const HANDLE_NAMES = ['nw', 'ne', 'se', 'sw'];
 
 /** Handle centers in stage coords: the rect's corners, rotated with it. */
