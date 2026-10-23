@@ -171,3 +171,71 @@ restarts, suites green at handoff).
    obeys prompt inside the mask while locked pixels stay exact.
 7. Full pytest + tests/js suites green; prior acceptance items 1–6 of
    increment 1 still pass.
+
+---
+
+# INCREMENT 3 — v1.4: cross-tab image transfer ("send to" entry points)
+
+**Date:** 2026-10-23 · **Builder:** echo · **Status:** Ready for build.
+**Base:** current `master`. Same delivery discipline (bundle/patches, no
+build bumps, no restarts, suites green at handoff).
+
+## Why
+
+The suite already has point-to-point handoffs (Gallery→FaceCycle via
+`ellieedit:facecycle-handoff` {urls, names}; Gallery→Update via
+`ellieedit:open-in-update`), but each is bespoke and several surfaces have
+no entry point at all. Puppet Theater — the newest, biggest consumer of
+images — cannot receive from anything. Moving an image between tabs means
+save-to-disk-then-re-upload.
+
+## Design
+
+**Generalize the existing event pattern, don't replace it.** Keep
+`ellieedit:facecycle-handoff` and `ellieedit:open-in-update` working
+(back-compat pins in tests); add a uniform dispatch on top:
+
+- Sending surfaces dispatch `ellieedit:send-to` with
+  `{ detail: { target, urls, names } }`; shell.js routes: activates the
+  target tab and forwards a target-specific event (the target's existing
+  handoff event, or a new `ellieedit:<target>-receive`).
+- Receiving surfaces register one listener that accepts the standard
+  payload `{urls, names}` and loads it the way a local upload would.
+
+**Matrix (minimum viable):**
+
+| Source → Target | How |
+|---|---|
+| Gallery image → Puppet Theater | per-image ☰-menu / context action "Send to Puppet Theater" — arrives as a NEW puppet layer (rmbg cutout path, same as a drop) |
+| Gallery image → Puppet Theater (as background) | separate action "Send to Puppet Theater as Background" — sets/replaces stage background |
+| FoxDen render → Puppet Theater | result row action: as layer (rmbg) or as background |
+| FoxDen render → FaceCycle | result row action → existing facecycle handoff receipt path |
+| Puppet composite → FoxDen | "Send to FoxDen" on the composite/export — arrives as input image |
+| Gallery image → FoxDen | per-image action → input image |
+
+**UI rules:**
+
+- Send actions live beside the existing per-item actions (same menus where
+  facecycle-handoff already sits); one consistent "Send to ▸" submenu where
+  a surface offers multiple targets.
+- After dispatch: switch to the target tab and show the same style of
+  receipt badge FaceCycle already uses ("→ from Gallery").
+- A target that can't accept (e.g. Puppet mid-render) rejects gracefully
+  with a toast, not a silent drop.
+
+**Data rule:** handoffs pass server URLs (existing asset endpoints), never
+data URLs or base64 through the event. The receiving tab's existing
+load-and-decode path handles fetch; no new upload endpoints needed.
+
+## Acceptance checklist (operator-side)
+
+1. Gallery image → Puppet Theater: arrives as cutout puppet layer, placed
+   on stage, fully manipulable.
+2. Gallery image → as Background: stage background set, layers intact.
+3. FoxDen render → Puppet layer / background: same two paths.
+4. FoxDen render → FaceCycle: lands as subject with receipt badge.
+5. Puppet composite → FoxDen: arrives as input, generates fine.
+6. Receipt badges show source; existing Gallery→FaceCycle and Gallery→Update
+   handoffs unchanged (back-compat tests still green).
+7. Mid-render target rejection shows a toast.
+8. Full pytest + tests/js suites green.
