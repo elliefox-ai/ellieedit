@@ -64,7 +64,8 @@ MAX_CANVAS_DIM = 8192
 MAX_LAYERS = 64
 STATE_MAX_BYTES = 256 * 1024          # layer stack JSON; images are assets
 ASSET_MAX_BYTES = 25 * 1024 * 1024    # same upload ceiling as foxden
-ASSET_KINDS = {"source", "cutout", "mask", "background", "render"}
+ASSET_KINDS = {"source", "cutout", "mask", "background", "render",
+               "rendermask"}
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
 _lock = threading.Lock()
@@ -198,6 +199,7 @@ def validate_state(raw) -> dict:
             "asset": _asset_name(li.get("asset")),
             "source": _asset_name(li.get("source")),
             "mask": _asset_name(li.get("mask")),
+            "cutout": _asset_name(li.get("cutout")),
             "x": _num(li.get("x"), 0.0), "y": _num(li.get("y"), 0.0),
             "w": lw, "h": lh,
             "rotation": _num(li.get("rotation"), 0.0) % 360.0,
@@ -208,7 +210,8 @@ def validate_state(raw) -> dict:
     name = str(raw.get("name") or "Untitled theater")[:120]
     return {"name": name,
             "canvas": {"width": w, "height": h, "background": background},
-            "layers": layers}
+            "layers": layers,
+            "rendermask": _asset_name(raw.get("rendermask"))}
 
 
 def default_state(name: str = "") -> dict:
@@ -277,11 +280,15 @@ def composite_image(pid: str, state: dict) -> Image.Image:
         if not fname:
             continue
         im = _open_asset(pid, fname)
-        if layer.get("mask"):
-            mask = _open_asset(pid, layer["mask"]).convert("L")
-            if mask.size != im.size:
-                mask = mask.resize(im.size, Image.BILINEAR)
-            im.putalpha(_apply_mask(im.getchannel("A"), mask))
+        # Two independent alpha masks, both nondestructive: the rmbg
+        # "Cut Out" mask (v1.1, Amendment D — the original pixels are never
+        # modified) and the hand-painted erase mask. Each multiplies in.
+        for key in ("cutout", "mask"):
+            if layer.get(key):
+                mask = _open_asset(pid, layer[key]).convert("L")
+                if mask.size != im.size:
+                    mask = mask.resize(im.size, Image.BILINEAR)
+                im.putalpha(_apply_mask(im.getchannel("A"), mask))
         tw = max(1, int(round(layer["w"])))
         th = max(1, int(round(layer["h"])))
         if im.size != (tw, th):
@@ -522,27 +529,56 @@ def export_json(pid: str):
 
 # --------------------------------------------------------------- final pass
 
+def choose_render_mask(pid: str, state: dict, mode) -> tuple[str, str]:
+    """Resolve the final-pass mask. Returns (mask_b64, used) where used is
+    'fill' or 'full'.
+
+    - mode 'all' (the UI's "Render all") → the v1 full-canvas white mask.
+    - mode 'fill' with a painted Fill Area rendermask asset → that mask
+      (white = regenerate, black = locked), resized to the canvas.
+    - a rendermask that exists but is entirely black is EMPTY: painting
+      nothing must behave exactly like v1, so fall back to white.
+    - no rendermask at all → white."""
+    w = int(state["canvas"]["width"])
+    h = int(state["canvas"]["height"])
+    if mode == "fill" and state.get("rendermask"):
+        try:
+            mask = _open_asset(pid, state["rendermask"]).convert("L")
+        except HTTPException:
+            mask = None                       # dangling ref: treat as none
+        if mask is not None:
+            if mask.size != (w, h):
+                mask = mask.resize((w, h), Image.BILINEAR)
+            if mask.getextrema()[1] > 0:      # something is painted
+                return base64.b64encode(_png_bytes(mask)).decode(), "fill"
+    return white_mask_b64(w, h), "full"
+
+
 class RenderBody(BaseModel):
     prompt: str = ""
     denoise: float | None = None
     seed: int = 0
+    mode: str = "fill"
 
 
 @router.post("/projects/{pid}/render")
 def render(pid: str, body: RenderBody):
     """The harmonization pass. Composites the SAVED stack server-side (so
     what renders is exactly what export.png shows), then runs the existing
-    low-denoise inpaint path at the FENCED denoise with a full-canvas mask.
+    low-denoise inpaint path at the FENCED denoise. The mask comes from the
+    Fill Area step when one is painted (mode 'fill'); otherwise — or when
+    the user picks "Render all" — it is the v1 full-canvas white mask.
     The result is also stored as a 'render' asset; the client shows it as
     an accept/discard preview — accepting never deletes the stack."""
     state = validate_state(load_project(pid))
     flat = composite_image(pid, state)
     w, h = flat.size
     denoise = clamp_denoise(body.denoise)
+    mask_b64, mask_used = choose_render_mask(pid, state, body.mode)
     try:
         png = comfy.comfy_repaint(
             base64.b64encode(_png_bytes(flat)).decode(),
-            white_mask_b64(w, h),
+            mask_b64,
             body.prompt or "",
             denoise=denoise, seed=int(body.seed or 0))
     except Exception as e:
@@ -558,4 +594,5 @@ def render(pid: str, body: RenderBody):
         render_asset = None                   # preview still returns
     return {"image_b64": base64.b64encode(png).decode(),
             "denoise": denoise, "width": w, "height": h,
+            "mask_used": mask_used,
             "render_asset": render_asset}
