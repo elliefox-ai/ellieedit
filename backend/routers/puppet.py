@@ -24,9 +24,11 @@ Conventions followed (surveyed at ec8ce1d):
     repaint. FoxDen's generate/status plumbing is used by the frontend for
     BACKGROUND generation only (txt2img on the foxden tab's own path).
   - Denoise fence: the render denoise is clamped server-side to
-    [DENOISE_MIN, DENOISE_MAX] = 0.4–0.5. The 2026-09-08 low-denoise
-    finding: d0.8 transplants Klein's medium and re-conceives faces — a
-    client can never talk this endpoint into it.
+    [DENOISE_MIN, DENOISE_MAX] = 0.2–0.8 (widened 2026-10-22 by Alexander's
+    call: Fill Area regions intentionally have no existing pixels to
+    protect, so high denoise is legitimate there; the 2026-09-08 d0.8
+    face-reconception finding applies to whole-image passes, and the top
+    of the fence still excludes the 0.9+ re-conceive-everything range).
 """
 
 import base64
@@ -55,8 +57,8 @@ router = APIRouter(prefix="/api/puppet", tags=["puppet"])
 
 # ------------------------------------------------------------- the fence
 
-DENOISE_MIN = 0.4
-DENOISE_MAX = 0.5
+DENOISE_MIN = 0.2
+DENOISE_MAX = 0.8
 DENOISE_DEFAULT = 0.45
 
 CANVAS_PRESETS = {"1:1": (1024, 1024), "3:2": (1152, 768), "16:9": (1280, 720)}
@@ -73,8 +75,8 @@ _lock = threading.Lock()
 
 def clamp_denoise(v) -> float:
     """The fence, as a pure function: None/garbage -> default; anything
-    outside [0.4, 0.5] is clamped INTO the fence, never rejected and never
-    honored. d0.8 in -> 0.5 out."""
+    outside [0.2, 0.8] is clamped INTO the fence, never rejected and never
+    honored. d0.9+ in -> 0.8 out; d0.1 in -> 0.2 out."""
     try:
         d = float(v)
     except (TypeError, ValueError):

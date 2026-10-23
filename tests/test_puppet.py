@@ -58,9 +58,10 @@ def add_asset(client, pid, kind, data):
 # ------------------------------------------------------------- the fence
 
 def test_clamp_denoise_fence():
-    assert puppet.clamp_denoise(0.8) == 0.5       # the d0.8 that re-conceives faces
-    assert puppet.clamp_denoise(1.0) == 0.5
-    assert puppet.clamp_denoise(0.0) == 0.4
+    assert puppet.clamp_denoise(0.85) == 0.8    # past the fence cap
+    assert puppet.clamp_denoise(1.0) == 0.8
+    assert puppet.clamp_denoise(0.8) == 0.8     # widened fence honors 0.8 (Alexander, 2026-10-22)
+    assert puppet.clamp_denoise(0.1) == 0.2
     assert puppet.clamp_denoise(0.45) == 0.45
     assert puppet.clamp_denoise(None) == puppet.DENOISE_DEFAULT
     assert puppet.clamp_denoise("junk") == puppet.DENOISE_DEFAULT
@@ -69,7 +70,7 @@ def test_clamp_denoise_fence():
 
 def test_config_reports_fence_and_rmbg_status(client):
     j = client.get("/api/puppet/config").json()
-    assert j["denoise"] == {"min": 0.4, "max": 0.5, "default": 0.45}
+    assert j["denoise"] == {"min": 0.2, "max": 0.8, "default": 0.45}
     assert j["canvas_presets"]["16:9"] == [1280, 720]
     assert set(j["rmbg"]) >= {"importable", "model_cached", "available"}
 
