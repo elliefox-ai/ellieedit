@@ -84,3 +84,6 @@
 .pt-lr { display:flex; gap:4px; align-items:center; }
 .pt-lr .nm { flex:1; }
 .pt-cut { flex:1; }
+
+/* v1.3.1: Tools buttons disable with no selection; rows slimmed down. */
+.pt-btn[disabled] { opacity: .45; pointer-events: none; }
