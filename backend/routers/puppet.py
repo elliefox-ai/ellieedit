@@ -17,12 +17,13 @@ Conventions followed (surveyed at ec8ce1d):
     theater projects are working state, not promoted library items, so they
     live in module data like foxden's recent/presets, NOT in the library
     root, where the library listing would ingest the layer PNGs.)
-  - Final pass: facecycle's existing low-denoise inpaint path
-    (backend.comfy.comfy_repaint — the Krea2 REPAINT_GRAPH) with a
-    FULL-CANVAS white mask: the whole composite is context, nothing is a
-    prompt-placed subject. Submitted synchronously like /api/facecycle/
-    repaint. FoxDen's generate/status plumbing is used by the frontend for
-    BACKGROUND generation only (txt2img on the foxden tab's own path).
+  - Final pass: a masked repaint at the fenced denoise — engine Klein by
+    default (backend.comfy.comfy_repaint_klein, v1.2; preserves placed
+    pixels better), Krea2 (comfy_repaint) as the explicit alternative.
+    The mask is the Fill Area rendermask when painted, else full-canvas
+    white: the whole composite is context, nothing is a prompt-placed
+    subject. FoxDen's generate/status plumbing is used by the frontend
+    for BACKGROUND generation only (txt2img on the foxden tab's own path).
   - Denoise fence: the render denoise is clamped server-side to
     [DENOISE_MIN, DENOISE_MAX] = 0.2–0.8 (widened 2026-10-22 by Alexander's
     call: Fill Area regions intentionally have no existing pixels to
@@ -420,6 +421,7 @@ def config():
                         "default": DENOISE_DEFAULT},
             "canvas_presets": {k: list(v) for k, v in CANVAS_PRESETS.items()},
             "max_layers": MAX_LAYERS,
+            "engines": list(ENGINES), "default_engine": DEFAULT_ENGINE,
             "rmbg": rmbg_status()}
 
 
@@ -561,6 +563,19 @@ class RenderBody(BaseModel):
     denoise: float | None = None
     seed: int = 0
     mode: str = "fill"
+    engine: str = "klein"
+
+
+# Final-pass engines (v1.2 item 4). Klein is the DEFAULT — including when
+# the client omits the field or sends garbage: it preserves the placed
+# pixels (the design) better. Krea2 repaints more aggressively and stays
+# available as the explicit option. Both run at the same fenced denoise.
+ENGINES = ("klein", "krea2")
+DEFAULT_ENGINE = "klein"
+
+
+def resolve_engine(v) -> str:
+    return v if v in ENGINES else DEFAULT_ENGINE
 
 
 @router.post("/projects/{pid}/render")
@@ -577,8 +592,11 @@ def render(pid: str, body: RenderBody):
     w, h = flat.size
     denoise = clamp_denoise(body.denoise)
     mask_b64, mask_used = choose_render_mask(pid, state, body.mode)
+    engine = resolve_engine(body.engine)
+    repaint = (comfy.comfy_repaint_klein if engine == "klein"
+               else comfy.comfy_repaint)
     try:
-        png = comfy.comfy_repaint(
+        png = repaint(
             base64.b64encode(_png_bytes(flat)).decode(),
             mask_b64,
             body.prompt or "",
@@ -596,5 +614,5 @@ def render(pid: str, body: RenderBody):
         render_asset = None                   # preview still returns
     return {"image_b64": base64.b64encode(png).decode(),
             "denoise": denoise, "width": w, "height": h,
-            "mask_used": mask_used,
+            "mask_used": mask_used, "engine": engine,
             "render_asset": render_asset}
