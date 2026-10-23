@@ -250,8 +250,14 @@ def test_render_fences_denoise_and_uses_full_mask(client, monkeypatch):
                     json={"prompt": "golden hour", "denoise": 0.8, "seed": 7})
     assert r.status_code == 200, r.text
     j = r.json()
-    assert j["denoise"] == 0.5                       # 0.8 fenced down, not honored
-    assert seen["denoise"] == 0.5
+    assert j["denoise"] == 0.8                       # fence widened 2026-10-22: 0.8 honored
+    assert seen["denoise"] == 0.8
+    # past the cap: clamped INTO the fence, never honored
+    r = client.post(f"/api/puppet/projects/{pid}/render",
+                    json={"prompt": "golden hour", "denoise": 0.9, "seed": 7})
+    assert r.status_code == 200, r.text
+    assert r.json()["denoise"] == 0.8
+    assert seen["denoise"] == 0.8
     assert seen["mask_extrema"] == (255, 255)        # FULL-canvas context
     assert seen["mask_size"] == (40, 40) == seen["image_size"]
     assert seen["prompt"] == "golden hour" and seen["seed"] == 7
