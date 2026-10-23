@@ -441,3 +441,20 @@ def test_puppet_v13_targeted_fill_wiring():
     accept_fn = src.split("el.pvaccept.addEventListener('click'")[1].split("el.pvdiscard")[0]
     assert "pvMode === 'fill'" in accept_fn
     assert 'pvTarget' in accept_fn
+
+
+def test_puppet_v131_erase_is_a_layer_tool_and_cutout_lives_in_tools():
+    """v1.3.1 (Alexander's live report): Erase in the Fill step was painting
+    the rendermask, leaving layers un-erasable there. Erase/Restore must
+    start a layer-mask op in the fill branch too; Cut Out moved to Tools."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    src = (mods / "puppet.js").read_text()
+    fill_branch = src.split("if (step === 'fill')")[1].split("const sel = selected();\n      // handles")[0]
+    assert "tool === 'erase' || tool === 'restore'" in fill_branch
+    assert "type: 'mask'" in fill_branch
+    # Cut Out / Undo cut: Tools buttons acting on the selection, not rows
+    for needle in ('data-id="cutgo"', 'data-id="restorecut"', 'updateCutUI',
+                   'toggleSelect'):
+        assert needle in src, needle
+    assert 'cutBtn' not in src                      # rows are slim now
+    assert '✂ Cut Out' in src                      # (the Tools button)
