@@ -119,7 +119,8 @@ KLEIN_REPAINT_GRAPH = {
     "103": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
     "106": {"class_type": "RandomNoise", "inputs": {"noise_seed": 0}},
     "115": {"class_type": "BasicScheduler", "inputs": {"model": ["380", 0], "scheduler": "simple", "steps": 6, "denoise": 0.45}},
-    "114": {"class_type": "CFGGuider", "inputs": {"cfg": 1.0, "model": ["380", 0], "positive": ["112", 0], "negative": ["113", 0]}},
+    "117": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["112", 0], "latent": ["202", 0]}},
+    "114": {"class_type": "CFGGuider", "inputs": {"cfg": 1.0, "model": ["380", 0], "positive": ["117", 0], "negative": ["113", 0]}},
     "200": {"class_type": "LoadImage", "inputs": {"image": "input.png", "upload": "image"}},
     "201": {"class_type": "LoadImageMask", "inputs": {"image": "mask.png", "channel": "red"}},
     "202": {"class_type": "VAEEncode", "inputs": {"pixels": ["200", 0], "vae": ["382", 0]}},
@@ -128,7 +129,9 @@ KLEIN_REPAINT_GRAPH = {
             "inputs": {"noise": ["106", 0], "guider": ["114", 0], "sampler": ["103", 0],
                        "sigmas": ["115", 0], "latent_image": ["203", 0]}},
     "105": {"class_type": "VAEDecode", "inputs": {"samples": ["104", 0], "vae": ["382", 0]}},
-    "19":  {"class_type": "SaveImage", "inputs": {"images": ["105", 0],
+    "118": {"class_type": "ColorMatchV2", "inputs": {"method": "mkl", "strength": 1,
+            "multithread": True, "image_target": ["105", 0], "image_ref": ["200", 0]}},
+    "19":  {"class_type": "SaveImage", "inputs": {"images": ["118", 0],
             "filename_prefix": "ellieedit_tmp/puppet_klein"}},
 }
 

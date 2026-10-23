@@ -171,6 +171,14 @@ def test_klein_graph_shape():
     # Klein's negative is a zeroed positive, as in the basic graph
     assert g["113"]["class_type"] == "ConditioningZeroOut"
     assert g["114"]["inputs"]["negative"] == ["113", 0]
+    # 2026-10-22: context preservation via ReferenceLatent + ColorMatchV2,
+    # modeled on the zengostyle restyle workflow (context holds at d1.0).
+    assert g["117"]["class_type"] == "ReferenceLatent"
+    assert g["117"]["inputs"]["latent"] == ["202", 0]
+    assert g["114"]["inputs"]["positive"] == ["117", 0]
+    assert g["118"]["class_type"] == "ColorMatchV2"
+    assert g["118"]["inputs"]["image_ref"] == ["200", 0]
+    assert g["19"]["inputs"]["images"] == ["118", 0]
     # the masked-repaint conversion, same as REPAINT_GRAPH
     assert g["203"]["class_type"] == "SetLatentNoiseMask"
     assert g["203"]["inputs"]["samples"] == ["202", 0]
