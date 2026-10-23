@@ -47,6 +47,7 @@ export function normalizeLayer(raw, i = 0) {
     asset: assetName(r.asset),
     source: assetName(r.source),
     mask: assetName(r.mask),
+    cutout: assetName(r.cutout),
     x: num(r.x), y: num(r.y),
     w: Math.max(1, num(r.w, 100)), h: Math.max(1, num(r.h, 100)),
     rotation: ((num(r.rotation) % 360) + 360) % 360,
@@ -78,7 +79,77 @@ export function normalizeState(raw) {
       },
     },
     layers,
+    // The Fill Area render mask lives at STATE level, never on a layer:
+    // the per-layer erase/cutout masks and the canvas rendermask are three
+    // separate channels and must never alias (v1.1 spec item 4).
+    rendermask: assetName(r.rendermask),
   };
+}
+
+/** A grayscale mask (one byte per pixel) is EMPTY when every byte is 0 —
+ * nothing painted. An empty Fill Area mask must behave exactly like no
+ * mask at all (full-canvas render), on both client and server. */
+export function grayMaskIsEmpty(gray) {
+  if (!gray || !gray.length) return true;
+  for (let i = 0; i < gray.length; i++) if (gray[i] > 0) return false;
+  return true;
+}
+
+/** Resolve which mask the final pass should use.
+ * mode 'all' always renders the full canvas; mode 'fill' uses the painted
+ * Fill Area mask only when one exists AND is non-empty. */
+export function resolveRenderMask({ mode, hasFill, fillEmpty } = {}) {
+  if (mode === 'fill' && hasFill && !fillEmpty) return 'fill';
+  return 'full';
+}
+
+/**
+ * Plan restoring a saved project onto the stage (Amendment C). Pure: for
+ * each layer, the ordered candidate asset files to try for its BASE image
+ * (primary first, then the fallback), plus its mask files. v1 restored
+ * only `asset` and only on a single unretried load — a layer whose cutout
+ * asset failed (or was never the right ref) came back as metadata with no
+ * pixels. The plan's fallback to `source` and runRestore's retry are the
+ * fix; the stage is only "restored" when pixels actually arrive.
+ */
+export function planRestore(state) {
+  const s = normalizeState(state);
+  return s.layers.map(l => {
+    const candidates = [];
+    for (const f of [l.asset, l.source]) {
+      if (f && !candidates.includes(f)) candidates.push(f);
+    }
+    return { id: l.id, name: l.name, candidates,
+             mask: l.mask, cutout: l.cutout,
+             hasBase: candidates.length > 0 };
+  });
+}
+
+/**
+ * Execute a restore plan. `load(file)` returns a Promise for the decoded
+ * image (any truthy value) or rejects. Each candidate is tried up to
+ * `attempts` times (a cold server / transient 404 must not blank a layer),
+ * then the next candidate. Resolves to a map:
+ *   { [layerId]: { ok, file, value, tries } }
+ * A layer is only ok when its pixels actually loaded.
+ */
+export async function runRestore(plan, load, attempts = 2) {
+  const out = {};
+  for (const entry of plan || []) {
+    let res = { ok: false, file: null, value: null, tries: 0 };
+    for (const file of entry.candidates || []) {
+      for (let a = 0; a < attempts && !res.ok; a++) {
+        res.tries++;
+        try {
+          const v = await load(file, entry);
+          if (v) res = { ok: true, file, value: v, tries: res.tries };
+        } catch { /* retry, then fall back to the next candidate */ }
+      }
+      if (res.ok) break;
+    }
+    out[entry.id] = res;
+  }
+  return out;
 }
 
 export function defaultState() {
