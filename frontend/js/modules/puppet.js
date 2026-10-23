@@ -67,7 +67,7 @@ registerModule({
         <input type="file" accept="image/*" multiple data-id="afile" style="display:none">
         <div class="pt-hint">…or drop images straight onto the stage — they place
           instantly, exactly as dropped. Background removal is a separate,
-          reversible step: ✂ Cut Out on the layer (Amendment D).</div>
+          reversible step: ✂ Cut Out in Tools, with a layer selected.</div>
         <div class="pt-sec">Stage step</div>
         <div class="pt-row" data-id="steps">
           <button class="ee-btn pt-btn on" data-step="place">🧩 Place</button>
@@ -76,8 +76,10 @@ registerModule({
         </div>
         <div class="pt-hint" data-id="fillhint" style="display:none">Fill Area: paint
           where generation should happen (white = fill, everything else stays
-          locked). Brush paints fill; the Erase tool paints lock. Undo and
-          Clear work; the tint only shows during this step.</div>
+          locked). With nothing selected, Erase paints lock on the Fill Area.
+          With a layer selected, Erase/Restore work that LAYER's mask instead —
+          they are layer tools in every step. Undo and Clear work; the tint
+          only shows during this step.</div>
         <button class="ee-btn primary pt-go" data-id="fillgo">✨ Fill background</button>
         <div class="pt-hint" data-id="fillnote"></div>
         <div class="pt-sec">Tools</div>
@@ -91,6 +93,13 @@ registerModule({
             <input type="range" data-id="bsize" min="6" max="240" step="2" value="48" style="flex:1" aria-label="Brush size">
             <input type="range" data-id="bhard" min="0" max="100" step="5" value="70" style="flex:1" aria-label="Brush hardness">
           </div></div>
+        <div class="pt-row">
+          <button class="ee-btn pt-btn" data-id="cutgo">✂ Cut Out</button>
+          <button class="ee-btn pt-btn" data-id="restorecut">↩ Undo cut</button>
+        </div>
+        <div class="pt-hint">Cut Out runs rmbg on the selected layer into its
+          own mask channel — the original pixels are never touched, and Undo
+          cut drops the mask at any time.</div>
         <div class="pt-row">
           <button class="ee-btn pt-btn" data-id="maskreset">Reset mask</button>
           <button class="ee-btn pt-btn" data-id="undo">↩ Undo</button>
@@ -139,19 +148,18 @@ registerModule({
       <div class="pt-layers">
         <div class="pt-sec">Layers <span data-id="lcount"></span></div>
         <div class="pt-llist" data-id="llist"></div>
-        <div class="pt-hint">Top of the list paints last (on top). Select a layer,
-          then drag it on stage; corners resize (Shift = free-stretch), the
-          stalk rotates. Erase paints the layer's mask — the pixels are
-          never destroyed, Reset mask brings everything back. ✂ Cut Out runs
-          rmbg into that same mask discipline: the original is never touched
-          and ↩ Restore undoes it at any time.</div>
+        <div class="pt-hint">Top of the list paints last (on top). Click a layer
+          to select it (click again to deselect); drag it on stage, corners
+          resize (Shift = free-stretch), the stalk rotates. Erase works the
+          selected layer's mask in every step — the pixels are never
+          destroyed, and whatever shows through is whatever is underneath.</div>
       </div>
     </div>`;
     const $ = id => panel.querySelector(`[data-id="${id}"]`);
     const ids = ['conn', 'pname', 'popen', 'pnew', 'psave', 'savestat', 'preset', 'cw', 'ch',
       'apply-size', 'bgprompt', 'bggen', 'bgup', 'bgclear', 'bgfile', 'add', 'afile',
       'steps', 'fillclear', 'fillhint', 'fillgo', 'fillnote',
-      'tools', 'bsize', 'bsize-val', 'bhard', 'bhard-val', 'maskreset', 'undo', 'redo',
+      'tools', 'bsize', 'bsize-val', 'bhard', 'bhard-val', 'cutgo', 'restorecut', 'maskreset', 'undo', 'redo',
       'rprompt', 'denoise', 'dval', 'engines', 'rmodes', 'rmnote', 'render', 'expng', 'exjson', 'status',
       'stagewrap', 'stage', 'bgimg', 'fillov', 'dropind', 'empty', 'preview', 'previewimg', 'pvnote', 'pvaccept',
       'pvdiscard', 'lcount', 'llist'];
@@ -362,6 +370,7 @@ registerModule({
       refit();
       updateFillHint();
       updateFillUI();
+      updateCutUI();
       renderLayerList();
     }
 
@@ -385,34 +394,22 @@ registerModule({
         });
         const nm = document.createElement('span');
         nm.className = 'nm'; nm.textContent = layer.name; nm.title = layer.name;
-        nm.addEventListener('click', () => { selectedId = layer.id; renderStage(); });
+        nm.addEventListener('click', ev => { ev.stopPropagation(); toggleSelect(layer.id); });
         const line1 = document.createElement('div');
         line1.className = 'pt-lr';
         line1.append(eye, nm, mk('✕', 'remove layer', () => removeLayer(layer.id)));
         const line2 = document.createElement('div');
         line2.className = 'pt-lr';
-        // Amendment D: Cut Out / Restore — discrete, per-layer, reversible.
-        const r0 = rt.get(layer.id);
-        const hasCut = !!(layer.cutout || (r0 && r0.cutTouched));
-        let cutBtn;
-        if (cutPending.has(layer.id)) {
-          cutBtn = mk('⏳ Cutting out…', 'rmbg is running for this layer', () => {}, true);
-          cutBtn.classList.add('busy');
-        } else if (hasCut) {
-          cutBtn = mk('↩ Restore', 'drop the Cut Out mask — full original returns', () => restoreCut(layer));
-        } else {
-          cutBtn = mk('✂ Cut Out', 'run rmbg; the result becomes this layer\'s mask (original pixels untouched)', () => cutOut(layer));
-        }
-        cutBtn.classList.add('pt-cut');
+        // v1.3.1: Cut Out / Undo cut moved to Tools (they act on the
+        // selection now) — the rows keep identity + stacking only.
         line2.append(
           mk('⤒', 'send to front', () => zop(layer.id, 'front')),
           mk('↑', 'raise', () => zop(layer.id, 'up')),
           mk('↓', 'lower', () => zop(layer.id, 'down')),
           mk('⤓', 'send to back', () => zop(layer.id, 'back')),
-          mk('⇓', 'merge down into the layer below (or the background) — masks consolidate', () => mergeDown(layer)),
-          cutBtn);
+          mk('⇓', 'merge down into the layer below (or the background) — masks consolidate', () => mergeDown(layer)));
         row.append(line1, line2);
-        row.addEventListener('click', () => { selectedId = layer.id; renderStage(); });
+        row.addEventListener('click', () => toggleSelect(layer.id));
         el.llist.appendChild(row);
       }
     }
@@ -884,7 +881,7 @@ registerModule({
         renderStage();
         loadLayerImage(layer, srcUrl);
         commit();
-        say(`Placed “${layer.name}” (original). ✂ Cut Out is on its layer row when you want the background gone.`, 'ok');
+        say(`Placed “${layer.name}” (original). ✂ Cut Out is in Tools when you want the background gone.`, 'ok');
       } finally { dropSay(''); }
     }
     async function addPuppetFiles(files) {
@@ -912,7 +909,8 @@ registerModule({
     async function cutOut(layer) {
       if (cutPending.has(layer.id)) return;    // one job per layer
       cutPending.add(layer.id);
-      renderLayerList();                       // button flips to spinner NOW
+      setBusy(el.cutgo, true, '✂ Cutting out…');   // feedback within the click
+      updateCutUI();
       try {
         const r = runtimeFor(layer);
         const dataUrl = await originalDataURL(layer, r);
@@ -920,12 +918,13 @@ registerModule({
         loadCutDataURL(layer, r, 'data:image/png;base64,' + out);
         r.cutDirty = true;
         commit();
-        say(`Cut Out applied to “${layer.name}” — it's a mask; ↩ Restore brings the full original back.`, 'ok');
+        say(`Cut Out applied to “${layer.name}” — it's a mask; ↩ Undo cut in Tools brings the full original back.`, 'ok');
       } catch (e) {
         say(`Cut Out failed for “${layer.name}”: ${e.message}`, 'err');
       } finally {
         cutPending.delete(layer.id);
-        renderLayerList();
+        setBusy(el.cutgo, false);
+        updateCutUI();
       }
     }
     function restoreCut(layer) {
@@ -936,8 +935,27 @@ registerModule({
       refreshDisplay(layer);
       commit();
       renderLayerList();
+      updateCutUI();
       say(`“${layer.name}” restored — full original, no cut mask.`, 'ok');
     }
+
+    // Cut Out / Undo cut live in Tools now (v1.3.1) and act on the
+    // SELECTED layer; their enabled state follows the selection.
+    function toggleSelect(id) {
+      selectedId = (selectedId === id) ? null : id;
+      renderStage();
+    }
+    function updateCutUI() {
+      const sel = selected();
+      el.cutgo.disabled = !sel || cutPending.size > 0;
+      el.cutgo.title = sel ? `run rmbg on “${sel.name}” — result becomes its cut mask`
+                           : 'select a layer first';
+      const r = sel ? runtimeFor(sel) : null;
+      el.restorecut.disabled = !(sel && (sel.cutout || (r && r.cutTouched)));
+      el.restorecut.title = sel ? `drop “${sel.name}”'s Cut Out mask` : 'select a layer first';
+    }
+    el.cutgo.addEventListener('click', () => { const s = selected(); if (s) cutOut(s); });
+    el.restorecut.addEventListener('click', () => { const s = selected(); if (s) restoreCut(s); });
 
     // ------------------------------------------------ v1.3 layer operations
     // Extend a layer's canvas to full project bounds — PERMANENT (the
@@ -1141,6 +1159,17 @@ registerModule({
             selectedId = hit.id;
             renderStage();
             say(`Fill Area re-scoped to “${hit.name}”.`);
+            return;
+          }
+          // Erase/Restore are LAYER tools in every step (v1.3.1): with a
+          // layer selected they work that layer's nondestructive mask —
+          // pass-through cleanup for whatever Cut Out missed — and never
+          // the Fill Area mask. Paint is the fill-mask brush here.
+          if (tool === 'erase' || tool === 'restore') {
+            op = { type: 'mask', id: sel.id, last: pt, moved: false };
+            el.stage.setPointerCapture(e.pointerId);
+            stampAt(sel, pt);
+            e.preventDefault();
             return;
           }
           op = { type: 'fill', scoped: true, clip: buildClipCanvas(sel), last: pt, moved: false };
