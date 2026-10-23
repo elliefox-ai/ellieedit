@@ -373,3 +373,29 @@ def test_puppet_module_wiring_and_fence():
     assert "DENOISE_MIN = 0.4" in core and "DENOISE_MAX = 0.5" in core
     assert 'min="0.4" max="0.5"' in src          # the slider itself is fenced
     assert (mods / "puppet.css").exists()
+
+
+def test_puppet_v11_fill_area_and_cutout_wiring():
+    """v1.1 (WORKORDER puppet-render-mask): the Fill Area step, the render
+    mode choice, per-layer Cut Out/Restore, and the Amendment A/C plumbing
+    must all be wired in the module — and the drop path must NOT call rmbg
+    anymore (Amendment D1: drops place the original immediately)."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    src = (mods / "puppet.js").read_text()
+    core = (mods / "puppet-core.js").read_text()
+    for needle in ('data-step="fill"', 'data-id="fillclear"', 'data-id="fillov"',
+                   'data-rmode="fill"', 'data-rmode="all"', 'data-id="rmnote"',
+                   'data-id="dropind"', 'Cut Out', 'Restore',
+                   'rendermask', 'planRestore', 'runRestore', 'loadImageDecoded',
+                   'setBusy', 'mode: renderMode', 'mask_used'):
+        assert needle in src, needle
+    for needle in ('planRestore', 'runRestore', 'grayMaskIsEmpty',
+                   'resolveRenderMask', 'rendermask', 'cutout'):
+        assert needle in core, needle
+    # the drop path is originals-only now: addPuppetFile must not await rmbg
+    add_fn = src.split('async function addPuppetFile')[1].split('async function addPuppetFiles')[0]
+    assert 'rmbg(' not in add_fn
+    assert 'fileToDataURL' in add_fn
+    # rmbg survives exactly where Amendment D puts it: the Cut Out action
+    cut_fn = src.split('async function cutOut')[1].split('function restoreCut')[0]
+    assert 'rmbg(' in cut_fn and 'cutPending' in cut_fn

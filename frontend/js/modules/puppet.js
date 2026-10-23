@@ -7,7 +7,8 @@
 import { registerModule } from '../shell.js';
 import { clampDenoise, presetSize, normalizeState, defaultState, fitPlacement,
   moveLayerZ, stageToLocal, localToStage, handlePositions, resizeRect,
-  rotationFromPointer, pointerAngle, History, CANVAS_PRESETS } from './puppet-core.js';
+  rotationFromPointer, pointerAngle, History, CANVAS_PRESETS,
+  planRestore, runRestore, grayMaskIsEmpty, resolveRenderMask } from './puppet-core.js';
 
 const API = '/api/puppet';
 const FOX = '/api/foxden';
@@ -62,8 +63,19 @@ registerModule({
         <div class="pt-sec">Puppets</div>
         <button class="ee-btn primary pt-go" data-id="add">＋ Add puppet images</button>
         <input type="file" accept="image/*" multiple data-id="afile" style="display:none">
-        <div class="pt-hint">…or drop images straight onto the stage. Backgrounds are
-          removed automatically; the cutout is placed as baked pixels.</div>
+        <div class="pt-hint">…or drop images straight onto the stage — they place
+          instantly, exactly as dropped. Background removal is a separate,
+          reversible step: ✂ Cut Out on the layer (Amendment D).</div>
+        <div class="pt-sec">Stage step</div>
+        <div class="pt-row" data-id="steps">
+          <button class="ee-btn pt-btn on" data-step="place">🧩 Place</button>
+          <button class="ee-btn pt-btn" data-step="fill">🖌 Fill Area</button>
+          <button class="ee-btn pt-btn" data-id="fillclear">Clear fill</button>
+        </div>
+        <div class="pt-hint" data-id="fillhint" style="display:none">Fill Area: paint
+          where generation should happen (white = fill, everything else stays
+          locked). Brush paints fill; the Erase tool paints lock. Undo and
+          Clear work; the tint only shows during this step.</div>
         <div class="pt-sec">Tools</div>
         <div class="pt-row" data-id="tools">
           <button class="ee-btn pt-btn on" data-tool="move">✥ Move</button>
@@ -85,6 +97,11 @@ registerModule({
           <input type="text" data-id="rprompt" placeholder="golden hour, soft rim light…"></div>
         <div><label>Denoise <span data-id="dval">0.45</span> — fenced 0.40–0.50</label>
           <input type="range" data-id="denoise" min="0.4" max="0.5" step="0.01" value="0.45" aria-label="Final pass denoise"></div>
+        <div class="pt-row" data-id="rmodes">
+          <button class="ee-btn pt-btn on" data-rmode="fill">Fill Area only</button>
+          <button class="ee-btn pt-btn" data-rmode="all">Render all</button>
+        </div>
+        <div class="pt-hint" data-id="rmnote"></div>
         <button class="ee-btn primary pt-go" data-id="render">✨ Render final pass</button>
         <div class="pt-sec">Export</div>
         <div class="pt-row">
@@ -97,8 +114,10 @@ registerModule({
         <div class="pt-stagewrap" data-id="stagewrap">
           <div class="pt-stage" data-id="stage">
             <img class="pt-bg" data-id="bgimg" alt="">
+            <canvas class="pt-fillov" data-id="fillov"></canvas>
             <div class="pt-empty" data-id="empty">Drop puppet images here — poses stay exactly as placed.</div>
           </div>
+          <div class="pt-dropind" data-id="dropind"></div>
           <div class="pt-preview" data-id="preview">
             <img data-id="previewimg" alt="final pass preview">
             <div class="pt-pvbar">
@@ -115,15 +134,18 @@ registerModule({
         <div class="pt-hint">Top of the list paints last (on top). Select a layer,
           then drag it on stage; corners resize (Shift = free-stretch), the
           stalk rotates. Erase paints the layer's mask — the pixels are
-          never destroyed, Reset mask brings everything back.</div>
+          never destroyed, Reset mask brings everything back. ✂ Cut Out runs
+          rmbg into that same mask discipline: the original is never touched
+          and ↩ Restore undoes it at any time.</div>
       </div>
     </div>`;
     const $ = id => panel.querySelector(`[data-id="${id}"]`);
     const ids = ['conn', 'pname', 'popen', 'pnew', 'psave', 'savestat', 'preset', 'cw', 'ch',
       'apply-size', 'bgprompt', 'bggen', 'bgup', 'bgclear', 'bgfile', 'add', 'afile',
+      'steps', 'fillclear', 'fillhint',
       'tools', 'bsize', 'bsize-val', 'bhard', 'bhard-val', 'maskreset', 'undo', 'redo',
-      'rprompt', 'denoise', 'dval', 'render', 'expng', 'exjson', 'status',
-      'stagewrap', 'stage', 'bgimg', 'empty', 'preview', 'previewimg', 'pvaccept',
+      'rprompt', 'denoise', 'dval', 'rmodes', 'rmnote', 'render', 'expng', 'exjson', 'status',
+      'stagewrap', 'stage', 'bgimg', 'fillov', 'dropind', 'empty', 'preview', 'previewimg', 'pvaccept',
       'pvdiscard', 'lcount', 'llist'];
     const el = Object.fromEntries(ids.map(k => [k, $(k)]));
 
@@ -137,6 +159,37 @@ registerModule({
     const rt = new Map();                  // layer id -> runtime (canvases, urls)
     const history = new History(50);
     let bgUrl = '';                        // object/data/asset URL for the stage bg
+    // v1.1: stage step (place | fill), final-pass mask choice, per-layer
+    // rmbg jobs in flight, and the canvas-level Fill Area mask. The fill
+    // canvas is grayscale RGB at canvas resolution: white = regenerate,
+    // black = locked; an all-black canvas is "no fill painted".
+    let step = 'place';
+    let renderMode = 'fill';
+    const cutPending = new Set();
+    const fillCv = document.createElement('canvas');
+    const fillCx = fillCv.getContext('2d', { willReadFrequently: true });
+    const fill = { touched: false, dirty: false, ovAt: 0 };
+
+    // Amendment A: no silent waits. Every async action marks its control
+    // busy SYNCHRONOUSLY (same tick as the click/drop, well under 200ms)
+    // and clears it when done; failures surface in the status line.
+    function setBusy(btn, on, label) {
+      if (!btn) return;
+      if (on) {
+        if (btn.dataset.label === undefined) btn.dataset.label = btn.textContent;
+        btn.disabled = true;
+        btn.classList.add('busy');
+        if (label) btn.textContent = label;
+      } else {
+        btn.disabled = false;
+        btn.classList.remove('busy');
+        if (btn.dataset.label !== undefined) { btn.textContent = btn.dataset.label; delete btn.dataset.label; }
+      }
+    }
+    function dropSay(msg) {
+      el.dropind.textContent = msg || '';
+      el.dropind.style.display = msg ? 'block' : 'none';
+    }
 
     const say = (msg, cls = '') => { el.status.textContent = msg; el.status.className = 'pt-status ' + cls; };
     const saveNote = msg => { el.savestat.textContent = msg; };
@@ -169,10 +222,13 @@ registerModule({
       rot.title = 'drag to rotate';
       wrap.appendChild(rot);
       const mask = document.createElement('canvas');
+      const cut = document.createElement('canvas');
       r = { wrap, cv, ctx: cv.getContext('2d', { willReadFrequently: true }),
             mask, mctx: mask.getContext('2d'), img: null,
-            cutoutUrl: '', sourceDataUrl: '', cutoutDataUrl: '',
-            maskTouched: false, maskDirty: false };
+            cut, cctx: cut.getContext('2d'),   // rmbg Cut Out mask (v1.1 D)
+            baseUrl: '', sourceDataUrl: '',
+            maskTouched: false, maskDirty: false,
+            cutTouched: false, cutDirty: false };
       rt.set(layer.id, r);
       el.stage.appendChild(wrap);
       return r;
@@ -189,6 +245,20 @@ registerModule({
       r.maskTouched = false;
     }
 
+    // The Cut Out mask uses the same canvas discipline as the erase mask
+    // (white RGB, alpha = keep) but lives in its own channel: clearing it
+    // (alpha 0 everywhere) means "no cut applied" — the full original
+    // shows. Reset = Restore in Amendment D terms.
+    function resetCut(r, w, h) {
+      r.cut.width = Math.max(1, w || r.cut.width || 1);
+      r.cut.height = Math.max(1, h || r.cut.height || 1);
+      r.cctx.save();
+      r.cctx.globalCompositeOperation = 'source-over';
+      r.cctx.clearRect(0, 0, r.cut.width, r.cut.height);
+      r.cctx.restore();
+      r.cutTouched = false;
+    }
+
     function refreshDisplay(layer) {
       const r = runtimeFor(layer);
       if (!r.img) return;
@@ -201,13 +271,14 @@ registerModule({
       c.globalCompositeOperation = 'source-over';
       c.drawImage(r.img, 0, 0, nw, nh);
       c.globalCompositeOperation = 'destination-in';   // mask ALPHA keeps/erases
+      if (r.cutTouched) c.drawImage(r.cut, 0, 0, nw, nh);  // Cut Out mask first
       c.drawImage(r.mask, 0, 0);
       c.globalCompositeOperation = 'source-over';
     }
 
     function loadLayerImage(layer, url) {
       const r = runtimeFor(layer);
-      r.cutoutUrl = url;
+      r.baseUrl = url;
       const img = new Image();
       img.onload = () => {
         r.img = img;
@@ -216,6 +287,24 @@ registerModule({
       };
       img.src = url;
     }
+
+    // Load an image and resolve only once it is DECODED (Amendment C: a
+    // layer counts as restored when its pixels are actually paintable,
+    // not when a fetch merely started). Rejects on error so callers can
+    // retry / fall back / report instead of silently showing nothing.
+    function loadImageDecoded(url) {
+      return new Promise((res, rej) => {
+        const img = new Image();
+        img.onload = () => {
+          if (img.decode) img.decode().then(() => res(img), () => res(img));
+          else res(img);
+        };
+        img.onerror = () => rej(new Error('image failed to load'));
+        img.src = url;
+      });
+    }
+    const assetUrl = file => (projectId && file)
+      ? `${API}/projects/${projectId}/assets/${file}` : '';
 
     function positionLayerEl(layer) {
       const r = runtimeFor(layer);
@@ -237,6 +326,7 @@ registerModule({
       }
       el.stage.style.width = state.canvas.width + 'px';
       el.stage.style.height = state.canvas.height + 'px';
+      syncFillSize();
       el.bgimg.style.display = state.canvas.background.type === 'image' && bgUrl ? '' : 'none';
       if (bgUrl) el.bgimg.src = bgUrl;
       el.empty.style.display = state.layers.length ? 'none' : '';
@@ -272,12 +362,31 @@ registerModule({
         const nm = document.createElement('span');
         nm.className = 'nm'; nm.textContent = layer.name; nm.title = layer.name;
         nm.addEventListener('click', () => { selectedId = layer.id; renderStage(); });
-        row.append(eye, nm,
+        const line1 = document.createElement('div');
+        line1.className = 'pt-lr';
+        line1.append(eye, nm, mk('✕', 'remove layer', () => removeLayer(layer.id)));
+        const line2 = document.createElement('div');
+        line2.className = 'pt-lr';
+        // Amendment D: Cut Out / Restore — discrete, per-layer, reversible.
+        const r0 = rt.get(layer.id);
+        const hasCut = !!(layer.cutout || (r0 && r0.cutTouched));
+        let cutBtn;
+        if (cutPending.has(layer.id)) {
+          cutBtn = mk('⏳ Cutting out…', 'rmbg is running for this layer', () => {}, true);
+          cutBtn.classList.add('busy');
+        } else if (hasCut) {
+          cutBtn = mk('↩ Restore', 'drop the Cut Out mask — full original returns', () => restoreCut(layer));
+        } else {
+          cutBtn = mk('✂ Cut Out', 'run rmbg; the result becomes this layer\'s mask (original pixels untouched)', () => cutOut(layer));
+        }
+        cutBtn.classList.add('pt-cut');
+        line2.append(
           mk('⤒', 'send to front', () => zop(layer.id, 'front')),
           mk('↑', 'raise', () => zop(layer.id, 'up')),
           mk('↓', 'lower', () => zop(layer.id, 'down')),
           mk('⤓', 'send to back', () => zop(layer.id, 'back')),
-          mk('✕', 'remove layer', () => removeLayer(layer.id)));
+          cutBtn);
+        row.append(line1, line2);
         row.addEventListener('click', () => { selectedId = layer.id; renderStage(); });
         el.llist.appendChild(row);
       }
@@ -302,8 +411,20 @@ registerModule({
       }
       return out;
     }
+    function serializeCuts() {
+      const out = {};
+      for (const layer of state.layers) {
+        const r = rt.get(layer.id);
+        // The cut canvas itself (white RGB, alpha = keep) round-trips
+        // through PNG alpha, so snapshots store it verbatim; the GRAYSCALE
+        // conversion happens only at server-upload time.
+        if (r && r.cutTouched) out[layer.id] = r.cut.toDataURL('image/png');
+      }
+      return out;
+    }
     function snapshot() {
-      return JSON.stringify({ state, masks: serializeMasks() });
+      return JSON.stringify({ state, masks: serializeMasks(), cuts: serializeCuts(),
+        fill: fill.touched ? fillCv.toDataURL('image/png') : null });
     }
     function commit() {                      // a finished, undoable change
       history.push(snapshot());
@@ -311,7 +432,7 @@ registerModule({
     }
     function restore(snap) {
       try {
-        const { state: st, masks } = JSON.parse(snap);
+        const { state: st, masks, cuts, fill: fillData } = JSON.parse(snap);
         state = normalizeState(st);
         selectedId = state.layers.some(l => l.id === selectedId) ? selectedId : null;
         renderStage();
@@ -320,6 +441,27 @@ registerModule({
           const md = masks && masks[layer.id];
           if (md) loadMaskDataURL(layer, r, md);
           else if (r.maskTouched) { resetMask(r, layer.natural_w || r.mask.width, layer.natural_h || r.mask.height); refreshDisplay(layer); }
+          const cd = cuts && cuts[layer.id];
+          if (cd) loadCutDataURL(layer, r, cd);
+          else if (r.cutTouched) { resetCut(r, layer.natural_w || r.cut.width, layer.natural_h || r.cut.height); refreshDisplay(layer); }
+        }
+        // Fill Area channel restores independently of the layer masks —
+        // undoing a fill stroke must never touch a layer's erase mask.
+        if (fillData) {
+          const img = new Image();
+          img.onload = () => {
+            syncFillSize();
+            fillCx.save();
+            fillCx.globalCompositeOperation = 'source-over';
+            fillCx.fillStyle = '#000'; fillCx.fillRect(0, 0, fillCv.width, fillCv.height);
+            fillCx.drawImage(img, 0, 0, fillCv.width, fillCv.height);
+            fillCx.restore();
+            fill.touched = true; fill.dirty = true;
+            refreshFillOverlay(true); updateRenderNote();
+          };
+          img.src = fillData;
+        } else if (fill.touched) {
+          clearFill(false); fill.dirty = true; updateRenderNote();
         }
         scheduleSave();
       } catch (e) { say('undo state unreadable: ' + e.message, 'err'); }
@@ -328,11 +470,13 @@ registerModule({
     el.redo.addEventListener('click', () => { const s = history.redo(); if (s !== null) restore(s); });
 
     // Mask <-> grayscale dataURL (server assets are L-mode: white = keep).
-    function maskToGrayDataURL(r) {
+    // The alpha-mask canvas rep keeps visibility in ALPHA (white RGB);
+    // the wire/storage rep is grayscale (gray = keep).
+    function alphaMaskToGrayDataURL(cv) {
       const t = document.createElement('canvas');
-      t.width = r.mask.width; t.height = r.mask.height;
+      t.width = cv.width; t.height = cv.height;
       const c = t.getContext('2d');
-      c.drawImage(r.mask, 0, 0);
+      c.drawImage(cv, 0, 0);
       const d = c.getImageData(0, 0, t.width, t.height);
       for (let i = 0; i < d.data.length; i += 4) {
         const a = d.data[i + 3];
@@ -341,27 +485,68 @@ registerModule({
       c.putImageData(d, 0, 0);
       return t.toDataURL('image/png');
     }
-    function loadMaskDataURL(layer, r, dataUrl) {
+    function maskToGrayDataURL(r) { return alphaMaskToGrayDataURL(r.mask); }
+    // Paint a loaded GRAYSCALE mask image into an alpha-mask canvas.
+    function paintGrayIntoMask(img, cv, cx2) {
+      const t = document.createElement('canvas');
+      t.width = img.naturalWidth; t.height = img.naturalHeight;
+      const tc = t.getContext('2d');
+      tc.drawImage(img, 0, 0);
+      const d = tc.getImageData(0, 0, t.width, t.height);
+      for (let i = 0; i < d.data.length; i += 4) {
+        d.data[i + 3] = d.data[i];         // gray -> alpha; rgb forced white below
+        d.data[i] = 255; d.data[i + 1] = 255; d.data[i + 2] = 255;
+      }
+      tc.putImageData(d, 0, 0);
+      cx2.save();
+      cx2.globalCompositeOperation = 'source-over';
+      cx2.clearRect(0, 0, cv.width, cv.height);
+      cx2.drawImage(t, 0, 0, cv.width, cv.height);
+      cx2.restore();
+    }
+    // The Cut Out mask starts life as an rmbg RGBA cutout: its ALPHA is
+    // the subject. Convert alpha -> the alpha-mask channel.
+    function loadCutDataURL(layer, r, dataUrl) {
       const img = new Image();
       img.onload = () => {
         const nw = layer.natural_w || img.naturalWidth;
         const nh = layer.natural_h || img.naturalHeight;
-        r.mask.width = nw; r.mask.height = nh;
+        r.cut.width = nw; r.cut.height = nh;
         const t = document.createElement('canvas');
         t.width = img.naturalWidth; t.height = img.naturalHeight;
         const tc = t.getContext('2d');
         tc.drawImage(img, 0, 0);
         const d = tc.getImageData(0, 0, t.width, t.height);
         for (let i = 0; i < d.data.length; i += 4) {
-          d.data[i + 3] = d.data[i];         // gray -> alpha; rgb forced white below
-          d.data[i] = 255; d.data[i + 1] = 255; d.data[i + 2] = 255;
+          const keep = d.data[i + 3];      // alpha carries the subject
+          d.data[i] = 255; d.data[i + 1] = 255; d.data[i + 2] = 255; d.data[i + 3] = keep;
         }
         tc.putImageData(d, 0, 0);
-        r.mctx.save();
-        r.mctx.globalCompositeOperation = 'source-over';
-        r.mctx.clearRect(0, 0, nw, nh);
-        r.mctx.drawImage(t, 0, 0, nw, nh);
-        r.mctx.restore();
+        r.cctx.save();
+        r.cctx.globalCompositeOperation = 'source-over';
+        r.cctx.clearRect(0, 0, nw, nh);
+        r.cctx.drawImage(t, 0, 0, nw, nh);
+        r.cctx.restore();
+        r.cutTouched = true;
+        refreshDisplay(layer);
+      };
+      img.src = dataUrl;
+    }
+    function loadCutGrayImage(layer, r, img) {
+      const nw = layer.natural_w || img.naturalWidth;
+      const nh = layer.natural_h || img.naturalHeight;
+      r.cut.width = nw; r.cut.height = nh;
+      paintGrayIntoMask(img, r.cut, r.cctx);
+      r.cutTouched = true;
+      refreshDisplay(layer);
+    }
+    function loadMaskDataURL(layer, r, dataUrl) {
+      const img = new Image();
+      img.onload = () => {
+        const nw = layer.natural_w || img.naturalWidth;
+        const nh = layer.natural_h || img.naturalHeight;
+        r.mask.width = nw; r.mask.height = nh;
+        paintGrayIntoMask(img, r.mask, r.mctx);
         r.maskTouched = true;
         refreshDisplay(layer);
       };
@@ -388,19 +573,34 @@ registerModule({
     }
     async function save() {
       if (saving) { saveAgain = true; return; }
-      if (!projectId && !state.layers.length && state.canvas.background.type === 'none') return;
+      if (!projectId && !state.layers.length && state.canvas.background.type === 'none' && !state.rendermask) return;
       saving = true;
       try {
         await ensureProject();
         for (const layer of state.layers) {
           const r = rt.get(layer.id);
           if (!r) continue;
-          if (!layer.asset && r.cutoutDataUrl) layer.asset = (await uploadAsset('cutout', r.cutoutDataUrl)).file;
+          // v1.1 (Amendment D): the layer's base image is its ORIGINAL.
+          // The rmbg result is only ever a mask ('cutout' asset), never
+          // the pixels themselves.
           if (!layer.source && r.sourceDataUrl) layer.source = (await uploadAsset('source', r.sourceDataUrl)).file;
+          if (!layer.asset && layer.source) layer.asset = layer.source;
           if (r.maskDirty) {
             layer.mask = (await uploadAsset('mask', maskToGrayDataURL(r))).file;
             r.maskDirty = false;
           }
+          if (r.cutDirty) {
+            layer.cutout = r.cutTouched
+              ? (await uploadAsset('cutout', alphaMaskToGrayDataURL(r.cut))).file
+              : null;                      // Restore: drop the mask reference
+            r.cutDirty = false;
+          }
+        }
+        if (fill.dirty) {
+          state.rendermask = (fill.touched && !fillIsEmptyNow())
+            ? (await uploadAsset('rendermask', fillCv.toDataURL('image/png'))).file
+            : null;                        // empty fill = no mask, by design
+          fill.dirty = false;
         }
         const j = await jsonPost(`/projects/${projectId}`, { state }, 'PUT');
         state.updated = j.state.updated;
@@ -412,7 +612,10 @@ registerModule({
         if (saveAgain) { saveAgain = false; scheduleSave(); }
       }
     }
-    el.psave.addEventListener('click', () => save());
+    el.psave.addEventListener('click', async () => {
+      setBusy(el.psave, true, '💾…');
+      try { await save(); } finally { setBusy(el.psave, false); }
+    });
     el.pname.addEventListener('input', () => { state.name = el.pname.value; scheduleSave(); });
 
     async function loadProjectList() {
@@ -423,57 +626,84 @@ registerModule({
           items.map(p => `<option value="${esc(p.id)}" ${p.id === projectId ? 'selected' : ''}>${esc(p.name)} · ${p.layers} layers</option>`).join('');
       } catch (e) { /* offline: list stays empty */ }
     }
+    // Amendment C: restore is AWAITED and pixel-verified. v1 fired image
+    // loads and declared the project open immediately; a layer whose
+    // asset fetch failed (or whose only ref was a never-uploaded cutout)
+    // came back as panel metadata with no pixels, silently. Now the plan
+    // (puppet-core planRestore) tries asset -> source with a retry each,
+    // waits for decode, and any layer that still has no pixels is NAMED
+    // in the status line instead of vanishing.
+    async function openProject(pid) {
+      say('opening…');
+      const j = await api(`/projects/${pid}`);
+      projectId = pid;
+      try { localStorage.setItem('ellieedit.puppet.lastProject', pid); } catch (e) {}
+      state = normalizeState(j.state);
+      selectedId = null;
+      bgUrl = '';
+      el.preview.style.display = 'none';
+      rt.clear(); el.stage.querySelectorAll('.pt-layer').forEach(n => n.remove());
+      if (state.canvas.background.type === 'image' && state.canvas.background.asset) {
+        bgUrl = `${API}/projects/${pid}/assets/${state.canvas.background.asset}`;
+      }
+      renderStage();
+      await loadFillFromState();
+      const plan = planRestore(state);
+      const results = await runRestore(plan, file =>
+        loadImageDecoded(`${API}/projects/${pid}/assets/${file}`));
+      const failed = [];
+      for (const layer of state.layers) {
+        const r = runtimeFor(layer);
+        const res = results[layer.id];
+        const planned = plan.find(p => p.id === layer.id);
+        if (res && res.ok) {
+          r.img = res.value;
+          r.baseUrl = `${API}/projects/${pid}/assets/${res.file}`;
+          if (!layer.natural_w) { layer.natural_w = res.value.naturalWidth; layer.natural_h = res.value.naturalHeight; }
+          refreshDisplay(layer);
+        } else if (planned && planned.hasBase) {
+          failed.push(layer.name);
+        }
+        if (layer.mask) {
+          loadImageDecoded(`${API}/projects/${pid}/assets/${layer.mask}`)
+            .then(img => {
+              r.mask.width = layer.natural_w || img.naturalWidth;
+              r.mask.height = layer.natural_h || img.naturalHeight;
+              paintGrayIntoMask(img, r.mask, r.mctx);
+              r.maskTouched = true;
+              refreshDisplay(layer);
+            }).catch(() => say(`Erase mask for “${layer.name}” failed to load.`, 'err'));
+        }
+        if (layer.cutout) {
+          loadImageDecoded(`${API}/projects/${pid}/assets/${layer.cutout}`)
+            .then(img => loadCutGrayImage(layer, r, img))
+            .catch(() => say(`Cut Out mask for “${layer.name}” failed to load.`, 'err'));
+        }
+      }
+      history.init(snapshot());
+      updateRenderNote();
+      if (failed.length) {
+        say(`Opened “${state.name}” — ⚠ layer image(s) failed to load after retries: ${failed.join(', ')}. The layers are listed but have no pixels yet; re-adding the image fixes it.`, 'err');
+      } else {
+        say(`Opened “${state.name}” — ${state.layers.length} layer(s) restored with pixels.`, 'ok');
+      }
+    }
     el.popen.addEventListener('change', async () => {
       const pid = el.popen.value;
       if (!pid) return;
-      try {
-        say('opening…');
-        const j = await api(`/projects/${pid}`);
-        projectId = pid;
-        state = normalizeState(j.state);
-        selectedId = null;
-        bgUrl = '';
-        rt.clear(); el.stage.querySelectorAll('.pt-layer').forEach(n => n.remove());
-        if (state.canvas.background.type === 'image' && state.canvas.background.asset) {
-          bgUrl = `${API}/projects/${pid}/assets/${state.canvas.background.asset}`;
-        }
-        renderStage();
-        for (const layer of state.layers) {
-          const r = runtimeFor(layer);
-          if (layer.asset) loadLayerImage(layer, `${API}/projects/${pid}/assets/${layer.asset}`);
-          if (layer.mask) {
-            const mimg = new Image();
-            mimg.onload = () => {
-              r.mask.width = layer.natural_w || mimg.naturalWidth;
-              r.mask.height = layer.natural_h || mimg.naturalHeight;
-              const t = document.createElement('canvas');
-              t.width = mimg.naturalWidth; t.height = mimg.naturalHeight;
-              const tc = t.getContext('2d'); tc.drawImage(mimg, 0, 0);
-              const d = tc.getImageData(0, 0, t.width, t.height);
-              for (let i = 0; i < d.data.length; i += 4) {
-                d.data[i + 3] = d.data[i]; d.data[i] = 255; d.data[i + 1] = 255; d.data[i + 2] = 255;
-              }
-              tc.putImageData(d, 0, 0);
-              r.mctx.clearRect(0, 0, r.mask.width, r.mask.height);
-              r.mctx.drawImage(t, 0, 0, r.mask.width, r.mask.height);
-              r.maskTouched = true;
-              refreshDisplay(layer);
-            };
-            mimg.src = `${API}/projects/${pid}/assets/${layer.mask}`;
-          }
-        }
-        history.init(snapshot());
-        say(`Opened “${state.name}”.`, 'ok');
-      } catch (e) { say(e.message, 'err'); }
+      try { await openProject(pid); } catch (e) { say(e.message, 'err'); }
     });
     el.pnew.addEventListener('click', () => {
       projectId = null; selectedId = null; bgUrl = ''; previewAsset = null;
+      try { localStorage.removeItem('ellieedit.puppet.lastProject'); } catch (e) {}
       state = defaultState();
       const last = readLastSize();
       if (last) { state.canvas.width = last.width; state.canvas.height = last.height; el.preset.value = 'last'; }
       rt.clear(); el.stage.querySelectorAll('.pt-layer').forEach(n => n.remove());
       el.preview.style.display = 'none';
       renderStage();
+      clearFill(false); fill.dirty = false;
+      updateRenderNote();
       history.init(snapshot());
       say('Fresh stage. Drop some puppets.');
     });
@@ -529,16 +759,19 @@ registerModule({
     el.bgfile.addEventListener('change', async () => {
       const f = el.bgfile.files[0]; el.bgfile.value = '';
       if (!f) return;
+      setBusy(el.bgup, true, '⬆ Uploading…');
       try {
         const durl = await fileToDataURL(f);
         const up = await uploadAsset('background', durl);
         setBackground(up.file, up.url);
         say('Background set from upload.', 'ok');
       } catch (e) { say(e.message, 'err'); }
+      finally { setBusy(el.bgup, false); }
     });
     el.bggen.addEventListener('click', async () => {
       const prompt = el.bgprompt.value.trim();
       if (!prompt) { say('Type a background prompt first.', 'err'); return; }
+      setBusy(el.bggen, true, '🎨 Generating…');
       try {
         say('generating background (FoxDen path)…');
         const r = await fetch(FOX + '/generate', { method: 'POST',
@@ -554,6 +787,7 @@ registerModule({
         setBackground(up.file, up.url);
         say('Background generated.', 'ok');
       } catch (e) { say('Background generation failed: ' + e.message, 'err'); }
+      finally { setBusy(el.bggen, false); }
     });
     async function pollFoxden(pid) {
       const t0 = Date.now();
@@ -596,35 +830,31 @@ registerModule({
       throw new Error('rmbg timed out');
     }
     let cascade = 0;
+    // Amendment D1: drop/add places the ORIGINAL image immediately — no
+    // server round-trip on the drop path at all, so the drop can never
+    // freeze behind a cold rmbg session (Amendment B's bug class, gone).
     async function addPuppetFile(f) {
-      const srcUrl = await fileToDataURL(f);
-      let cutUrl = null, note = '';
+      dropSay(`placing ${f.name}…`);           // feedback in the same tick
       try {
-        say(`removing background: ${f.name}…`);
-        const out = await rmbg(srcUrl);
-        cutUrl = 'data:image/png;base64,' + out;
-      } catch (e) {
-        note = ` (rmbg unavailable — placed uncut: ${e.message})`;
-      }
-      const layer = normalizeState({ layers: [{ id: uid(), name: f.name.replace(/\.[^.]+$/, '') }] }).layers[0];
-      const probe = new Image();
-      await new Promise(res => { probe.onload = res; probe.onerror = res; probe.src = cutUrl || srcUrl; });
-      layer.natural_w = probe.naturalWidth || 256;
-      layer.natural_h = probe.naturalHeight || 256;
-      const place = fitPlacement(state.canvas, layer.natural_w, layer.natural_h);
-      const off = (cascade++ % 5) * 24;
-      layer.x = Math.min(place.x + off, state.canvas.width - 40);
-      layer.y = Math.min(place.y + off, state.canvas.height - 40);
-      layer.w = place.w; layer.h = place.h;
-      state.layers.push(layer);
-      selectedId = layer.id;
-      const r = runtimeFor(layer);
-      r.sourceDataUrl = srcUrl;
-      r.cutoutDataUrl = cutUrl || '';
-      renderStage();
-      loadLayerImage(layer, cutUrl || srcUrl);
-      commit();
-      say(`Placed “${layer.name}”${note}.`, note ? 'err' : 'ok');
+        const srcUrl = await fileToDataURL(f);
+        const layer = normalizeState({ layers: [{ id: uid(), name: f.name.replace(/\.[^.]+$/, '') }] }).layers[0];
+        const probe = await loadImageDecoded(srcUrl).catch(() => null);
+        layer.natural_w = (probe && probe.naturalWidth) || 256;
+        layer.natural_h = (probe && probe.naturalHeight) || 256;
+        const place = fitPlacement(state.canvas, layer.natural_w, layer.natural_h);
+        const off = (cascade++ % 5) * 24;
+        layer.x = Math.min(place.x + off, state.canvas.width - 40);
+        layer.y = Math.min(place.y + off, state.canvas.height - 40);
+        layer.w = place.w; layer.h = place.h;
+        state.layers.push(layer);
+        selectedId = layer.id;
+        const r = runtimeFor(layer);
+        r.sourceDataUrl = srcUrl;
+        renderStage();
+        loadLayerImage(layer, srcUrl);
+        commit();
+        say(`Placed “${layer.name}” (original). ✂ Cut Out is on its layer row when you want the background gone.`, 'ok');
+      } finally { dropSay(''); }
     }
     async function addPuppetFiles(files) {
       for (const f of files) {
@@ -632,6 +862,50 @@ registerModule({
           try { await addPuppetFile(f); } catch (e) { say(e.message, 'err'); }
         }
       }
+    }
+
+    // Amendment D2/D3/D4: Cut Out runs rmbg as a job (spinner lives on the
+    // layer's own button; other layers and the stage stay fully usable —
+    // jobs run in parallel) and stores the result as the layer's MASK.
+    // The original pixels are never modified; Restore drops the mask.
+    async function originalDataURL(layer, r) {
+      if (r.sourceDataUrl) return r.sourceDataUrl;
+      const file = layer.source || layer.asset;
+      if (file && projectId) {
+        const blob = await (await fetch(assetUrl(file))).blob();
+        return blobToDataURL(blob);
+      }
+      if (r.baseUrl && r.baseUrl.startsWith('data:')) return r.baseUrl;
+      throw new Error('no original image available for this layer');
+    }
+    async function cutOut(layer) {
+      if (cutPending.has(layer.id)) return;    // one job per layer
+      cutPending.add(layer.id);
+      renderLayerList();                       // button flips to spinner NOW
+      try {
+        const r = runtimeFor(layer);
+        const dataUrl = await originalDataURL(layer, r);
+        const out = await rmbg(dataUrl);
+        loadCutDataURL(layer, r, 'data:image/png;base64,' + out);
+        r.cutDirty = true;
+        commit();
+        say(`Cut Out applied to “${layer.name}” — it's a mask; ↩ Restore brings the full original back.`, 'ok');
+      } catch (e) {
+        say(`Cut Out failed for “${layer.name}”: ${e.message}`, 'err');
+      } finally {
+        cutPending.delete(layer.id);
+        renderLayerList();
+      }
+    }
+    function restoreCut(layer) {
+      const r = runtimeFor(layer);
+      resetCut(r, layer.natural_w || r.cut.width, layer.natural_h || r.cut.height);
+      layer.cutout = null;
+      r.cutDirty = true;                       // save drops the reference
+      refreshDisplay(layer);
+      commit();
+      renderLayerList();
+      say(`“${layer.name}” restored — full original, no cut mask.`, 'ok');
     }
     el.add.addEventListener('click', () => el.afile.click());
     el.afile.addEventListener('change', () => { addPuppetFiles([...el.afile.files]); el.afile.value = ''; });
@@ -670,6 +944,16 @@ registerModule({
     let op = null;
     el.stage.addEventListener('pointerdown', e => {
       const pt = stagePoint(e);
+      // Fill Area step: the canvas itself is the paint surface; layer
+      // transforms are inert here so a stroke can never move a puppet.
+      if (step === 'fill') {
+        op = { type: 'fill', last: pt, moved: false };
+        el.stage.setPointerCapture(e.pointerId);
+        stampFill(pt);
+        op.moved = true;
+        e.preventDefault();
+        return;
+      }
       const sel = selected();
       // handles of the selected layer first (they sit outside its rect too)
       if (sel && sel.visible !== false) {
@@ -711,9 +995,15 @@ registerModule({
     });
     el.stage.addEventListener('pointermove', e => {
       if (!op) return;
+      const pt = stagePoint(e);
+      if (op.type === 'fill') {
+        stampFillLine(op.last, pt);
+        op.last = pt;
+        op.moved = true;
+        return;
+      }
       const layer = state.layers.find(l => l.id === op.id);
       if (!layer) { op = null; return; }
-      const pt = stagePoint(e);
       if (op.type === 'move') {
         layer.x = Math.round(pt.x - op.grabDX);
         layer.y = Math.round(pt.y - op.grabDY);
@@ -742,6 +1032,11 @@ registerModule({
           const layer = state.layers.find(l => l.id === op.id);
           const r = layer && rt.get(layer.id);
           if (r) { r.maskDirty = true; r.maskTouched = true; }
+        }
+        if (op.type === 'fill') {
+          fill.dirty = true;
+          refreshFillOverlay(true);
+          updateRenderNote();
         }
         commit();
       }
@@ -816,12 +1111,152 @@ registerModule({
       say(`Mask reset for “${layer.name}” — everything is back.`, 'ok');
     });
 
+    // ---------------------------------------------------------- Fill Area
+    // The Fill Area step (v1.1 spec 1-3): a canvas-level paintable mask.
+    // fillCv is grayscale at canvas resolution — white regenerates, black
+    // locks. It is a SEPARATE channel from every layer mask: painting or
+    // clearing it never touches a layer's erase/cutout mask (spec item 4).
+    function syncFillSize() {
+      const w = state.canvas.width, h = state.canvas.height;
+      if (fillCv.width === w && fillCv.height === h) return;
+      const old = document.createElement('canvas');
+      old.width = fillCv.width; old.height = fillCv.height;
+      old.getContext('2d').drawImage(fillCv, 0, 0);
+      fillCv.width = w; fillCv.height = h;
+      fillCx.save();
+      fillCx.globalCompositeOperation = 'source-over';
+      fillCx.fillStyle = '#000';
+      fillCx.fillRect(0, 0, w, h);
+      if (old.width > 1) fillCx.drawImage(old, 0, 0, w, h);
+      fillCx.restore();
+    }
+    function clearFill(markDirty = true) {
+      syncFillSize();
+      fillCx.save();
+      fillCx.globalCompositeOperation = 'source-over';
+      fillCx.fillStyle = '#000';
+      fillCx.fillRect(0, 0, fillCv.width, fillCv.height);
+      fillCx.restore();
+      fill.touched = false;
+      if (markDirty) fill.dirty = true;
+      refreshFillOverlay(true);
+    }
+    function fillIsEmptyNow() {
+      try {
+        const d = fillCx.getImageData(0, 0, fillCv.width, fillCv.height).data;
+        const gray = new Uint8Array(fillCv.width * fillCv.height);
+        for (let i = 0, j = 0; i < d.length; i += 4, j++) gray[j] = d[i];
+        return grayMaskIsEmpty(gray);
+      } catch (e) { return !fill.touched; }
+    }
+    function fillPainted() { return fill.touched && !fillIsEmptyNow(); }
+    // Subtle violet tint over painted regions — only while in the step.
+    function refreshFillOverlay(force = false) {
+      if (step !== 'fill') { el.fillov.style.display = 'none'; return; }
+      const now = performance.now();
+      if (!force && now - fill.ovAt < 120) return;
+      fill.ovAt = now;
+      el.fillov.width = fillCv.width; el.fillov.height = fillCv.height;
+      el.fillov.style.display = 'block';
+      const oc = el.fillov.getContext('2d');
+      const src = fillCx.getImageData(0, 0, fillCv.width, fillCv.height);
+      const out = oc.createImageData(fillCv.width, fillCv.height);
+      for (let i = 0; i < src.data.length; i += 4) {
+        const g = src.data[i];
+        out.data[i] = 168; out.data[i + 1] = 140; out.data[i + 2] = 255;
+        out.data[i + 3] = Math.round(g * 0.5);
+      }
+      oc.putImageData(out, 0, 0);
+    }
+    function updateRenderNote() {
+      const painted = fillPainted();
+      const used = resolveRenderMask({ mode: renderMode,
+        hasFill: painted, fillEmpty: !painted });
+      if (renderMode === 'all') {
+        el.rmnote.textContent = 'Render all: the final pass repaints the whole canvas (Fill Area ignored).';
+      } else if (used === 'fill') {
+        el.rmnote.textContent = 'Fill Area only: painted regions regenerate at the fenced denoise; everything else stays locked, pixel for pixel.';
+      } else {
+        el.rmnote.textContent = 'Fill Area only — but nothing is painted yet, so this renders the full canvas (same as v1). Paint in the Fill Area step to lock regions.';
+      }
+    }
+    async function loadFillFromState() {
+      clearFill(false);
+      fill.dirty = false;
+      if (!state.rendermask || !projectId) { refreshFillOverlay(true); return; }
+      try {
+        const img = await loadImageDecoded(assetUrl(state.rendermask));
+        syncFillSize();
+        fillCx.save();
+        fillCx.globalCompositeOperation = 'source-over';
+        fillCx.fillStyle = '#000'; fillCx.fillRect(0, 0, fillCv.width, fillCv.height);
+        fillCx.drawImage(img, 0, 0, fillCv.width, fillCv.height);
+        fillCx.restore();
+        fill.touched = !fillIsEmptyNow();
+      } catch (e) { say('Fill Area mask failed to load — treating as empty.', 'err'); }
+      refreshFillOverlay(true);
+    }
+    function stampFill(pt) {
+      const radius = Math.max(1, (parseFloat(el.bsize.value) || 48) / 2);
+      const hardness = (parseFloat(el.bhard.value) || 0) / 100;
+      const white = tool !== 'erase';          // Erase tool = paint LOCK
+      const g = fillCx.createRadialGradient(pt.x, pt.y, radius * hardness, pt.x, pt.y, radius);
+      const rgb = white ? '255,255,255' : '0,0,0';
+      g.addColorStop(0, `rgba(${rgb},1)`);
+      g.addColorStop(Math.min(0.999, hardness + (1 - hardness) * 0.5), `rgba(${rgb},0.5)`);
+      g.addColorStop(1, `rgba(${rgb},0)`);
+      fillCx.save();
+      fillCx.globalCompositeOperation = 'source-over';
+      fillCx.fillStyle = g;
+      fillCx.beginPath(); fillCx.arc(pt.x, pt.y, radius, 0, Math.PI * 2); fillCx.fill();
+      fillCx.restore();
+      fill.touched = true;
+      refreshFillOverlay();
+    }
+    function stampFillLine(a, b) {
+      const radius = Math.max(1, (parseFloat(el.bsize.value) || 48) / 2);
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      const steps = Math.max(1, Math.floor(dist / Math.max(1, radius / 3)));
+      for (let i = 1; i <= steps; i++) {
+        stampFill({ x: a.x + (b.x - a.x) * i / steps, y: a.y + (b.y - a.y) * i / steps });
+      }
+    }
+    function enterStep(next) {
+      step = next;
+      el.steps.querySelectorAll('[data-step]').forEach(x =>
+        x.classList.toggle('on', x.dataset.step === next));
+      el.fillhint.style.display = next === 'fill' ? '' : 'none';
+      el.stage.classList.toggle('filling', next === 'fill');
+      refreshFillOverlay(true);
+      updateRenderNote();
+      if (next === 'fill') say('Fill Area: paint where generation should happen. Brush = fill, Erase tool = lock.');
+    }
+    el.steps.addEventListener('click', e => {
+      const b = e.target.closest('[data-step]');
+      if (b) enterStep(b.dataset.step);
+    });
+    el.fillclear.addEventListener('click', () => {
+      clearFill(true);
+      updateRenderNote();
+      commit();
+      say('Fill Area cleared — the next render covers the full canvas.');
+    });
+    el.rmodes.addEventListener('click', e => {
+      const b = e.target.closest('[data-rmode]');
+      if (!b) return;
+      renderMode = b.dataset.rmode;
+      el.rmodes.querySelectorAll('[data-rmode]').forEach(x =>
+        x.classList.toggle('on', x === b));
+      updateRenderNote();
+    });
+
     // ------------------------------------------------------------- render
     el.denoise.addEventListener('input', () => {
       const d = clampDenoise(parseFloat(el.denoise.value));
       el['dval'].textContent = d.toFixed(2);
     });
     el.render.addEventListener('click', async () => {
+      setBusy(el.render, true, '✨ Rendering…');   // state shows immediately
       try {
         say('saving stack, then rendering the final pass…');
         await save();
@@ -829,12 +1264,14 @@ registerModule({
         const j = await jsonPost(`/projects/${projectId}/render`, {
           prompt: el.rprompt.value.trim(),
           denoise: clampDenoise(parseFloat(el.denoise.value)),
+          mode: renderMode,
           seed: Math.floor(Math.random() * 2 ** 31) });
         previewAsset = j.render_asset || null;
         el.previewimg.src = 'data:image/png;base64,' + j.image_b64;
         el.preview.style.display = 'flex';
-        say(`Final pass done at denoise ${Number(j.denoise).toFixed(2)} — accept or discard.`, 'ok');
+        say(`Final pass done at denoise ${Number(j.denoise).toFixed(2)} (mask: ${j.mask_used === 'fill' ? 'Fill Area' : 'full canvas'}) — accept or discard.`, 'ok');
       } catch (e) { say('Render failed: ' + e.message, 'err'); }
+      finally { setBusy(el.render, false); }
     });
     el.pvdiscard.addEventListener('click', () => {
       el.preview.style.display = 'none';
@@ -871,6 +1308,7 @@ registerModule({
       setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     }
     el.expng.addEventListener('click', async () => {
+      setBusy(el.expng, true, '⬇ Exporting…');
       try {
         await save();
         if (!projectId) throw new Error('nothing to export yet');
@@ -879,6 +1317,7 @@ registerModule({
         downloadBlob(await r.blob(), `puppet-${projectId}.png`);
         say('Composite PNG exported at canvas resolution.', 'ok');
       } catch (e) { say('Export failed: ' + e.message, 'err'); }
+      finally { setBusy(el.expng, false); }
     });
     el.exjson.addEventListener('click', async () => {
       try {
@@ -902,17 +1341,26 @@ registerModule({
         const rm = c.rmbg || {};
         el.conn.textContent = rm.available
           ? '● rmbg ready · denoise fence 0.40–0.50'
-          : '○ rmbg not available on server (drops place uncut)';
+          : '○ rmbg not available on server (✂ Cut Out will report it; drops still place instantly)';
         el.conn.className = 'pt-status ' + (rm.available ? 'ok' : 'err');
       } catch (e) {
         el.conn.textContent = '○ /api/puppet unreachable';
         el.conn.className = 'pt-status err';
       }
       await loadProjectList();
+      // Reload continuity (Amendment C): reopen the last project so a
+      // page reload restores the stage — through the same awaited,
+      // pixel-verified restore path as a manual Open.
+      let lastPid = null;
+      try { lastPid = localStorage.getItem('ellieedit.puppet.lastProject'); } catch (e) {}
+      if (lastPid) {
+        try { await openProject(lastPid); } catch (e) { say(e.message, 'err'); }
+      }
     })();
     const lastSize = readLastSize();
     if (lastSize) { state.canvas.width = lastSize.width; state.canvas.height = lastSize.height; el.preset.value = 'last'; }
     renderStage();
+    updateRenderNote();
     history.init(snapshot());
     window.addEventListener('ellieedit:tab-activated', e => {
       if (e.detail && e.detail.name === 'puppet') { loadProjectList(); refit(); }

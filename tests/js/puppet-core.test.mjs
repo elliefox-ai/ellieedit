@@ -7,6 +7,7 @@ import { clampDenoise, presetSize, normalizeLayer, normalizeState, defaultState,
   fitPlacement, moveLayerZ, paintOrder, layerCenter, stageToLocal, localToStage,
   hitLayer, topmostAt, handlePositions, resizeRect, rotationFromPointer,
   pointerAngle, applyMaskToAlpha, brushAlpha, History,
+  grayMaskIsEmpty, resolveRenderMask, planRestore, runRestore,
   DENOISE_MIN, DENOISE_MAX } from '../../frontend/js/modules/puppet-core.js';
 
 const L = (id, over = {}) => normalizeLayer({ id, x: 0, y: 0, w: 100, h: 50, ...over });
@@ -178,4 +179,76 @@ test('history: push/undo/redo, redo branch cleared on new push', () => {
   assert.equal(hst.current, 'sX');
   hst.push('sX');                                        // duplicate push is a no-op
   assert.equal(hst.undo(), 's1');
+});
+
+// ------------------------------------------------------- v1.1 additions
+
+test('normalizeState keeps cutout, erase mask and rendermask in separate channels', () => {
+  const s = normalizeState({ rendermask: 'rendermask-1.png',
+    layers: [{ id: 'a', asset: 'source-1.png', mask: 'mask-1.png', cutout: 'cutout-1.png' }] });
+  assert.equal(s.rendermask, 'rendermask-1.png');
+  assert.equal(s.layers[0].mask, 'mask-1.png');
+  assert.equal(s.layers[0].cutout, 'cutout-1.png');
+  const bare = normalizeState({ layers: [{ id: 'a' }] });
+  assert.equal(bare.rendermask, null);
+  assert.equal(bare.layers[0].cutout, null);
+});
+
+test('grayMaskIsEmpty: all-zero is empty, any painted byte is not', () => {
+  assert.equal(grayMaskIsEmpty(new Uint8Array([0, 0, 0, 0])), true);
+  assert.equal(grayMaskIsEmpty(new Uint8Array([0, 0, 1, 0])), false);
+  assert.equal(grayMaskIsEmpty([]), true);
+  assert.equal(grayMaskIsEmpty(null), true);
+});
+
+test('resolveRenderMask: fill needs a painted mask; all/empty render full', () => {
+  assert.equal(resolveRenderMask({ mode: 'fill', hasFill: true, fillEmpty: false }), 'fill');
+  assert.equal(resolveRenderMask({ mode: 'fill', hasFill: false, fillEmpty: true }), 'full');
+  assert.equal(resolveRenderMask({ mode: 'fill', hasFill: true, fillEmpty: true }), 'full');
+  assert.equal(resolveRenderMask({ mode: 'all', hasFill: true, fillEmpty: false }), 'full');
+  assert.equal(resolveRenderMask({}), 'full');
+  assert.equal(resolveRenderMask(), 'full');
+});
+
+test('planRestore: base candidates are asset then source, deduped; masks listed apart', () => {
+  const plan = planRestore({ layers: [
+    { id: 'a', asset: 'cut-1.png', source: 'src-1.png', mask: 'm-1.png', cutout: 'c-1.png' },
+    { id: 'b', asset: 'same.png', source: 'same.png' },
+    { id: 'c', asset: null, source: 'only-src.png' },
+    { id: 'd' },
+  ] });
+  assert.deepEqual(plan[0].candidates, ['cut-1.png', 'src-1.png']);
+  assert.equal(plan[0].mask, 'm-1.png');
+  assert.equal(plan[0].cutout, 'c-1.png');
+  assert.deepEqual(plan[1].candidates, ['same.png']);
+  assert.deepEqual(plan[2].candidates, ['only-src.png']);
+  assert.deepEqual(plan[3].candidates, []);
+  assert.equal(plan[3].hasBase, false);
+});
+
+test('runRestore: pixels or it did not happen — retry, then source fallback', async () => {
+  const plan = planRestore({ layers: [
+    { id: 'flaky', asset: 'a.png', source: 's.png' },
+    { id: 'gone', asset: 'x.png', source: 'y.png' },
+    { id: 'fine', asset: 'f.png' },
+  ] });
+  const calls = [];
+  const load = async file => {
+    calls.push(file);
+    if (file === 'a.png') throw new Error('cold 404');         // always fails
+    if (file === 's.png') return { img: 'S' };                  // fallback works
+    if (file === 'f.png') {
+      if (calls.filter(c => c === 'f.png').length < 2) throw new Error('transient');
+      return { img: 'F' };                                      // retry succeeds
+    }
+    throw new Error('nope');
+  };
+  const res = await runRestore(plan, load);
+  assert.equal(res.flaky.ok, true);
+  assert.equal(res.flaky.file, 's.png');           // fell back to the source
+  assert.equal(res.flaky.tries, 3);                // 2 on a.png + 1 on s.png
+  assert.equal(res.fine.ok, true);
+  assert.equal(res.fine.tries, 2);                 // one retry was enough
+  assert.equal(res.gone.ok, false);                // reported, never faked
+  assert.equal(res.gone.file, null);
 });

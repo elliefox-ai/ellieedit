@@ -66,3 +66,21 @@
 .pt-lrow.sel { border-color:#7a6aaa; background:#1d1d33; }
 .pt-lrow .nm { flex:1; min-width:0; font-size:12px; overflow:hidden;
   text-overflow:ellipsis; white-space:nowrap; }
+
+/* ---- v1.1: stage steps, Fill Area, async state, two-line layer rows ---- */
+.pt-fillov { position:absolute; inset:0; width:100%; height:100%;
+  pointer-events:none; display:none; z-index:60; }
+.pt-stage.filling { cursor:crosshair; }
+.pt-stage.filling .pt-layer { pointer-events:none; }
+.pt-dropind { position:absolute; top:10px; left:50%; transform:translateX(-50%);
+  z-index:70; display:none; background:rgba(16,16,32,0.92); color:#d4d4e0;
+  border:1px solid #7a6aaa; border-radius:999px; padding:8px 16px;
+  font-size:13px; pointer-events:none; }
+.ee-btn.busy, .pt-btn.busy { opacity:0.65; }
+.ee-btn.busy::after, .pt-btn.busy::after { content:' ⏳';
+  animation:pt-pulse 1s ease-in-out infinite; }
+@keyframes pt-pulse { 50% { opacity:0.3; } }
+.pt-lrow { flex-direction:column; align-items:stretch; gap:4px; }
+.pt-lr { display:flex; gap:4px; align-items:center; }
+.pt-lr .nm { flex:1; }
+.pt-cut { flex:1; }
