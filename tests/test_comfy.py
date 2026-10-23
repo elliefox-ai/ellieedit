@@ -153,3 +153,46 @@ def test_repaint_deletes_intermediate(no_http, tmp_path, monkeypatch):
     data = comfy.comfy_repaint(img, mask, "p", seed=3)
     assert data == b"PNGDATA"
     assert not saved.exists()
+
+
+# ------------------------------------------------ Klein repaint (v1.2)
+
+def test_klein_graph_shape():
+    g = comfy.KLEIN_REPAINT_GRAPH
+    # adapted from the verified basic gen graph
+    assert "klein" in g["380"]["inputs"]["gguf_name"].lower()
+    assert g["381"]["class_type"] == "ClipLoaderGGUF"
+    assert g["382"]["inputs"]["vae_name"] == "flux2-vae.safetensors"
+    # the denoise lesson applies here too: BasicScheduler, NOT Flux2Scheduler
+    assert g["115"]["class_type"] == "BasicScheduler"
+    assert "denoise" in g["115"]["inputs"]
+    assert g["115"]["inputs"]["steps"] == 6            # basic gen runs 6
+    assert g["114"]["inputs"]["cfg"] == 1.0
+    # Klein's negative is a zeroed positive, as in the basic graph
+    assert g["113"]["class_type"] == "ConditioningZeroOut"
+    assert g["114"]["inputs"]["negative"] == ["113", 0]
+    # the masked-repaint conversion, same as REPAINT_GRAPH
+    assert g["203"]["class_type"] == "SetLatentNoiseMask"
+    assert g["203"]["inputs"]["samples"] == ["202", 0]
+    assert g["201"]["class_type"] == "LoadImageMask"
+    assert g["201"]["inputs"]["channel"] == "red"
+
+
+def test_build_klein_repaint_workflow_patches(no_http):
+    wf = comfy.build_klein_repaint_workflow(
+        make_png_b64(), make_png_b64(), "soft light", denoise=0.3, seed=42)
+    assert wf["112"]["inputs"]["text"] == "soft light"
+    assert wf["106"]["inputs"]["noise_seed"] == 42
+    assert wf["115"]["inputs"]["denoise"] == 0.3
+    assert wf["200"]["inputs"]["image"] == "pk_img_42.png"
+    assert wf["201"]["inputs"]["image"] == "pk_mask_42.png"
+    assert no_http["uploads"] == ["pk_img_42.png", "pk_mask_42.png"]
+    # the module-level template is never mutated by a build
+    assert comfy.KLEIN_REPAINT_GRAPH["112"]["inputs"]["text"] == ""
+
+
+def test_comfy_repaint_klein_roundtrip(no_http):
+    out = comfy.comfy_repaint_klein(make_png_b64(), make_png_b64(), "x",
+                                    denoise=0.45, seed=1)
+    assert out == b"PNGDATA"
+    assert no_http["uploads"] == ["pk_img_1.png", "pk_mask_1.png"]

@@ -96,6 +96,61 @@ def build_repaint_workflow(image_b64, mask_b64, prompt, denoise=0.5, seed=0):
     return wf
 
 
+# Klein (Flux 2 Klein 9B) repaint workflow — the Puppet Theater v1.2
+# default final-pass engine ("Klein preserves existing context better";
+# the placed pixels ARE the design). Adapted from the verified basic
+# txt2img graph (klein_gen_basic.reference.json: LoaderGGUF flux-2-klein-9b,
+# Qwen3-8B clip, flux2 VAE, CFGGuider cfg 1, euler, 6 steps) with the SAME
+# conversion REPAINT_GRAPH uses: EmptyFlux2LatentImage -> LoadImage +
+# LoadImageMask + VAEEncode + SetLatentNoiseMask, and — critically —
+# Flux2Scheduler -> BasicScheduler, because Flux2Scheduler has NO denoise
+# input (the lesson in REPAINT_GRAPH's comment: it silently ran every
+# repaint at full strength). Klein's negative is ConditioningZeroOut of
+# the positive, exactly as in the basic graph.
+KLEIN_REPAINT_GRAPH = {
+    "380": {"class_type": "LoaderGGUF",
+            "inputs": {"gguf_name": "_Flux\\flux-2-klein-9b-Q8_0.gguf"}},
+    "381": {"class_type": "ClipLoaderGGUF",
+            "inputs": {"clip_name": "Qwen3-8B-Q8_0.gguf", "type": "stable_diffusion", "device": "default"}},
+    "382": {"class_type": "VAELoader",
+            "inputs": {"vae_name": "flux2-vae.safetensors"}},
+    "112": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["381", 0]}},
+    "113": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["112", 0]}},
+    "103": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+    "106": {"class_type": "RandomNoise", "inputs": {"noise_seed": 0}},
+    "115": {"class_type": "BasicScheduler", "inputs": {"model": ["380", 0], "scheduler": "simple", "steps": 6, "denoise": 0.45}},
+    "114": {"class_type": "CFGGuider", "inputs": {"cfg": 1.0, "model": ["380", 0], "positive": ["112", 0], "negative": ["113", 0]}},
+    "200": {"class_type": "LoadImage", "inputs": {"image": "input.png", "upload": "image"}},
+    "201": {"class_type": "LoadImageMask", "inputs": {"image": "mask.png", "channel": "red"}},
+    "202": {"class_type": "VAEEncode", "inputs": {"pixels": ["200", 0], "vae": ["382", 0]}},
+    "203": {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["202", 0], "mask": ["201", 0]}},
+    "104": {"class_type": "SamplerCustomAdvanced",
+            "inputs": {"noise": ["106", 0], "guider": ["114", 0], "sampler": ["103", 0],
+                       "sigmas": ["115", 0], "latent_image": ["203", 0]}},
+    "105": {"class_type": "VAEDecode", "inputs": {"samples": ["104", 0], "vae": ["382", 0]}},
+    "19":  {"class_type": "SaveImage", "inputs": {"images": ["105", 0],
+            "filename_prefix": "ellieedit_tmp/puppet_klein"}},
+}
+
+
+def build_klein_repaint_workflow(image_b64, mask_b64, prompt, denoise=0.45, seed=0):
+    """Deep-copy KLEIN_REPAINT_GRAPH and patch in one job's parameters —
+    the exact mirror of build_repaint_workflow for the Klein engine."""
+    img_png = base64.b64decode(image_b64)
+    mask_png = base64.b64decode(mask_b64)
+
+    img_name = _comfy_upload(img_png, f"pk_img_{seed}.png")
+    mask_name = _comfy_upload(mask_png, f"pk_mask_{seed}.png")
+
+    wf = copy.deepcopy(KLEIN_REPAINT_GRAPH)
+    wf["112"]["inputs"]["text"] = prompt
+    wf["106"]["inputs"]["noise_seed"] = int(seed)
+    wf["115"]["inputs"]["denoise"] = float(denoise)
+    wf["200"]["inputs"]["image"] = img_name
+    wf["201"]["inputs"]["image"] = mask_name
+    return wf
+
+
 def _comfy_upload(png_bytes, name, image_type="input", overwrite=True):
     """Upload a PNG to ComfyUI's /upload/image endpoint. Returns server filename."""
     boundary = uuid.uuid4().hex
@@ -133,10 +188,22 @@ def _delete_saved_file(im):
         print(f"[repaint] intermediate cleanup skipped: {e}", flush=True)
 
 
+def comfy_repaint_klein(image_b64, mask_b64, prompt, denoise=0.45, seed=0, timeout=600):
+    """Run one Klein masked repaint. Returns PNG bytes of the full image."""
+    wf = build_klein_repaint_workflow(image_b64, mask_b64, prompt, denoise, seed)
+    return _run_workflow(wf, seed, denoise, timeout, tag="repaint:klein")
+
+
 def comfy_repaint(image_b64, mask_b64, prompt, denoise=0.5, seed=0, timeout=600):
     """Run one Krea2 inpaint. Returns PNG bytes of the repainted full image."""
     wf = build_repaint_workflow(image_b64, mask_b64, prompt, denoise, seed)
+    return _run_workflow(wf, seed, denoise, timeout, tag="repaint")
 
+
+def _run_workflow(wf, seed, denoise, timeout=600, tag="repaint"):
+    """Submit a built workflow to ComfyUI and poll for its output image.
+    Shared by both repaint engines; behavior (and log lines) identical to
+    the original comfy_repaint body."""
     req = urllib.request.Request(
         COMFY_URL + "/prompt", data=json.dumps({"prompt": wf}).encode(),
         method="POST", headers={"Content-Type": "application/json"})
@@ -149,7 +216,7 @@ def comfy_repaint(image_b64, mask_b64, prompt, denoise=0.5, seed=0, timeout=600)
     if "prompt_id" not in resp:
         raise RuntimeError(f"ComfyUI did not queue: {json.dumps(resp)[:2000]}")
     pid = resp["prompt_id"]
-    print(f"[repaint] queued {pid} seed={seed} denoise={denoise}", flush=True)
+    print(f"[{tag}] queued {pid} seed={seed} denoise={denoise}", flush=True)
 
     # Poll history — a success with empty outputs is a silent prune; read log.
     t0 = time.time()
@@ -172,7 +239,7 @@ def comfy_repaint(image_b64, mask_b64, prompt, denoise=0.5, seed=0, timeout=600)
                                f"&subfolder={urllib.parse.quote(im.get('subfolder',''))}&type=output")
                         with urllib.request.urlopen(url, timeout=120) as r2:
                             data = r2.read()
-                        print(f"[repaint] done {pid} in {time.time()-t0:.0f}s", flush=True)
+                        print(f"[{tag}] done {pid} in {time.time()-t0:.0f}s", flush=True)
                         _delete_saved_file(im)
                         return data
             raise RuntimeError(f"Output had no output-type image: {json.dumps(outputs)[:1000]}")

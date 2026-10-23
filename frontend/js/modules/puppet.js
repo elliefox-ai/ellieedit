@@ -8,7 +8,8 @@ import { registerModule } from '../shell.js';
 import { clampDenoise, presetSize, normalizeState, defaultState, fitPlacement,
   moveLayerZ, stageToLocal, localToStage, handlePositions, resizeRect,
   rotationFromPointer, pointerAngle, History, CANVAS_PRESETS,
-  planRestore, runRestore, grayMaskIsEmpty, resolveRenderMask } from './puppet-core.js';
+  planRestore, runRestore, grayMaskIsEmpty, resolveRenderMask,
+  stageHintVisible, makeRenderLayer } from './puppet-core.js';
 
 const API = '/api/puppet';
 const FOX = '/api/foxden';
@@ -97,6 +98,10 @@ registerModule({
           <input type="text" data-id="rprompt" placeholder="golden hour, soft rim light…"></div>
         <div><label>Denoise <span data-id="dval">0.45</span> — fenced 0.20–0.80</label>
           <input type="range" data-id="denoise" min="0.2" max="0.8" step="0.01" value="0.45" aria-label="Final pass denoise"></div>
+        <div class="pt-row" data-id="engines">
+          <button class="ee-btn pt-btn on" data-engine="klein">Klein · preserves more</button>
+          <button class="ee-btn pt-btn" data-engine="krea2">Krea2 · repaints more</button>
+        </div>
         <div class="pt-row" data-id="rmodes">
           <button class="ee-btn pt-btn on" data-rmode="fill">Fill Area only</button>
           <button class="ee-btn pt-btn" data-rmode="all">Render all</button>
@@ -121,8 +126,8 @@ registerModule({
           <div class="pt-preview" data-id="preview">
             <img data-id="previewimg" alt="final pass preview">
             <div class="pt-pvbar">
-              <span>Final pass preview — the layer stack underneath is untouched.</span>
-              <button class="ee-btn primary pt-btn" data-id="pvaccept">✓ Accept as new stage picture</button>
+              <span>Final pass preview — accepting adds it as a new layer on top; the stack underneath stays live.</span>
+              <button class="ee-btn primary pt-btn" data-id="pvaccept">✓ Accept as new layer</button>
               <button class="ee-btn pt-btn" data-id="pvdiscard">✕ Discard</button>
             </div>
           </div>
@@ -144,7 +149,7 @@ registerModule({
       'apply-size', 'bgprompt', 'bggen', 'bgup', 'bgclear', 'bgfile', 'add', 'afile',
       'steps', 'fillclear', 'fillhint',
       'tools', 'bsize', 'bsize-val', 'bhard', 'bhard-val', 'maskreset', 'undo', 'redo',
-      'rprompt', 'denoise', 'dval', 'rmodes', 'rmnote', 'render', 'expng', 'exjson', 'status',
+      'rprompt', 'denoise', 'dval', 'engines', 'rmodes', 'rmnote', 'render', 'expng', 'exjson', 'status',
       'stagewrap', 'stage', 'bgimg', 'fillov', 'dropind', 'empty', 'preview', 'previewimg', 'pvaccept',
       'pvdiscard', 'lcount', 'llist'];
     const el = Object.fromEntries(ids.map(k => [k, $(k)]));
@@ -165,6 +170,8 @@ registerModule({
     // black = locked; an all-black canvas is "no fill painted".
     let step = 'place';
     let renderMode = 'fill';
+    let engine = 'klein';                    // v1.2: Klein default final pass
+    let dragOver = false;                    // v1.2: drop-hint predicate input
     const cutPending = new Set();
     const fillCv = document.createElement('canvas');
     const fillCx = fillCv.getContext('2d', { willReadFrequently: true });
@@ -318,6 +325,15 @@ registerModule({
       r.wrap.style.zIndex = String(state.layers.indexOf(layer) + 1);
     }
 
+    // The drop hint (v1.2 item 1) shows only on a truly empty stage or
+    // during drag-over — never stamped over a background or the puppets.
+    function updateHint() {
+      el.empty.style.display = stageHintVisible({
+        layerCount: state.layers.length,
+        hasBackground: state.canvas.background.type === 'image',
+        dragOver }) ? '' : 'none';
+    }
+
     // ------------------------------------------------------------- render
     function renderStage() {
       // prune runtimes of deleted layers
@@ -329,7 +345,7 @@ registerModule({
       syncFillSize();
       el.bgimg.style.display = state.canvas.background.type === 'image' && bgUrl ? '' : 'none';
       if (bgUrl) el.bgimg.src = bgUrl;
-      el.empty.style.display = state.layers.length ? 'none' : '';
+      updateHint();
       for (const layer of state.layers) {
         runtimeFor(layer);
         positionLayerEl(layer);
@@ -338,6 +354,7 @@ registerModule({
       el.ch.value = state.canvas.height;
       if (document.activeElement !== el.pname) el.pname.value = state.name;
       refit();
+      updateFillHint();
       renderLayerList();
     }
 
@@ -909,10 +926,10 @@ registerModule({
     }
     el.add.addEventListener('click', () => el.afile.click());
     el.afile.addEventListener('change', () => { addPuppetFiles([...el.afile.files]); el.afile.value = ''; });
-    el.stagewrap.addEventListener('dragover', e => { e.preventDefault(); el.stagewrap.classList.add('dragover'); });
-    el.stagewrap.addEventListener('dragleave', () => el.stagewrap.classList.remove('dragover'));
+    el.stagewrap.addEventListener('dragover', e => { e.preventDefault(); el.stagewrap.classList.add('dragover'); dragOver = true; updateHint(); });
+    el.stagewrap.addEventListener('dragleave', () => { el.stagewrap.classList.remove('dragover'); dragOver = false; updateHint(); });
     el.stagewrap.addEventListener('drop', e => {
-      e.preventDefault(); el.stagewrap.classList.remove('dragover');
+      e.preventDefault(); el.stagewrap.classList.remove('dragover'); dragOver = false; updateHint();
       addPuppetFiles([...(e.dataTransfer ? e.dataTransfer.files : [])]);
     });
 
@@ -946,10 +963,25 @@ registerModule({
       const pt = stagePoint(e);
       // Fill Area step: the canvas itself is the paint surface; layer
       // transforms are inert here so a stroke can never move a puppet.
+      // With a layer selected, painting is scoped to that puppet (v1.2):
+      // clicking ANOTHER puppet re-scopes instead of painting.
       if (step === 'fill') {
-        op = { type: 'fill', last: pt, moved: false };
+        const sel = selected();
+        if (sel && sel.visible !== false) {
+          const hit = pickAt(pt);
+          if (hit && hit.id !== sel.id) {
+            selectedId = hit.id;
+            renderStage();
+            say(`Fill Area re-scoped to “${hit.name}”.`);
+            return;
+          }
+          op = { type: 'fill', scoped: true, clip: buildClipCanvas(sel), last: pt, moved: false };
+          stampFillGated(pt, op.clip);
+        } else {
+          op = { type: 'fill', scoped: false, last: pt, moved: false };
+          stampFill(pt);
+        }
         el.stage.setPointerCapture(e.pointerId);
-        stampFill(pt);
         op.moved = true;
         e.preventDefault();
         return;
@@ -997,7 +1029,8 @@ registerModule({
       if (!op) return;
       const pt = stagePoint(e);
       if (op.type === 'fill') {
-        stampFillLine(op.last, pt);
+        if (op.scoped) stampFillLineGated(op.last, pt, op.clip);
+        else stampFillLine(op.last, pt);
         op.last = pt;
         op.moved = true;
         return;
@@ -1221,6 +1254,93 @@ registerModule({
         stampFill({ x: a.x + (b.x - a.x) * i / steps, y: a.y + (b.y - a.y) * i / steps });
       }
     }
+
+    // Layer-scoped Fill Area (v1.2 item 2). The clip canvas holds, in its
+    // ALPHA channel, where paint is admitted: the selected layer's current
+    // visible footprint (its display canvas at its stage transform) UNION
+    // the fill painted so far. Each stamp is gated through the clip
+    // (destination-in == puppet-core's gateStampAlpha multiply), lands on
+    // the SAME canvas-level rendermask as unscoped painting — scoping is
+    // an interaction gate, not a new storage channel — and then joins the
+    // clip, so a stroke can grow outward from the puppet: start at the
+    // neck, walk down, and the body region accrues. A stroke that starts
+    // in empty space away from puppet and fill paints nothing.
+    const stampCv = document.createElement('canvas');
+    function buildClipCanvas(layer) {
+      const w = state.canvas.width, h = state.canvas.height;
+      const clip = document.createElement('canvas');
+      clip.width = w; clip.height = h;
+      const cx2 = clip.getContext('2d');
+      const r = rt.get(layer.id);
+      if (r && r.cv && r.cv.width) {
+        const c = layerCenterOf(layer);
+        cx2.save();
+        cx2.translate(c.x, c.y);
+        cx2.rotate((layer.rotation || 0) * Math.PI / 180);
+        cx2.drawImage(r.cv, -layer.w / 2, -layer.h / 2, layer.w, layer.h);
+        cx2.restore();
+      }
+      // union with the fill so far: fill luminance becomes alpha
+      const fa = document.createElement('canvas');
+      fa.width = w; fa.height = h;
+      const fx = fa.getContext('2d');
+      fx.drawImage(fillCv, 0, 0);
+      const d = fx.getImageData(0, 0, w, h);
+      for (let i = 0; i < d.data.length; i += 4) {
+        d.data[i + 3] = d.data[i];
+        d.data[i] = 255; d.data[i + 1] = 255; d.data[i + 2] = 255;
+      }
+      fx.putImageData(d, 0, 0);
+      cx2.drawImage(fa, 0, 0);
+      return clip;
+    }
+    function layerCenterOf(layer) {
+      return { x: layer.x + layer.w / 2, y: layer.y + layer.h / 2 };
+    }
+    function stampFillGated(pt, clip) {
+      const radius = Math.max(1, (parseFloat(el.bsize.value) || 48) / 2);
+      const hardness = (parseFloat(el.bhard.value) || 0) / 100;
+      const white = tool !== 'erase';
+      stampCv.width = state.canvas.width; stampCv.height = state.canvas.height;
+      const sc = stampCv.getContext('2d');
+      const g = sc.createRadialGradient(pt.x, pt.y, radius * hardness, pt.x, pt.y, radius);
+      const rgb = white ? '255,255,255' : '0,0,0';
+      g.addColorStop(0, `rgba(${rgb},1)`);
+      g.addColorStop(Math.min(0.999, hardness + (1 - hardness) * 0.5), `rgba(${rgb},0.5)`);
+      g.addColorStop(1, `rgba(${rgb},0)`);
+      sc.save();
+      sc.globalCompositeOperation = 'source-over';
+      sc.fillStyle = g;
+      sc.beginPath(); sc.arc(pt.x, pt.y, radius, 0, Math.PI * 2); sc.fill();
+      sc.globalCompositeOperation = 'destination-in';   // the gate
+      sc.drawImage(clip, 0, 0);
+      sc.restore();
+      fillCx.save();
+      fillCx.globalCompositeOperation = 'source-over';
+      fillCx.drawImage(stampCv, 0, 0);
+      fillCx.restore();
+      // the fresh paint joins the clip: the stroke may keep growing
+      const cc = clip.getContext('2d');
+      cc.save(); cc.globalCompositeOperation = 'source-over';
+      cc.drawImage(stampCv, 0, 0); cc.restore();
+      fill.touched = true;
+      refreshFillOverlay();
+    }
+    function stampFillLineGated(a, b, clip) {
+      const radius = Math.max(1, (parseFloat(el.bsize.value) || 48) / 2);
+      const dist = Math.hypot(b.x - a.x, b.y - a.y);
+      const steps = Math.max(1, Math.floor(dist / Math.max(1, radius / 3)));
+      for (let i = 1; i <= steps; i++) {
+        stampFillGated({ x: a.x + (b.x - a.x) * i / steps, y: a.y + (b.y - a.y) * i / steps }, clip);
+      }
+    }
+    function updateFillHint() {
+      if (step !== 'fill') return;
+      const sel = selected();
+      el.fillhint.textContent = (sel && sel.visible !== false)
+        ? `Fill Area is scoped to “${sel.name}”: paint must grow from the puppet (or from fill already painted) — start on the puppet and stroke outward, e.g. the body below a headshot. Click another puppet to re-scope it; deselect (Place step, click empty stage) for whole-canvas fill. Brush = fill, Erase tool = lock.`
+        : 'Fill Area: paint where generation should happen (white = fill, everything else stays locked). Brush paints fill; the Erase tool paints lock. Undo and Clear work; the tint only shows during this step.';
+    }
     function enterStep(next) {
       step = next;
       el.steps.querySelectorAll('[data-step]').forEach(x =>
@@ -1228,6 +1348,7 @@ registerModule({
       el.fillhint.style.display = next === 'fill' ? '' : 'none';
       el.stage.classList.toggle('filling', next === 'fill');
       refreshFillOverlay(true);
+      updateFillHint();
       updateRenderNote();
       if (next === 'fill') say('Fill Area: paint where generation should happen. Brush = fill, Erase tool = lock.');
     }
@@ -1249,6 +1370,13 @@ registerModule({
         x.classList.toggle('on', x === b));
       updateRenderNote();
     });
+    el.engines.addEventListener('click', e => {
+      const b = e.target.closest('[data-engine]');
+      if (!b) return;
+      engine = b.dataset.engine;
+      el.engines.querySelectorAll('[data-engine]').forEach(x =>
+        x.classList.toggle('on', x === b));
+    });
 
     // ------------------------------------------------------------- render
     el.denoise.addEventListener('input', () => {
@@ -1265,11 +1393,12 @@ registerModule({
           prompt: el.rprompt.value.trim(),
           denoise: clampDenoise(parseFloat(el.denoise.value)),
           mode: renderMode,
+          engine,
           seed: Math.floor(Math.random() * 2 ** 31) });
         previewAsset = j.render_asset || null;
         el.previewimg.src = 'data:image/png;base64,' + j.image_b64;
         el.preview.style.display = 'flex';
-        say(`Final pass done at denoise ${Number(j.denoise).toFixed(2)} (mask: ${j.mask_used === 'fill' ? 'Fill Area' : 'full canvas'}) — accept or discard.`, 'ok');
+        say(`Final pass done — ${j.engine === 'krea2' ? 'Krea2' : 'Klein'} at denoise ${Number(j.denoise).toFixed(2)} (mask: ${j.mask_used === 'fill' ? 'Fill Area' : 'full canvas'}) — accept (adds a layer) or discard.`, 'ok');
       } catch (e) { say('Render failed: ' + e.message, 'err'); }
       finally { setBusy(el.render, false); }
     });
@@ -1279,24 +1408,28 @@ registerModule({
       say('Preview discarded — back to the live composite.');
     });
     el.pvaccept.addEventListener('click', async () => {
-      // Accept = the harmonized render becomes the stage picture. Layers are
-      // hidden, NOT deleted: flip their eyes back on to return to puppeting.
-      if (previewAsset && projectId) {
-        bgUrl = `${API}/projects/${projectId}/assets/${previewAsset}`;
-        state.canvas.background = { type: 'image', asset: previewAsset };
-        for (const l of state.layers) l.visible = false;
-      } else if (el.previewimg.src) {
-        try {
-          const up = await uploadAsset('render', el.previewimg.src);
-          state.canvas.background = { type: 'image', asset: up.file };
-          bgUrl = up.url;
-          for (const l of state.layers) l.visible = false;
-        } catch (e) { say(e.message, 'err'); return; }
-      }
-      previewAsset = null;
-      el.preview.style.display = 'none';
-      commit(); renderStage();
-      say('Accepted. Layers are hidden, not deleted — toggle 👁 to puppet again.', 'ok');
+      // v1.2 item 3: Accept = the render becomes a NEW PUPPET LAYER on top
+      // of the stack (iterative compositing). The background and every
+      // existing layer stay exactly as they are — the render layer can be
+      // dragged, resized, rotated, erased into, or rendered over again.
+      setBusy(el.pvaccept, true, '✓ Adding layer…');
+      try {
+        let file = previewAsset;
+        if (!file) {
+          if (!el.previewimg.src) throw new Error('no render to accept');
+          file = (await uploadAsset('render', el.previewimg.src)).file;
+        }
+        const layer = makeRenderLayer(state, { id: uid(), asset: file });
+        state.layers.push(layer);
+        selectedId = layer.id;
+        runtimeFor(layer);
+        loadLayerImage(layer, projectId ? assetUrl(file) : el.previewimg.src);
+        previewAsset = null;
+        el.preview.style.display = 'none';
+        commit(); renderStage();
+        say(`Accepted as layer “${layer.name}” — it's a puppet now: move it, mask it, or render again on top.`, 'ok');
+      } catch (e) { say('Accept failed: ' + e.message, 'err'); }
+      finally { setBusy(el.pvaccept, false); }
     });
 
     // ------------------------------------------------------------- export
