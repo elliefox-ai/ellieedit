@@ -9,6 +9,7 @@ import { clampDenoise, presetSize, normalizeLayer, normalizeState, defaultState,
   pointerAngle, applyMaskToAlpha, brushAlpha, History,
   grayMaskIsEmpty, resolveRenderMask, planRestore, runRestore,
   stageHintVisible, makeRenderLayer, unionClipAlpha, gateStampAlpha,
+  topmostBoundsAt, layerIsFullBounds,
   DENOISE_MIN, DENOISE_MAX } from '../../frontend/js/modules/puppet-core.js';
 
 const L = (id, over = {}) => normalizeLayer({ id, x: 0, y: 0, w: 100, h: 50, ...over });
@@ -295,4 +296,26 @@ test('scoped fill gate: paint admits from footprint or existing fill only', () =
   // growth semantics: once painted, that point's fill admits the next stamp
   const fillAfter = 255;                            // just painted here
   assert.equal(gateStampAlpha(255, unionClipAlpha(0, fillAfter)), 255);
+});
+
+// ------------------------------------------------------- v1.3 additions
+
+test('topmostBoundsAt: bounds hit-testing — transparent pixels still belong to the layer', () => {
+  // hitLayer/topmostAt are rect tests: a point inside the rect hits even
+  // though nothing about alpha is consulted — the focus-stickiness basis.
+  const layers = [L('under', { x: 0, y: 0, w: 100, h: 100 }),
+                  L('over', { x: 10, y: 10, w: 50, h: 50 })];
+  assert.equal(topmostBoundsAt(layers, 20, 20).id, 'over');
+  assert.equal(topmostBoundsAt(layers, 90, 90).id, 'under');
+  assert.equal(topmostBoundsAt(layers, 500, 500), null);
+  assert.equal(topmostBoundsAt([L('hid', { visible: false })], 5, 5), null);
+});
+
+test('layerIsFullBounds: the fill precondition', () => {
+  const cv = { width: 100, height: 80 };
+  assert.equal(layerIsFullBounds(L('a', { x: 0, y: 0, w: 100, h: 80 }), cv), true);
+  assert.equal(layerIsFullBounds(L('a', { x: 0, y: 0, w: 99, h: 80 }), cv), false);
+  assert.equal(layerIsFullBounds(L('a', { x: 1, y: 0, w: 100, h: 80 }), cv), false);
+  assert.equal(layerIsFullBounds(L('a', { x: 0, y: 0, w: 100, h: 80, rotation: 15 }), cv), false);
+  assert.equal(layerIsFullBounds(null, cv), false);
 });

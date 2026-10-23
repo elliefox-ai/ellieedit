@@ -9,7 +9,8 @@ import { clampDenoise, presetSize, normalizeState, defaultState, fitPlacement,
   moveLayerZ, stageToLocal, localToStage, handlePositions, resizeRect,
   rotationFromPointer, pointerAngle, History, CANVAS_PRESETS,
   planRestore, runRestore, grayMaskIsEmpty, resolveRenderMask,
-  stageHintVisible, makeRenderLayer } from './puppet-core.js';
+  stageHintVisible, makeRenderLayer, hitLayer, topmostBoundsAt,
+  layerIsFullBounds } from './puppet-core.js';
 
 const API = '/api/puppet';
 const FOX = '/api/foxden';
@@ -77,6 +78,8 @@ registerModule({
           where generation should happen (white = fill, everything else stays
           locked). Brush paints fill; the Erase tool paints lock. Undo and
           Clear work; the tint only shows during this step.</div>
+        <button class="ee-btn primary pt-go" data-id="fillgo">✨ Fill background</button>
+        <div class="pt-hint" data-id="fillnote"></div>
         <div class="pt-sec">Tools</div>
         <div class="pt-row" data-id="tools">
           <button class="ee-btn pt-btn on" data-tool="move">✥ Move</button>
@@ -126,7 +129,7 @@ registerModule({
           <div class="pt-preview" data-id="preview">
             <img data-id="previewimg" alt="final pass preview">
             <div class="pt-pvbar">
-              <span>Final pass preview — accepting adds it as a new layer on top; the stack underneath stays live.</span>
+              <span data-id="pvnote">Final pass preview — accepting adds it as a new layer on top; the stack underneath stays live.</span>
               <button class="ee-btn primary pt-btn" data-id="pvaccept">✓ Accept as new layer</button>
               <button class="ee-btn pt-btn" data-id="pvdiscard">✕ Discard</button>
             </div>
@@ -147,10 +150,10 @@ registerModule({
     const $ = id => panel.querySelector(`[data-id="${id}"]`);
     const ids = ['conn', 'pname', 'popen', 'pnew', 'psave', 'savestat', 'preset', 'cw', 'ch',
       'apply-size', 'bgprompt', 'bggen', 'bgup', 'bgclear', 'bgfile', 'add', 'afile',
-      'steps', 'fillclear', 'fillhint',
+      'steps', 'fillclear', 'fillhint', 'fillgo', 'fillnote',
       'tools', 'bsize', 'bsize-val', 'bhard', 'bhard-val', 'maskreset', 'undo', 'redo',
       'rprompt', 'denoise', 'dval', 'engines', 'rmodes', 'rmnote', 'render', 'expng', 'exjson', 'status',
-      'stagewrap', 'stage', 'bgimg', 'fillov', 'dropind', 'empty', 'preview', 'previewimg', 'pvaccept',
+      'stagewrap', 'stage', 'bgimg', 'fillov', 'dropind', 'empty', 'preview', 'previewimg', 'pvnote', 'pvaccept',
       'pvdiscard', 'lcount', 'llist'];
     const el = Object.fromEntries(ids.map(k => [k, $(k)]));
 
@@ -161,6 +164,9 @@ registerModule({
     let tool = 'move';
     let fitScale = 1;
     let previewAsset = null;               // render_asset filename while previewing
+    let pvMode = 'render';                 // 'render' | 'fill' (v1.3)
+    let pvTarget = null;                   // fill target: layer id | 'background'
+    let pvTargetName = '';
     const rt = new Map();                  // layer id -> runtime (canvases, urls)
     const history = new History(50);
     let bgUrl = '';                        // object/data/asset URL for the stage bg
@@ -355,6 +361,7 @@ registerModule({
       if (document.activeElement !== el.pname) el.pname.value = state.name;
       refit();
       updateFillHint();
+      updateFillUI();
       renderLayerList();
     }
 
@@ -402,6 +409,7 @@ registerModule({
           mk('↑', 'raise', () => zop(layer.id, 'up')),
           mk('↓', 'lower', () => zop(layer.id, 'down')),
           mk('⤓', 'send to back', () => zop(layer.id, 'back')),
+          mk('⇓', 'merge down into the layer below (or the background) — masks consolidate', () => mergeDown(layer)),
           cutBtn);
         row.append(line1, line2);
         row.addEventListener('click', () => { selectedId = layer.id; renderStage(); });
@@ -461,6 +469,12 @@ registerModule({
           const cd = cuts && cuts[layer.id];
           if (cd) loadCutDataURL(layer, r, cd);
           else if (r.cutTouched) { resetCut(r, layer.natural_w || r.cut.width, layer.natural_h || r.cut.height); refreshDisplay(layer); }
+          // A layer whose runtime was pruned (undo of a remove/merge, say)
+          // needs its pixels re-fetched, not just its masks — otherwise
+          // the restored layer is metadata with a blank stage presence.
+          if (!r.img && projectId && (layer.asset || layer.source)) {
+            loadLayerImage(layer, assetUrl(layer.asset || layer.source));
+          }
         }
         // Fill Area channel restores independently of the layer masks —
         // undoing a fill stroke must never touch a layer's erase mask.
@@ -924,6 +938,160 @@ registerModule({
       renderLayerList();
       say(`“${layer.name}” restored — full original, no cut mask.`, 'ok');
     }
+
+    // ------------------------------------------------ v1.3 layer operations
+    // Extend a layer's canvas to full project bounds — PERMANENT (the
+    // layer's rect becomes the whole canvas, its pixels re-homed inside).
+    // Unrotated layers keep their original pixels and both masks exactly
+    // (pure offset re-home). A rotated layer's appearance is baked at its
+    // stage transform (masks consolidated into the pixels) — the same
+    // consolidation merge-down uses. Returns true if it changed anything.
+    function extendLayerToCanvas(layer) {
+      const W = state.canvas.width, H = state.canvas.height;
+      if (layerIsFullBounds(layer, state.canvas)) return false;
+      const r = runtimeFor(layer);
+      if (!r.img) return false;
+      const src = document.createElement('canvas');
+      src.width = W; src.height = H;
+      const sx = src.getContext('2d');
+      if (((layer.rotation || 0) % 360) === 0) {
+        sx.drawImage(r.img, layer.x, layer.y, layer.w, layer.h);
+        // masks re-home at the same offset (erase onto white = keep,
+        // cutout onto transparent = no cut outside the old footprint)
+        const nm = document.createElement('canvas');
+        nm.width = W; nm.height = H;
+        const nmx = nm.getContext('2d');
+        nmx.fillStyle = '#fff'; nmx.fillRect(0, 0, W, H);
+        nmx.drawImage(r.mask, layer.x, layer.y, layer.w, layer.h);
+        r.mask = nm; r.mctx = nm.getContext('2d');
+        if (r.cutTouched) {
+          const nc = document.createElement('canvas');
+          nc.width = W; nc.height = H;
+          nc.getContext('2d').drawImage(r.cut, layer.x, layer.y, layer.w, layer.h);
+          r.cut = nc; r.cctx = nc.getContext('2d');
+        }
+        r.maskDirty = r.maskTouched;
+        r.cutDirty = r.cutTouched;
+      } else {
+        drawLayerAppearance(sx, layer);        // bake the rotated appearance
+        resetMask(r, W, H);
+        r.maskDirty = true; layer.mask = null;
+        resetCut(r, W, H);
+        r.cutDirty = true; layer.cutout = null;
+      }
+      r.sourceDataUrl = src.toDataURL('image/png');
+      layer.source = null;
+      layer.asset = null;                      // save() mirrors the new source
+      layer.natural_w = W; layer.natural_h = H;
+      layer.x = 0; layer.y = 0; layer.w = W; layer.h = H;
+      layer.rotation = 0;
+      loadLayerImage(layer, r.sourceDataUrl);
+      return true;
+    }
+
+    // Merge down (v1.3): the layer's visible pixels alpha-over onto the
+    // layer below (which is extended to full bounds by the merge), or
+    // onto the background when it is the lowest layer. Both layers' erase
+    // masks are consolidated — they live in the merged pixels now — and
+    // the surviving layer keeps a fresh, fully-working mask channel.
+    async function mergeDown(layer) {
+      const idx = state.layers.indexOf(layer);
+      if (idx < 0) return;
+      const r = runtimeFor(layer);
+      if (!r.img) { say(`“${layer.name}” has no pixels to merge yet.`, 'err'); return; }
+      const W = state.canvas.width, H = state.canvas.height;
+      const below = state.layers[idx - 1] || null;
+      try {
+        if (below) {
+          const rb = runtimeFor(below);
+          if (!rb.img) { say(`“${below.name}” has no pixels to merge into.`, 'err'); return; }
+          const m = document.createElement('canvas');
+          m.width = W; m.height = H;
+          const mx = m.getContext('2d');
+          extendLayerToCanvas(below);         // full bounds: appearance == source
+          drawLayerAppearance(mx, below);
+          drawLayerAppearance(mx, layer);     // alpha-over at stage transforms
+          rb.sourceDataUrl = m.toDataURL('image/png');
+          below.source = null; below.asset = null;
+          below.natural_w = W; below.natural_h = H;
+          below.x = 0; below.y = 0; below.w = W; below.h = H; below.rotation = 0;
+          resetMask(rb, W, H); rb.maskDirty = true; below.mask = null;
+          resetCut(rb, W, H); rb.cutDirty = true; below.cutout = null;
+          loadLayerImage(below, rb.sourceDataUrl);
+          state.layers = state.layers.filter(l => l.id !== layer.id);
+          if (selectedId === layer.id) selectedId = below.id;
+          commit(); renderStage();
+          say(`Merged “${layer.name}” down into “${below.name}” — masks consolidated; “${below.name}” is still erasable.`, 'ok');
+        } else {
+          const m = document.createElement('canvas');
+          m.width = W; m.height = H;
+          const mx = m.getContext('2d');
+          if (state.canvas.background.type === 'image' && bgUrl) {
+            const bimg = await loadImageDecoded(bgUrl).catch(() => null);
+            if (bimg) {                              // cover-fit, as staged
+              const s = Math.max(W / bimg.naturalWidth, H / bimg.naturalHeight);
+              mx.drawImage(bimg, (W - bimg.naturalWidth * s) / 2,
+                           (H - bimg.naturalHeight * s) / 2,
+                           bimg.naturalWidth * s, bimg.naturalHeight * s);
+            }
+          }
+          drawLayerAppearance(mx, layer);
+          const up = await uploadAsset('background', m.toDataURL('image/png'));
+          state.canvas.background = { type: 'image', asset: up.file };
+          bgUrl = up.url;
+          state.layers = state.layers.filter(l => l.id !== layer.id);
+          if (selectedId === layer.id) selectedId = null;
+          commit(); renderStage();
+          say(`Merged “${layer.name}” down into the background.`, 'ok');
+        }
+      } catch (e) { say('Merge down failed: ' + e.message, 'err'); }
+    }
+
+    // Targeted Fill (v1.3): the painted rendermask + ONE target. A layer
+    // target is extended to full bounds first (permanent), saved, then the
+    // server generates from that layer's own pixels only; the background
+    // target generates from the background alone.
+    function updateFillUI() {
+      const sel = selected();
+      el.fillgo.textContent = sel && sel.visible !== false
+        ? `✨ Fill “${sel.name}”` : '✨ Fill background';
+      el.fillnote.textContent = fillPainted()
+        ? (sel && sel.visible !== false
+            ? `Target: layer “${sel.name}” — the fill sees only its own pixels. It will be extended to full project bounds (permanent) if it isn't already. Uses the prompt, engine and denoise from the Final pass section.`
+            : 'Target: the background — layers are untouched by a background fill. Uses the prompt, engine and denoise from the Final pass section.')
+        : 'Paint a Fill Area region first (this step), then Fill. The same painted mask also drives a Fill-Area final pass.';
+    }
+    el.fillgo.addEventListener('click', async () => {
+      if (!fillPainted()) { say('Paint a Fill Area region first — there is nothing to fill yet.', 'err'); return; }
+      const sel = selected();
+      const targetLayer = (sel && sel.visible !== false) ? sel : null;
+      setBusy(el.fillgo, true, '✨ Filling…');
+      try {
+        say('saving, then filling…');
+        if (targetLayer && extendLayerToCanvas(targetLayer)) {
+          commit(); renderStage();
+          say(`Extended “${targetLayer.name}” to full project bounds (permanent) so the fill region aligns.`);
+        }
+        await save();
+        if (!projectId) throw new Error('could not save the project');
+        const j = await jsonPost(`/projects/${projectId}/fill`, {
+          prompt: el.rprompt.value.trim(),
+          denoise: clampDenoise(parseFloat(el.denoise.value)),
+          engine,
+          target: targetLayer ? targetLayer.id : 'background',
+          seed: Math.floor(Math.random() * 2 ** 31) });
+        pvMode = 'fill';
+        pvTarget = targetLayer ? targetLayer.id : 'background';
+        pvTargetName = j.target_name || (targetLayer ? targetLayer.name : 'background');
+        previewAsset = j.asset || null;
+        el.previewimg.src = 'data:image/png;base64,' + j.image_b64;
+        el.pvaccept.textContent = `✓ Accept fill on ${pvTarget === 'background' ? 'the background' : '“' + pvTargetName + '”'}`;
+        el.pvnote.textContent = `Fill preview — accepting applies it to ${pvTarget === 'background' ? 'the background only' : 'layer “' + pvTargetName + '” only'}; nothing else changes.`;
+        el.preview.style.display = 'flex';
+        say(`Fill done — ${j.engine === 'krea2' ? 'Krea2' : 'Klein inpaint'} at denoise ${Number(j.denoise).toFixed(2)}. Accept applies it to ${pvTarget === 'background' ? 'the background' : '“' + pvTargetName + '” only'}.`, 'ok');
+      } catch (e) { say('Fill failed: ' + e.message, 'err'); }
+      finally { setBusy(el.fillgo, false); }
+    });
     el.add.addEventListener('click', () => el.afile.click());
     el.afile.addEventListener('change', () => { addPuppetFiles([...el.afile.files]); el.afile.value = ''; });
     el.stagewrap.addEventListener('dragover', e => { e.preventDefault(); el.stagewrap.classList.add('dragover'); dragOver = true; updateHint(); });
@@ -968,7 +1136,7 @@ registerModule({
       if (step === 'fill') {
         const sel = selected();
         if (sel && sel.visible !== false) {
-          const hit = pickAt(pt);
+          const hit = topmostBoundsAt(state.layers, pt.x, pt.y);
           if (hit && hit.id !== sel.id) {
             selectedId = hit.id;
             renderStage();
@@ -1004,6 +1172,25 @@ registerModule({
             return;
           }
         }
+      }
+      // Focus stickiness (v1.3): a pointer-down inside the SELECTED
+      // layer's bounds — even on fully transparent/erased pixels —
+      // belongs to that layer. Only clicks outside its bounds fall
+      // through to whatever is underneath. (This is also what makes the
+      // Restore brush usable: erased regions have no alpha to hit.)
+      if (sel && sel.visible !== false && hitLayer(sel, pt.x, pt.y)) {
+        if (tool === 'erase' || tool === 'restore') {
+          op = { type: 'mask', id: sel.id, last: pt, moved: false };
+          el.stage.setPointerCapture(e.pointerId);
+          stampAt(sel, pt);
+        } else {
+          op = { type: 'move', id: sel.id, startX: sel.x, startY: sel.y,
+                 grabDX: pt.x - sel.x, grabDY: pt.y - sel.y,
+                 loc: stageToLocal(sel, pt.x, pt.y), moved: false };
+          el.stage.setPointerCapture(e.pointerId);
+        }
+        e.preventDefault();
+        return;
       }
       const hit = pickAt(pt);
       if ((tool === 'erase' || tool === 'restore') && sel && hit === sel) {
@@ -1070,6 +1257,7 @@ registerModule({
           fill.dirty = true;
           refreshFillOverlay(true);
           updateRenderNote();
+          updateFillUI();
         }
         commit();
       }
@@ -1266,20 +1454,24 @@ registerModule({
     // neck, walk down, and the body region accrues. A stroke that starts
     // in empty space away from puppet and fill paints nothing.
     const stampCv = document.createElement('canvas');
+    // Draw a layer's current stage appearance (display canvas, masks
+    // applied, at its stage transform) into a canvas-sized context.
+    function drawLayerAppearance(cx2, layer) {
+      const r = rt.get(layer.id);
+      if (!r || !r.cv || !r.cv.width) return;
+      const c = layerCenterOf(layer);
+      cx2.save();
+      cx2.translate(c.x, c.y);
+      cx2.rotate((layer.rotation || 0) * Math.PI / 180);
+      cx2.drawImage(r.cv, -layer.w / 2, -layer.h / 2, layer.w, layer.h);
+      cx2.restore();
+    }
     function buildClipCanvas(layer) {
       const w = state.canvas.width, h = state.canvas.height;
       const clip = document.createElement('canvas');
       clip.width = w; clip.height = h;
       const cx2 = clip.getContext('2d');
-      const r = rt.get(layer.id);
-      if (r && r.cv && r.cv.width) {
-        const c = layerCenterOf(layer);
-        cx2.save();
-        cx2.translate(c.x, c.y);
-        cx2.rotate((layer.rotation || 0) * Math.PI / 180);
-        cx2.drawImage(r.cv, -layer.w / 2, -layer.h / 2, layer.w, layer.h);
-        cx2.restore();
-      }
+      drawLayerAppearance(cx2, layer);
       // union with the fill so far: fill luminance becomes alpha
       const fa = document.createElement('canvas');
       fa.width = w; fa.height = h;
@@ -1349,6 +1541,7 @@ registerModule({
       el.stage.classList.toggle('filling', next === 'fill');
       refreshFillOverlay(true);
       updateFillHint();
+      updateFillUI();
       updateRenderNote();
       if (next === 'fill') say('Fill Area: paint where generation should happen. Brush = fill, Erase tool = lock.');
     }
@@ -1359,6 +1552,7 @@ registerModule({
     el.fillclear.addEventListener('click', () => {
       clearFill(true);
       updateRenderNote();
+      updateFillUI();
       commit();
       say('Fill Area cleared — the next render covers the full canvas.');
     });
@@ -1396,6 +1590,9 @@ registerModule({
           engine,
           seed: Math.floor(Math.random() * 2 ** 31) });
         previewAsset = j.render_asset || null;
+        pvMode = 'render';
+        el.pvaccept.textContent = '✓ Accept as new layer';
+        el.pvnote.textContent = 'Final pass preview — accepting adds it as a new layer on top; the stack underneath stays live.';
         el.previewimg.src = 'data:image/png;base64,' + j.image_b64;
         el.preview.style.display = 'flex';
         say(`Final pass done — ${j.engine === 'krea2' ? 'Krea2' : 'Klein'} at denoise ${Number(j.denoise).toFixed(2)} (mask: ${j.mask_used === 'fill' ? 'Fill Area' : 'full canvas'}) — accept (adds a layer) or discard.`, 'ok');
@@ -1405,15 +1602,50 @@ registerModule({
     el.pvdiscard.addEventListener('click', () => {
       el.preview.style.display = 'none';
       previewAsset = null;
+      pvMode = 'render';
       say('Preview discarded — back to the live composite.');
     });
     el.pvaccept.addEventListener('click', async () => {
+      setBusy(el.pvaccept, true, '✓ Accepting…');
+      try {
+        if (pvMode === 'fill') {
+          // v1.3: a fill lands on its TARGET and nowhere else — a layer
+          // target keeps the result on that layer (never stamped onto
+          // the background); a background target replaces the background.
+          let file = previewAsset;
+          if (!file) {
+            if (!el.previewimg.src) throw new Error('no fill to accept');
+            file = (await uploadAsset('render', el.previewimg.src)).file;
+          }
+          if (pvTarget === 'background') {
+            state.canvas.background = { type: 'image', asset: file };
+            bgUrl = projectId ? assetUrl(file) : el.previewimg.src;
+            say('Fill accepted onto the background — layers untouched.', 'ok');
+          } else {
+            const layer = state.layers.find(l => l.id === pvTarget);
+            if (!layer) throw new Error('the fill target layer is gone');
+            const r = runtimeFor(layer);
+            layer.source = file; layer.asset = file;
+            r.sourceDataUrl = '';
+            // The filled pixels are the layer's new truth; its old masks
+            // were baked into the fill input, so both channels reset
+            // (undo restores the pre-fill state, masks included).
+            layer.mask = null; resetMask(r, layer.natural_w || state.canvas.width, layer.natural_h || state.canvas.height); r.maskDirty = false;
+            layer.cutout = null; resetCut(r, layer.natural_w || state.canvas.width, layer.natural_h || state.canvas.height); r.cutDirty = false;
+            loadLayerImage(layer, projectId ? assetUrl(file) : el.previewimg.src);
+            selectedId = layer.id;
+            say(`Fill accepted onto “${layer.name}” — it stayed on the layer.`, 'ok');
+          }
+          previewAsset = null;
+          pvMode = 'render';
+          el.preview.style.display = 'none';
+          commit(); renderStage();
+          return;
+        }
       // v1.2 item 3: Accept = the render becomes a NEW PUPPET LAYER on top
       // of the stack (iterative compositing). The background and every
       // existing layer stay exactly as they are — the render layer can be
       // dragged, resized, rotated, erased into, or rendered over again.
-      setBusy(el.pvaccept, true, '✓ Adding layer…');
-      try {
         let file = previewAsset;
         if (!file) {
           if (!el.previewimg.src) throw new Error('no render to accept');

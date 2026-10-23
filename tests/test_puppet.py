@@ -361,6 +361,8 @@ def _capture_repaint(monkeypatch):
 
     monkeypatch.setattr("backend.comfy.comfy_repaint", fake_repaint)
     monkeypatch.setattr("backend.comfy.comfy_repaint_klein", fake_repaint)
+    # v1.3: Klein + a painted mask routes to the inpaint graph instead
+    monkeypatch.setattr("backend.comfy.comfy_inpaint_klein", fake_repaint)
     return seen
 
 
@@ -572,3 +574,119 @@ def test_render_layer_round_trips_like_any_layer(client):
     im = puppet.composite_image(pid, puppet.validate_state(saved))
     assert im.getpixel((5, 5)) == (0, 0, 255, 255)   # render layer paints over
     assert im.getpixel((30, 30)) == (0, 0, 255, 255)
+
+
+# ------------------------------------------------- v1.3: targeted fill
+
+def _fill_mocks(monkeypatch):
+    calls = {"inpaint": [], "klein": [], "krea2": []}
+
+    def mk(tag):
+        def fake(image_b64, mask_b64, prompt, denoise=0.45, seed=0, timeout=600):
+            with Image.open(io.BytesIO(base64.b64decode(image_b64))) as im:
+                img = im.convert("RGBA").copy()
+            with Image.open(io.BytesIO(base64.b64decode(mask_b64))) as m:
+                msk = m.convert("L").copy()
+            calls[tag].append({"img": img, "mask": msk, "denoise": denoise,
+                               "prompt": prompt})
+            return png_bytes((40, 40), (3, 3, 3, 255))
+        return fake
+
+    monkeypatch.setattr("backend.comfy.comfy_inpaint_klein", mk("inpaint"))
+    monkeypatch.setattr("backend.comfy.comfy_repaint_klein", mk("klein"))
+    monkeypatch.setattr("backend.comfy.comfy_repaint", mk("krea2"))
+    return calls
+
+
+def _painted_project(client):
+    rm_data = _gray_png((40, 40), lambda im: [im.putpixel((x, y), 255)
+                                              for x in range(20) for y in range(40)])
+    return rm_data
+
+
+def test_fill_requires_painted_mask(client, monkeypatch):
+    pid = _fill_project(client, rendermask_data=None)
+    _fill_mocks(monkeypatch)
+    r = client.post(f"/api/puppet/projects/{pid}/fill", json={"target": "background"})
+    assert r.status_code == 400
+    assert "paint" in r.json()["detail"].lower()
+
+
+def test_fill_background_input_excludes_layers(client, monkeypatch):
+    pid = make_project(client)
+    bg = add_asset(client, pid, "background", png_bytes((40, 40), (0, 200, 0, 255)))
+    layer = add_asset(client, pid, "source", png_bytes((20, 20), (255, 0, 0, 255)))
+    rm = add_asset(client, pid, "rendermask", _painted_project(client))
+    state = {"name": "FB", "canvas": {"width": 40, "height": 40,
+                                      "background": {"type": "image", "asset": bg["file"]}},
+             "layers": [{"id": "r", "asset": layer["file"], "x": 0, "y": 0,
+                         "w": 20, "h": 20}],
+             "rendermask": rm["file"]}
+    client.put(f"/api/puppet/projects/{pid}", json={"state": state})
+    calls = _fill_mocks(monkeypatch)
+    r = client.post(f"/api/puppet/projects/{pid}/fill",
+                    json={"target": "background", "prompt": "grass"})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["engine"] == "klein" and j["target_name"] == "background" and j["asset"]
+    seen = calls["inpaint"][0]
+    assert seen["img"].getpixel((5, 5)) == (0, 200, 0, 255)     # bg green…
+    assert seen["img"].getpixel((15, 15)) == (0, 200, 0, 255)   # …NOT layer red
+    assert seen["prompt"] == "grass"
+    assert calls["klein"] == [] and calls["krea2"] == []
+
+
+def test_fill_layer_input_is_subject_only(client, monkeypatch):
+    pid = make_project(client)
+    bg = add_asset(client, pid, "background", png_bytes((40, 40), (0, 200, 0, 255)))
+    red = add_asset(client, pid, "source", png_bytes((40, 40), (255, 0, 0, 255)))
+    blue = add_asset(client, pid, "source", png_bytes((20, 20), (0, 0, 255, 255)))
+    rm = add_asset(client, pid, "rendermask", _painted_project(client))
+    state = {"name": "FL", "canvas": {"width": 40, "height": 40,
+                                      "background": {"type": "image", "asset": bg["file"]}},
+             "layers": [
+                 {"id": "subj", "asset": red["file"], "x": 0, "y": 0, "w": 40, "h": 40},
+                 {"id": "other", "asset": blue["file"], "x": 20, "y": 20, "w": 20, "h": 20}],
+             "rendermask": rm["file"]}
+    client.put(f"/api/puppet/projects/{pid}", json={"state": state})
+    calls = _fill_mocks(monkeypatch)
+    r = client.post(f"/api/puppet/projects/{pid}/fill", json={"target": "subj"})
+    assert r.status_code == 200, r.text
+    seen = calls["inpaint"][0]["img"]
+    assert seen.getpixel((5, 5)) == (255, 0, 0, 255)
+    # the other layer (blue, bottom-right) and the bg must NOT be in the input
+    assert seen.getpixel((30, 30)) == (255, 0, 0, 255)
+
+
+def test_fill_layer_must_be_full_bounds(client, monkeypatch):
+    pid = _fill_project(client, rendermask_data=_painted_project(client))
+    _fill_mocks(monkeypatch)
+    # _fill_project's layer sits at 0,0 with w=h=20 on a 40x40 canvas
+    r = client.post(f"/api/puppet/projects/{pid}/fill", json={"target": "r"})
+    assert r.status_code == 400
+    assert "extended" in r.json()["detail"]
+    r = client.post(f"/api/puppet/projects/{pid}/fill", json={"target": "ghost"})
+    assert r.status_code == 404
+
+
+def test_fill_krea2_routes_to_repaint(client, monkeypatch):
+    pid = _fill_project(client, rendermask_data=_painted_project(client))
+    calls = _fill_mocks(monkeypatch)
+    r = client.post(f"/api/puppet/projects/{pid}/fill",
+                    json={"target": "background", "engine": "krea2", "denoise": 0.99})
+    assert r.status_code == 200
+    assert len(calls["krea2"]) == 1 and calls["inpaint"] == []
+    assert calls["krea2"][0]["denoise"] == 0.8        # fence applies to fill too
+
+
+def test_render_fill_mode_klein_uses_inpaint_graph(client, monkeypatch):
+    """The final pass in Fill mode (painted mask) goes through the inpaint
+    graph; Render-all still uses the ReferenceLatent graph (no regress)."""
+    pid = _fill_project(client, rendermask_data=_painted_project(client))
+    calls = _fill_mocks(monkeypatch)
+    r = client.post(f"/api/puppet/projects/{pid}/render", json={"mode": "fill"})
+    assert r.json()["engine"] == "klein" and r.json()["mask_used"] == "fill"
+    assert len(calls["inpaint"]) == 1 and calls["klein"] == []
+    r = client.post(f"/api/puppet/projects/{pid}/render", json={"mode": "all"})
+    assert r.json()["mask_used"] == "full"
+    assert len(calls["klein"]) == 1 and len(calls["inpaint"]) == 1

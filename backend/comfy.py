@@ -154,6 +154,92 @@ def build_klein_repaint_workflow(image_b64, mask_b64, prompt, denoise=0.45, seed
     return wf
 
 
+# Klein INPAINT workflow — Puppet Theater v1.3, for Fill Area (mode
+# 'fill'). Deliberately a DIFFERENT graph from KLEIN_REPAINT_GRAPH:
+# the reference graph's ReferenceLatent dominates the prompt at cfg 1.0
+# (by design — harmonization should ignore steering), so "paint X here"
+# reads weak through it. This graph is the plain mask-fenced inpaint:
+# BasicScheduler denoise + SetLatentNoiseMask, positive conditioning
+# straight from the prompt (NO ReferenceLatent, NO ColorMatchV2), so the
+# prompt obeys inside the mask. Outside the mask, exactness is not left
+# to the model at all: comfy_inpaint_klein composites the generated
+# result back over the original host-side (see composite_back), so
+# unmasked pixels are pixel-exact by construction.
+KLEIN_INPAINT_GRAPH = {
+    "380": {"class_type": "LoaderGGUF",
+            "inputs": {"gguf_name": "_Flux\\flux-2-klein-9b-Q8_0.gguf"}},
+    "381": {"class_type": "ClipLoaderGGUF",
+            "inputs": {"clip_name": "Qwen3-8B-Q8_0.gguf", "type": "stable_diffusion", "device": "default"}},
+    "382": {"class_type": "VAELoader",
+            "inputs": {"vae_name": "flux2-vae.safetensors"}},
+    "112": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["381", 0]}},
+    "113": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["112", 0]}},
+    "103": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+    "106": {"class_type": "RandomNoise", "inputs": {"noise_seed": 0}},
+    "115": {"class_type": "BasicScheduler", "inputs": {"model": ["380", 0], "scheduler": "simple", "steps": 6, "denoise": 0.45}},
+    "114": {"class_type": "CFGGuider", "inputs": {"cfg": 1.0, "model": ["380", 0], "positive": ["112", 0], "negative": ["113", 0]}},
+    "200": {"class_type": "LoadImage", "inputs": {"image": "input.png", "upload": "image"}},
+    "201": {"class_type": "LoadImageMask", "inputs": {"image": "mask.png", "channel": "red"}},
+    "202": {"class_type": "VAEEncode", "inputs": {"pixels": ["200", 0], "vae": ["382", 0]}},
+    "203": {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["202", 0], "mask": ["201", 0]}},
+    "104": {"class_type": "SamplerCustomAdvanced",
+            "inputs": {"noise": ["106", 0], "guider": ["114", 0], "sampler": ["103", 0],
+                       "sigmas": ["115", 0], "latent_image": ["203", 0]}},
+    "105": {"class_type": "VAEDecode", "inputs": {"samples": ["104", 0], "vae": ["382", 0]}},
+    "19":  {"class_type": "SaveImage", "inputs": {"images": ["105", 0],
+            "filename_prefix": "ellieedit_tmp/puppet_fill"}},
+}
+
+
+def build_klein_inpaint_workflow(image_b64, mask_b64, prompt, denoise=0.45, seed=0):
+    """Deep-copy KLEIN_INPAINT_GRAPH and patch in one job's parameters."""
+    img_png = base64.b64decode(image_b64)
+    mask_png = base64.b64decode(mask_b64)
+
+    img_name = _comfy_upload(img_png, f"kf_img_{seed}.png")
+    mask_name = _comfy_upload(mask_png, f"kf_mask_{seed}.png")
+
+    wf = copy.deepcopy(KLEIN_INPAINT_GRAPH)
+    wf["112"]["inputs"]["text"] = prompt
+    wf["106"]["inputs"]["noise_seed"] = int(seed)
+    wf["115"]["inputs"]["denoise"] = float(denoise)
+    wf["200"]["inputs"]["image"] = img_name
+    wf["201"]["inputs"]["image"] = mask_name
+    return wf
+
+
+def composite_back(orig_png: bytes, gen_png: bytes, mask_png: bytes) -> bytes:
+    """The composite-back step: generated pixels inside the mask (white),
+    ORIGINAL pixels everywhere else — pixel-exact, not model-approximate.
+    Host-side PIL rather than an in-graph ImageComposite node: identical
+    semantics, zero extra node risk on the stack, and unit-testable."""
+    with Image.open(io.BytesIO(orig_png)) as im:
+        orig = im.convert("RGBA")
+    with Image.open(io.BytesIO(gen_png)) as im:
+        gen = im.convert("RGBA")
+    with Image.open(io.BytesIO(mask_png)) as im:
+        mask = im.convert("L")
+    if gen.size != orig.size:
+        gen = gen.resize(orig.size, Image.LANCZOS)
+    if mask.size != orig.size:
+        mask = mask.resize(orig.size, Image.BILINEAR)
+    out = Image.composite(gen, orig, mask)
+    buf = io.BytesIO()
+    out.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def comfy_inpaint_klein(image_b64, mask_b64, prompt, denoise=0.45, seed=0, timeout=600):
+    """Run one Klein masked inpaint (Fill Area). The graph regenerates the
+    masked region with the prompt in charge; composite_back then restores
+    the original pixels outside the mask exactly. Returns full-image PNG
+    bytes."""
+    wf = build_klein_inpaint_workflow(image_b64, mask_b64, prompt, denoise, seed)
+    gen = _run_workflow(wf, seed, denoise, timeout, tag="inpaint:klein")
+    return composite_back(base64.b64decode(image_b64), gen,
+                          base64.b64decode(mask_b64))
+
+
 def _comfy_upload(png_bytes, name, image_type="input", overwrite=True):
     """Upload a PNG to ComfyUI's /upload/image endpoint. Returns server filename."""
     boundary = uuid.uuid4().hex

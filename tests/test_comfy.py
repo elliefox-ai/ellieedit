@@ -204,3 +204,72 @@ def test_comfy_repaint_klein_roundtrip(no_http):
                                     denoise=0.45, seed=1)
     assert out == b"PNGDATA"
     assert no_http["uploads"] == ["pk_img_1.png", "pk_mask_1.png"]
+
+
+# ------------------------------------------------ Klein inpaint (v1.3)
+
+def test_klein_inpaint_graph_shape():
+    g = comfy.KLEIN_INPAINT_GRAPH
+    classes = {n["class_type"] for n in g.values()}
+    # the whole point: NO ReferenceLatent (it eats the prompt at cfg 1)
+    # and no ColorMatchV2 — the prompt drives the positive directly
+    assert "ReferenceLatent" not in classes
+    assert "ColorMatchV2" not in classes
+    assert g["114"]["inputs"]["positive"] == ["112", 0]
+    # mask fence present: BasicScheduler denoise + latent noise mask
+    assert g["115"]["class_type"] == "BasicScheduler"
+    assert "denoise" in g["115"]["inputs"]
+    assert g["203"]["class_type"] == "SetLatentNoiseMask"
+    assert g["19"]["inputs"]["images"] == ["105", 0]
+
+
+def test_build_klein_inpaint_workflow_patches(no_http):
+    wf = comfy.build_klein_inpaint_workflow(
+        make_png_b64(), make_png_b64(), "a red door", denoise=0.6, seed=7)
+    assert wf["112"]["inputs"]["text"] == "a red door"
+    assert wf["115"]["inputs"]["denoise"] == 0.6
+    assert wf["200"]["inputs"]["image"] == "kf_img_7.png"
+    assert wf["201"]["inputs"]["image"] == "kf_mask_7.png"
+    assert comfy.KLEIN_INPAINT_GRAPH["112"]["inputs"]["text"] == ""
+
+
+def test_composite_back_leaves_unmasked_pixels_exact():
+    orig = png = io.BytesIO()
+    im = Image.new("RGBA", (10, 10), (255, 0, 0, 255))
+    im.save(png, "PNG")
+    orig_b = png.getvalue()
+    buf = io.BytesIO(); Image.new("RGBA", (10, 10), (0, 0, 255, 255)).save(buf, "PNG")
+    gen_b = buf.getvalue()
+    mask = Image.new("L", (10, 10), 0)
+    for x in range(5):
+        for y in range(10):
+            mask.putpixel((x, y), 255)
+    buf = io.BytesIO(); mask.save(buf, "PNG")
+    out = comfy.composite_back(orig_b, gen_b, buf.getvalue())
+    with Image.open(io.BytesIO(out)) as res:
+        assert res.getpixel((2, 5)) == (0, 0, 255, 255)   # inside: generated
+        assert res.getpixel((7, 5)) == (255, 0, 0, 255)   # outside: ORIGINAL
+
+
+def test_comfy_inpaint_klein_roundtrip(monkeypatch):
+    seen = {}
+
+    def fake_run(wf, seed, denoise, timeout=600, tag="inpaint:klein"):
+        seen["wf"] = wf
+        buf = io.BytesIO()
+        Image.new("RGBA", (64, 48), (0, 0, 255, 255)).save(buf, "PNG")
+        return buf.getvalue()
+
+    monkeypatch.setattr(comfy, "_run_workflow", fake_run)
+    monkeypatch.setattr(comfy, "_comfy_upload", lambda b, n, **kw: n)
+    mask = Image.new("L", (64, 48), 0)
+    for x in range(32):
+        for y in range(48):
+            mask.putpixel((x, y), 255)
+    buf = io.BytesIO(); mask.save(buf, "PNG")
+    out = comfy.comfy_inpaint_klein(make_png_b64(), base64.b64encode(buf.getvalue()).decode(),
+                                    "blue door", denoise=0.5, seed=3)
+    with Image.open(io.BytesIO(out)) as res:
+        assert res.getpixel((5, 5)) == (0, 0, 255, 255)        # filled side
+        assert res.getpixel((50, 5)) == (200, 100, 50, 255)    # exact original
+    assert seen["wf"]["112"]["inputs"]["text"] == "blue door"
