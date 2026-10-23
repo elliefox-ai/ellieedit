@@ -336,6 +336,19 @@ def rmbg_status() -> dict:
             "model_path": str(rmbg_model_path())}
 
 
+_rmbg_session = None
+
+
+def _rmbg_remove(raw: bytes) -> bytes:
+    """remove() with a cached session — remove() alone rebuilds the onnx
+    session (~10-30s) on EVERY call, which made every puppet drop crawl."""
+    global _rmbg_session
+    from rembg import remove, new_session
+    if _rmbg_session is None:
+        _rmbg_session = new_session("u2net")
+    return remove(raw, session=_rmbg_session)
+
+
 def _run_rmbg(job_id: str, raw: bytes) -> None:
     try:
         st = rmbg_status()
@@ -346,8 +359,7 @@ def _run_rmbg(job_id: str, raw: bytes) -> None:
             raise RuntimeError(
                 "u2net model not cached and downloads are off "
                 "(set PUPPET_RMBG_ALLOW_DOWNLOAD=1 to allow a first-run download)")
-        from rembg import remove
-        out = remove(raw)                    # bytes in -> PNG bytes out
+        out = _rmbg_remove(raw)              # bytes in -> PNG bytes out
         if isinstance(out, Image.Image):
             out = _png_bytes(out)
         with Image.open(io.BytesIO(out)) as im:
