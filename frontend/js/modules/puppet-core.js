@@ -10,8 +10,8 @@
 // `transform: rotate()` on an absolutely-positioned element behaves, and
 // exactly how the backend compositor (puppet.py) flattens the stack.
 
-export const DENOISE_MIN = 0.4;
-export const DENOISE_MAX = 0.5;
+export const DENOISE_MIN = 0.2;
+export const DENOISE_MAX = 0.8;
 export const DENOISE_DEFAULT = 0.45;
 
 export const CANVAS_PRESETS = { '1:1': [1024, 1024], '3:2': [1152, 768], '16:9': [1280, 720] };

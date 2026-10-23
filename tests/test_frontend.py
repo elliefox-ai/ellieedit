@@ -370,7 +370,7 @@ def test_puppet_module_wiring_and_fence():
                    'data-id="exjson"', 'data-id="pvaccept"', 'data-id="pvdiscard"',
                    "/rmbg", "clampDenoise"):
         assert needle in src, needle
-    assert "DENOISE_MIN = 0.4" in core and "DENOISE_MAX = 0.5" in core
+    assert "DENOISE_MIN = 0.2" in core and "DENOISE_MAX = 0.8" in core
     assert 'min="0.4" max="0.5"' in src          # the slider itself is fenced
     assert (mods / "puppet.css").exists()
 

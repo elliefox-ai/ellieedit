@@ -1,7 +1,7 @@
 // Puppet Theater — multi-subject compose stage (work order 2026-10-22).
 // Humans place rmbg cutouts as baked pixels (drag / resize / rotate,
 // nondestructive alpha-mask erase); the model only gets a final fenced
-// low-denoise harmonization pass (0.4–0.5, server-clamped) via
+// low-denoise harmonization pass (0.2–0.8, server-clamped) via
 // /api/puppet/render. Poses are pixels, not prompt-wishes.
 // Backend: /api/puppet/*. Pure logic: puppet-core.js (node-tested).
 import { registerModule } from '../shell.js';
@@ -95,8 +95,8 @@ registerModule({
         <div class="pt-sec">Final pass — harmonize</div>
         <div><label>Atmosphere (optional)</label>
           <input type="text" data-id="rprompt" placeholder="golden hour, soft rim light…"></div>
-        <div><label>Denoise <span data-id="dval">0.45</span> — fenced 0.40–0.50</label>
-          <input type="range" data-id="denoise" min="0.4" max="0.5" step="0.01" value="0.45" aria-label="Final pass denoise"></div>
+        <div><label>Denoise <span data-id="dval">0.45</span> — fenced 0.20–0.80</label>
+          <input type="range" data-id="denoise" min="0.2" max="0.8" step="0.01" value="0.45" aria-label="Final pass denoise"></div>
         <div class="pt-row" data-id="rmodes">
           <button class="ee-btn pt-btn on" data-rmode="fill">Fill Area only</button>
           <button class="ee-btn pt-btn" data-rmode="all">Render all</button>
@@ -1340,7 +1340,7 @@ registerModule({
         const c = await api('/config');
         const rm = c.rmbg || {};
         el.conn.textContent = rm.available
-          ? '● rmbg ready · denoise fence 0.40–0.50'
+          ? '● rmbg ready · denoise fence 0.20–0.80'
           : '○ rmbg not available on server (✂ Cut Out will report it; drops still place instantly)';
         el.conn.className = 'pt-status ' + (rm.available ? 'ok' : 'err');
       } catch (e) {
