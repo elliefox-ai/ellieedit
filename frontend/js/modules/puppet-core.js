@@ -125,6 +125,54 @@ export function planRestore(state) {
   });
 }
 
+/** The empty-stage drop hint (v1.2 item 1) shows ONLY when the stage is
+ * truly empty — no layers AND no background — or during an active
+ * drag-over (when it reads as a drop target, not a label on the art). */
+export function stageHintVisible({ layerCount = 0, hasBackground = false, dragOver = false } = {}) {
+  if (dragOver) return true;
+  return layerCount === 0 && !hasBackground;
+}
+
+/**
+ * A fresh layer for an accepted final-pass render (v1.2 item 3): the
+ * render becomes a puppet ON TOP of the stack — full-canvas placement,
+ * fully transformable, background untouched. asset and source both point
+ * at the render asset so it save/reload round-trips like any layer.
+ * Numbered "Render N" after existing render layers.
+ */
+export function makeRenderLayer(state, { id, asset } = {}) {
+  const s = normalizeState(state);
+  const n = s.layers.filter(l => /^Render \d+$/.test(l.name)).length;
+  return normalizeLayer({
+    id: id || `layer-${s.layers.length + 1}`,
+    name: `Render ${n + 1}`,
+    asset, source: asset,
+    x: 0, y: 0, w: s.canvas.width, h: s.canvas.height,
+    rotation: 0, visible: true,
+    natural_w: s.canvas.width, natural_h: s.canvas.height,
+  });
+}
+
+// ------------------------------------------- layer-scoped Fill Area (v1.2)
+// When a layer is selected, Fill Area strokes are GATED to the layer's
+// footprint ∪ the fill painted so far: a stroke must start on (or
+// connected to) the puppet or existing fill, and can then grow outward —
+// "fill the body below this headshot" is a stroke that starts at the neck
+// and walks down. The gate arithmetic below is the scalar mirror of the
+// canvas implementation (destination-in IS this multiply).
+
+/** Union of the layer-footprint alpha and the existing fill gray at a
+ * point: either one admits paint. */
+export function unionClipAlpha(layerAlpha, fillGray) {
+  return Math.max(layerAlpha | 0, fillGray | 0);
+}
+
+/** A stamp's effective alpha after gating through the clip: stamp alpha
+ * scaled by clip alpha (fully admitted at clip 255, blocked at 0). */
+export function gateStampAlpha(stampAlpha, clipAlpha) {
+  return Math.floor((stampAlpha * clipAlpha) / 255);
+}
+
 /**
  * Execute a restore plan. `load(file)` returns a Promise for the decoded
  * image (any truthy value) or rejects. Each candidate is tried up to
