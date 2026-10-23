@@ -371,7 +371,7 @@ def test_puppet_module_wiring_and_fence():
                    "/rmbg", "clampDenoise"):
         assert needle in src, needle
     assert "DENOISE_MIN = 0.2" in core and "DENOISE_MAX = 0.8" in core
-    assert 'min="0.4" max="0.5"' in src          # the slider itself is fenced
+    assert 'min="0.2" max="0.8"' in src          # the slider itself is fenced (widened 2026-10-22)
     assert (mods / "puppet.css").exists()
 
 
