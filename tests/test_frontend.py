@@ -415,8 +415,29 @@ def test_puppet_v12_iterative_wiring():
     for needle in ('stageHintVisible', 'makeRenderLayer', 'unionClipAlpha',
                    'gateStampAlpha'):
         assert needle in core, needle
-    # the accept path must not stamp the background anymore
+    # the accept path must not stamp the background anymore: the v1 line
+    # that turned the render into the stage picture is gone, and the
+    # render branch creates a layer (v1.3 added a separate fill branch to
+    # the same handler — it may touch the background only for bg fills)
     accept_fn = src.split("el.pvaccept.addEventListener('click'")[1].split("});")[0]
     assert 'makeRenderLayer' in accept_fn
-    assert 'canvas.background' not in accept_fn
+    assert "asset: previewAsset }" not in src
     assert 'visible = false' not in accept_fn        # layers stay live now
+
+
+def test_puppet_v13_targeted_fill_wiring():
+    """v1.3: targeted Fill action, layer extension, merge down, focus
+    stickiness (bounds, not alpha), and the fill preview-accept branch."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    src = (mods / "puppet.js").read_text()
+    core = (mods / "puppet-core.js").read_text()
+    for needle in ('data-id="fillgo"', 'extendLayerToCanvas', 'mergeDown',
+                   'topmostBoundsAt', 'hitLayer(sel', "pvMode = 'fill'",
+                   "/fill", 'layerIsFullBounds', 'drawLayerAppearance'):
+        assert needle in src, needle
+    for needle in ('topmostBoundsAt', 'layerIsFullBounds'):
+        assert needle in core, needle
+    # fill accept writes to the target layer/background only via pvTarget
+    accept_fn = src.split("el.pvaccept.addEventListener('click'")[1].split("el.pvdiscard")[0]
+    assert "pvMode === 'fill'" in accept_fn
+    assert 'pvTarget' in accept_fn
