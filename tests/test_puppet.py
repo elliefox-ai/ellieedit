@@ -313,3 +313,178 @@ def test_rmbg_endpoint_alpha_corners(client):
         assert out.mode == "RGBA"
         assert out.getpixel((0, 0))[3] == 0          # corner: background removed
         assert out.getpixel((79, 79))[3] == 0
+
+
+# ------------------------------------------------- v1.1: Fill Area + D
+
+def _gray_png(size, painter):
+    im = Image.new("L", size, 0)
+    painter(im)
+    buf = io.BytesIO(); im.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _fill_project(client, rendermask_data=None, mode_canvas=(40, 40)):
+    """One project whose state references a rendermask asset uploaded INTO
+    that same project (assets are project-scoped)."""
+    pid = make_project(client)
+    layer = add_asset(client, pid, "source", png_bytes((20, 20), (255, 0, 0, 255)))
+    rm_file = None
+    if rendermask_data is not None:
+        rm_file = add_asset(client, pid, "rendermask", rendermask_data)["file"]
+    state = {"name": "Fill", "canvas": {"width": mode_canvas[0], "height": mode_canvas[1],
+                                        "background": {"type": "none", "asset": None}},
+             "layers": [{"id": "r", "asset": layer["file"], "x": 0, "y": 0,
+                         "w": 20, "h": 20}],
+             "rendermask": rm_file}
+    client.put(f"/api/puppet/projects/{pid}", json={"state": state})
+    return pid
+
+
+def _capture_repaint(monkeypatch):
+    seen = {}
+
+    def fake_repaint(image_b64, mask_b64, prompt, denoise=0.5, seed=0, timeout=600):
+        seen["mask_b64"] = mask_b64
+        with Image.open(io.BytesIO(base64.b64decode(mask_b64))) as m:
+            seen["mask"] = m.convert("L").copy()
+        return png_bytes((40, 40), (9, 9, 9, 255))
+
+    monkeypatch.setattr("backend.comfy.comfy_repaint", fake_repaint)
+    return seen
+
+
+def test_validate_state_carries_cutout_and_rendermask():
+    st = puppet.validate_state({
+        "canvas": {"width": 40, "height": 40},
+        "rendermask": "rendermask-abc.png",
+        "layers": [{"id": "a", "cutout": "cutout-x.png", "mask": "mask-y.png",
+                    "asset": "../evil.png"}]})
+    assert st["rendermask"] == "rendermask-abc.png"
+    assert st["layers"][0]["cutout"] == "cutout-x.png"
+    assert st["layers"][0]["mask"] == "mask-y.png"
+    assert st["layers"][0]["asset"] is None          # traversal stripped
+    # three separate channels, never aliased
+    assert len({st["rendermask"], st["layers"][0]["cutout"],
+                st["layers"][0]["mask"]}) == 3
+    st2 = puppet.validate_state({"rendermask": "../evil.png", "layers": []})
+    assert st2["rendermask"] is None                 # jail applies here too
+
+
+def test_rendermask_asset_round_trip(client):
+    pid = make_project(client)
+    data = _gray_png((40, 40), lambda im: [im.putpixel((x, y), 255)
+                                           for x in range(20) for y in range(40)])
+    a = add_asset(client, pid, "rendermask", data)
+    assert a["file"].startswith("rendermask-")
+    state = {"name": "RT", "canvas": {"width": 40, "height": 40,
+                                      "background": {"type": "none", "asset": None}},
+             "layers": [], "rendermask": a["file"]}
+    client.put(f"/api/puppet/projects/{pid}", json={"state": state})
+    got = client.get(f"/api/puppet/projects/{pid}").json()["state"]
+    assert got["rendermask"] == a["file"]
+    r = client.get(f"/api/puppet/projects/{pid}/assets/{a['file']}")
+    assert r.status_code == 200
+    with Image.open(io.BytesIO(r.content)) as im:
+        m = im.convert("L")
+        assert m.getpixel((5, 5)) == 255 and m.getpixel((30, 5)) == 0
+
+
+def test_render_passes_painted_mask_through(client, monkeypatch):
+    data = _gray_png((40, 40), lambda im: [im.putpixel((x, y), 255)
+                                           for x in range(20) for y in range(40)])
+    pid = _fill_project(client, rendermask_data=data)
+    seen = _capture_repaint(monkeypatch)
+    r = client.post(f"/api/puppet/projects/{pid}/render",
+                    json={"prompt": "", "denoise": 0.45, "mode": "fill"})
+    assert r.status_code == 200, r.text
+    assert r.json()["mask_used"] == "fill"
+    m = seen["mask"]
+    assert m.size == (40, 40)
+    assert m.getpixel((5, 5)) == 255      # painted: regenerate
+    assert m.getpixel((30, 5)) == 0       # unpainted: locked
+    assert m.getextrema() == (0, 255)     # NOT the full-white v1 mask
+
+
+def test_render_empty_mask_behaves_like_v1(client, monkeypatch):
+    pid = _fill_project(client, rendermask_data=_gray_png((40, 40), lambda im: None))
+    seen = _capture_repaint(monkeypatch)
+    r = client.post(f"/api/puppet/projects/{pid}/render", json={"mode": "fill"})
+    assert r.json()["mask_used"] == "full"
+    assert seen["mask"].getextrema() == (255, 255)    # empty = white behavior
+
+
+def test_render_mode_all_ignores_painted_mask(client, monkeypatch):
+    data = _gray_png((40, 40), lambda im: [im.putpixel((x, y), 255)
+                                           for x in range(20) for y in range(40)])
+    pid = _fill_project(client, rendermask_data=data)
+    seen = _capture_repaint(monkeypatch)
+    r = client.post(f"/api/puppet/projects/{pid}/render", json={"mode": "all"})
+    assert r.json()["mask_used"] == "full"
+    assert seen["mask"].getextrema() == (255, 255)
+
+
+def test_render_no_mask_default_unchanged(client, monkeypatch):
+    pid = _fill_project(client, rendermask_data=None)
+    seen = _capture_repaint(monkeypatch)
+    r = client.post(f"/api/puppet/projects/{pid}/render", json={})
+    assert r.json()["mask_used"] == "full"
+    assert seen["mask"].getextrema() == (255, 255)
+
+
+def test_cutout_mask_composites_and_restores(client):
+    """Amendment D at the flatten level: the cutout is a MASK over the
+    untouched original — left half cut away, and dropping the mask
+    reference brings the full original back (Restore)."""
+    pid = make_project(client)
+    src = add_asset(client, pid, "source", png_bytes((20, 20), (255, 0, 0, 255)))
+    half = _gray_png((20, 20), lambda im: [im.putpixel((x, y), 255)
+                                           for x in range(10, 20) for y in range(20)])
+    cut = add_asset(client, pid, "cutout", half)
+    state = {"name": "D", "canvas": {"width": 20, "height": 20,
+                                     "background": {"type": "none", "asset": None}},
+             "layers": [{"id": "r", "asset": src["file"], "source": src["file"],
+                         "cutout": cut["file"], "x": 0, "y": 0, "w": 20, "h": 20}]}
+    client.put(f"/api/puppet/projects/{pid}", json={"state": state})
+    im = puppet.composite_image(pid, puppet.validate_state(puppet.load_project(pid)))
+    assert im.getpixel((5, 10))[3] == 0        # cut away by the rmbg mask
+    assert im.getpixel((15, 10)) == (255, 0, 0, 255)
+    # Both masks multiply: erase the kept half too and everything is gone.
+    em = add_asset(client, pid, "mask", _gray_png((20, 20), lambda im2:
+                   [im2.putpixel((x, y), 255) for x in range(10) for y in range(20)]))
+    state["layers"][0]["mask"] = em["file"]
+    im2 = puppet.composite_image(pid, puppet.validate_state(state))
+    assert im2.getpixel((15, 10))[3] == 0
+    assert im2.getpixel((5, 10))[3] == 0
+    # Restore: cutout reference dropped -> original pixels fully back.
+    state["layers"][0]["cutout"] = None
+    state["layers"][0]["mask"] = None
+    im3 = puppet.composite_image(pid, puppet.validate_state(state))
+    assert im3.getpixel((5, 10)) == (255, 0, 0, 255)
+
+
+def test_saved_project_assets_all_fetchable(client):
+    """Amendment C, server half: every asset a saved state references —
+    layer base, cutout, erase mask, rendermask, background — must come
+    back over HTTP with image bytes, or reload has nothing to paint."""
+    pid = make_project(client)
+    src = add_asset(client, pid, "source", png_bytes((16, 16), (1, 2, 3, 255)))
+    cut = add_asset(client, pid, "cutout", _gray_png((16, 16), lambda im: None))
+    msk = add_asset(client, pid, "mask", _gray_png((16, 16), lambda im: None))
+    rm = add_asset(client, pid, "rendermask", _gray_png((32, 32), lambda im: None))
+    bg = add_asset(client, pid, "background", png_bytes((32, 32), (9, 9, 9, 255)))
+    state = {"name": "C", "canvas": {"width": 32, "height": 32,
+                                     "background": {"type": "image", "asset": bg["file"]}},
+             "layers": [{"id": "r", "asset": src["file"], "source": src["file"],
+                         "cutout": cut["file"], "mask": msk["file"],
+                         "x": 0, "y": 0, "w": 16, "h": 16}],
+             "rendermask": rm["file"]}
+    client.put(f"/api/puppet/projects/{pid}", json={"state": state})
+    saved = client.get(f"/api/puppet/projects/{pid}").json()["state"]
+    refs = [saved["layers"][0][k] for k in ("asset", "source", "cutout", "mask")]
+    refs += [saved["rendermask"], saved["canvas"]["background"]["asset"]]
+    assert all(refs)
+    for f in refs:
+        r = client.get(f"/api/puppet/projects/{pid}/assets/{f}")
+        assert r.status_code == 200, f
+        assert r.content.startswith(b"\x89PNG"), f
