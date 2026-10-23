@@ -593,8 +593,17 @@ def render(pid: str, body: RenderBody):
     denoise = clamp_denoise(body.denoise)
     mask_b64, mask_used = choose_render_mask(pid, state, body.mode)
     engine = resolve_engine(body.engine)
-    repaint = (comfy.comfy_repaint_klein if engine == "klein"
-               else comfy.comfy_repaint)
+    # Per-mode graphs (v1.3): Klein 'all' uses the ReferenceLatent
+    # reference graph (context holds; steering intentionally weak);
+    # Klein 'fill' uses the dedicated masked-inpaint graph (prompt
+    # obeys, composite-back keeps locked pixels exact). Krea2's repaint
+    # is a masked inpaint already and serves both modes.
+    if engine == "klein" and mask_used == "fill":
+        repaint = comfy.comfy_inpaint_klein
+    elif engine == "klein":
+        repaint = comfy.comfy_repaint_klein
+    else:
+        repaint = comfy.comfy_repaint
     try:
         png = repaint(
             base64.b64encode(_png_bytes(flat)).decode(),
@@ -604,15 +613,86 @@ def render(pid: str, body: RenderBody):
     except Exception as e:
         log.error("[puppet render] ERROR: %s", e)
         raise HTTPException(status_code=502, detail=f"final pass failed: {e}")
-    render_asset = None
-    try:
-        d = project_dir(pid) / "assets"
-        d.mkdir(parents=True, exist_ok=True)
-        render_asset = f"render-{uuid.uuid4().hex[:10]}.png"
-        (d / render_asset).write_bytes(png)
-    except OSError:
-        render_asset = None                   # preview still returns
+    render_asset = _store_render_asset(pid, png)
     return {"image_b64": base64.b64encode(png).decode(),
             "denoise": denoise, "width": w, "height": h,
             "mask_used": mask_used, "engine": engine,
             "render_asset": render_asset}
+
+
+def _store_render_asset(pid: str, png: bytes):
+    try:
+        d = project_dir(pid) / "assets"
+        d.mkdir(parents=True, exist_ok=True)
+        name = f"render-{uuid.uuid4().hex[:10]}.png"
+        (d / name).write_bytes(png)
+        return name
+    except OSError:
+        return None                           # preview still returns
+
+
+class FillBody(BaseModel):
+    prompt: str = ""
+    denoise: float | None = None
+    seed: int = 0
+    engine: str = "klein"
+    target: str = "background"                # 'background' or a layer id
+
+
+@router.post("/projects/{pid}/fill")
+def fill(pid: str, body: FillBody):
+    """Targeted Fill Area generation (v1.3). Unlike the final pass — which
+    harmonizes the WHOLE composite — a fill regenerates only the painted
+    rendermask region of ONE target:
+
+    - target 'background': the input is the background alone; layers are
+      not in the input and cannot be changed by the result.
+    - target = a layer id: the input is THAT LAYER'S OWN pixels (the
+      subject, not the scene — style coherence is the final pass's job).
+      The layer must already be extended to full project bounds (the
+      client does this, permanently, before calling) so layer space and
+      mask space coincide.
+
+    Klein runs the dedicated inpaint graph (prompt obeys; composite-back
+    keeps locked pixels pixel-exact); Krea2 runs its masked repaint. The
+    result returns as a preview; the client applies it to the target on
+    accept — never stamped anywhere else."""
+    state = validate_state(load_project(pid))
+    mask_b64, mask_used = choose_render_mask(pid, state, "fill")
+    if mask_used != "fill":
+        raise HTTPException(400, "no Fill Area painted — paint a fill region first")
+    cw = int(state["canvas"]["width"])
+    ch = int(state["canvas"]["height"])
+    if body.target == "background":
+        flat = composite_image(pid, {**state, "layers": []})
+        target_name = "background"
+    else:
+        layer = next((l for l in state["layers"] if l["id"] == body.target), None)
+        if layer is None:
+            raise HTTPException(404, f"no such layer: {body.target}")
+        if (int(layer["x"]) != 0 or int(layer["y"]) != 0
+                or int(layer["w"]) != cw or int(layer["h"]) != ch
+                or float(layer.get("rotation") or 0.0) % 360.0 != 0.0):
+            raise HTTPException(400,
+                "layer must be extended to full project bounds before fill "
+                "(the client extends it permanently as part of the fill flow)")
+        flat = composite_image(pid, {**state,
+                                     "canvas": {**state["canvas"],
+                                                "background": {"type": "none",
+                                                               "asset": None}},
+                                     "layers": [layer]})
+        target_name = layer["name"]
+    denoise = clamp_denoise(body.denoise)
+    engine = resolve_engine(body.engine)
+    run = comfy.comfy_inpaint_klein if engine == "klein" else comfy.comfy_repaint
+    try:
+        png = run(base64.b64encode(_png_bytes(flat)).decode(),
+                  mask_b64, body.prompt or "",
+                  denoise=denoise, seed=int(body.seed or 0))
+    except Exception as e:
+        log.error("[puppet fill] ERROR: %s", e)
+        raise HTTPException(status_code=502, detail=f"fill failed: {e}")
+    return {"image_b64": base64.b64encode(png).decode(),
+            "denoise": denoise, "engine": engine,
+            "target": body.target, "target_name": target_name,
+            "asset": _store_render_asset(pid, png)}
