@@ -283,3 +283,25 @@ bumps, no restarts, suites green at handoff).
    rewritten; confirmed by test).
 5. Scan results open in the existing dupe review UI.
 6. Full pytest + tests/js suites green.
+
+## v1.5.1 addendum (Alexander, 2026-10-24): gallery UX items — fold into v1.5
+- **Multi-select send-to:** select multiple gallery images → Send to Puppet
+  Theater as LAYERS (one puppet layer per image, stacked in order).
+- **Range selection:** click, shift-click selects the range between.
+- **Promote-to-library improvements:** the promote confirmation should retain
+  the most recent and most commonly used tags (not start blank every time);
+  mass promote via multiselect (apply one tag set to the whole selection).
+
+---
+
+# WORKORDER — keyboard shortcut guards (general, small)
+
+**Date:** 2026-10-24 · **Builder:** echo · **Scope:** suite-wide, small.
+1. **P shortcut misfires while typing** — single-key shortcuts must be
+   ignored whenever focus is in any text input, textarea, or contenteditable
+   (suite-wide guard, one shared helper, not per-tab patches).
+2. **Backspace triggers deletion** — remove the backspace deletion shortcut
+   entirely, at least in main views. Deletion should require an explicit
+   button/context action, never a key that also edits text.
+Tests: pin the guard helper (typing in a field does not trigger shortcuts;
+backspace does not delete in main view).
