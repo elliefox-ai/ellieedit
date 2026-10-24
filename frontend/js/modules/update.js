@@ -57,6 +57,12 @@ function panelHTML() {
       display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .upd-actions .ee-btn { min-height: 44px; }
     .upd-actions .stackpos { font-size: 11px; color: #8a8aaa; flex: 1; text-align: center; }
+    .upd-mask { padding: 8px 16px; background: #12121f; border-bottom: 1px solid #2a2a44; }
+    .upd-mask-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+      margin-bottom: 6px; font-size: 11px; color: #8a8aaa; }
+    .upd-mask-tools input[type=range] { vertical-align: middle; }
+    .upd-mask canvas { display: block; max-width: 100%; max-height: 240px;
+      border: 1px solid #4a4a6c; cursor: crosshair; touch-action: none; }
   </style>
   <div style="display:flex;flex-direction:column;height:100%">
     <div class="upd-bar">
@@ -65,6 +71,9 @@ function panelHTML() {
       <label>Seed</label>
       <input type="number" id="upd-seed" value="0">
       <span class="upd-seedbox"><input type="checkbox" id="upd-random" checked> random</span>
+      <label id="upd-denoise-lbl" style="display:none">Denoise
+        <input type="range" id="upd-denoise" min="0.2" max="0.8" step="0.05" value="0.45">
+        <span id="upd-denoise-val">0.45</span></label>
       <button class="ee-btn primary" data-act="upd-run" id="upd-run" disabled>▶ Run</button>
       <span class="upd-status" id="upd-status">send an image from the Gallery lightbox (✎ Update)</span>
     </div>
@@ -75,6 +84,16 @@ function panelHTML() {
         <button class="ee-btn" data-act="upd-save-prompt" title="Save current prompt">💾 Save</button>
         <button class="ee-btn" data-act="upd-del-prompt" title="Delete selected saved prompt">🗑</button>
       </div>
+    </div>
+    <div class="upd-mask" id="upd-mask" style="display:none">
+      <div class="upd-mask-tools">
+        <button class="ee-btn" data-act="upd-mask-paint">🖌 Paint</button>
+        <button class="ee-btn" data-act="upd-mask-erase">🧽 Erase</button>
+        <label>Brush <input type="range" id="upd-brush" min="4" max="120" value="40"></label>
+        <button class="ee-btn" data-act="upd-mask-clear">Clear</button>
+        <span>White = regenerate. Paint the region to change; everything else stays pixel-exact.</span>
+      </div>
+      <canvas id="upd-mask-canvas"></canvas>
     </div>
     <div class="upd-stage" id="upd-stage">
       <div class="upd-empty" id="upd-empty">
@@ -107,13 +126,20 @@ class UpdateView {
     this.el = {};
     for (const id of ['preset', 'seed', 'random', 'run', 'status', 'prompt',
       'saved', 'stage', 'empty', 'cmp', 'img-a', 'wrap-b', 'img-b', 'div',
-      'tag-a', 'tag-b', 'pos', 'save']) {
+      'tag-a', 'tag-b', 'pos', 'save', 'denoise', 'denoise-lbl',
+      'denoise-val', 'mask', 'mask-canvas', 'brush']) {
       this.el[id.replace(/-(\w)/g, (_, c) => c.toUpperCase())] =
         panel.querySelector(`#upd-${id}`);
     }
     this.stack = null;          // version-stack state (update-stack.js)
     this.presets = [];
     this.running = false;
+    this.maskedMode = false;    // masked-inpaint recipe selected
+    this.maskCanvas = null;     // offscreen mask (black bg, white = regen)
+    this.maskImg = null;        // source image element for the mask view
+    this.maskPainted = false;   // any white stroke laid down yet
+    this.maskMode = 'paint';
+    this.maskBrush = 40;
     this.cmpPct = 50;           // comparer divider, percent from left
     window.addEventListener('resize', () => this.fitComparer());
 
@@ -141,6 +167,12 @@ class UpdateView {
         o.value = p.file; o.textContent = p.name; o.title = p.description;
         sel.appendChild(o);
       }
+      // Masked-inpaint recipe (2026-10-24): NOT a workflow file — it runs
+      // Puppet's Klein inpaint graph + composite_back via /inpaint-async.
+      const mi = document.createElement('option');
+      mi.value = '__masked_inpaint'; mi.textContent = '🎭 Masked inpaint (Klein)';
+      mi.title = 'Regenerate only the painted region, with a prompt. Unpainted pixels stay pixel-exact.';
+      sel.appendChild(mi);
       this.updateRunEnabled();
     } catch (err) {
       this.el.status.textContent = 'preset load failed: ' + err.message;
@@ -163,6 +195,76 @@ class UpdateView {
     } catch { /* quiet — side feature */ }
   }
 
+  // ---- mask editor (masked-inpaint recipe) --------------------------------
+  setMaskedMode(on) {
+    this.maskedMode = on;
+    this.el.mask.style.display = on ? '' : 'none';
+    this.el.denoiseLbl.style.display = on ? '' : 'none';
+    if (on && this.stack) this.initMaskForSource();
+    this.updateButtons();
+  }
+
+  // (Re)build the mask for the CURRENT source entry: black canvas at the
+  // source's natural size, view = source dimmed + red overlay of painted
+  // regions. Called when the recipe is picked, a source arrives, or Swap
+  // moves the source — a mask always belongs to exactly one source.
+  initMaskForSource() {
+    const srcEntry = this.stack && source(this.stack);
+    if (!srcEntry) return;
+    this.maskPainted = false;
+    const img = new Image();
+    img.onload = () => {
+      this.maskImg = img;
+      const mc = document.createElement('canvas');
+      mc.width = img.naturalWidth; mc.height = img.naturalHeight;
+      mc.getContext('2d').fillStyle = '#000';
+      mc.getContext('2d').fillRect(0, 0, mc.width, mc.height);
+      this.maskCanvas = mc;
+      this.drawMaskView();
+    };
+    img.src = srcEntry.url;
+  }
+
+  drawMaskView() {
+    const vc = this.el.maskCanvas, img = this.maskImg, mc = this.maskCanvas;
+    if (!vc || !img || !mc) return;
+    const vw = Math.min(img.naturalWidth, 900);
+    const vh = Math.round(img.naturalHeight * (vw / img.naturalWidth));
+    vc.width = vw; vc.height = vh;
+    const ctx = vc.getContext('2d');
+    ctx.drawImage(img, 0, 0, vw, vh);
+    // Red overlay of the painted (white) regions: red canvas, destination-in
+    // with the mask, drawn translucent over the source.
+    const ov = document.createElement('canvas');
+    ov.width = vw; ov.height = vh;
+    const octx = ov.getContext('2d');
+    octx.fillStyle = '#ff3b30'; octx.fillRect(0, 0, vw, vh);
+    octx.globalCompositeOperation = 'destination-in';
+    octx.drawImage(mc, 0, 0, vw, vh);
+    ctx.globalAlpha = 0.55;
+    ctx.drawImage(ov, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+
+  maskStroke(e) {
+    const vc = this.el.maskCanvas, mc = this.maskCanvas;
+    if (!vc || !mc) return;
+    const rect = vc.getBoundingClientRect();
+    const sx = mc.width / rect.width, sy = mc.height / rect.height;
+    const x = (e.clientX - rect.left) * sx, y = (e.clientY - rect.top) * sy;
+    const ctx = mc.getContext('2d');
+    ctx.strokeStyle = this.maskMode === 'paint' ? '#fff' : '#000';
+    ctx.lineWidth = this.maskBrush * sx;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    if (this._lastMaskPt) { ctx.moveTo(this._lastMaskPt.x, this._lastMaskPt.y); }
+    else { ctx.moveTo(x, y); }
+    ctx.lineTo(x, y); ctx.stroke();
+    this._lastMaskPt = { x, y };
+    this.maskPainted = true;
+    this.drawMaskView();
+  }
+
   // ---- handoff -------------------------------------------------------------
   // Gallery lightbox ✎ Update dispatches 'ellieedit:open-in-update'
   // { url, name, path }; url is a jailed gallery file link.
@@ -175,6 +277,7 @@ class UpdateView {
       const objUrl = URL.createObjectURL(blob);
       this.stack = createStack({ url: objUrl, name: name || 'image.png', path: path || '' });
       this.showCurrent();
+      if (this.maskedMode) this.initMaskForSource();
       this.el.status.textContent = `source: ${this.stack.entries[0].name}`;
     } catch (err) {
       this.el.status.textContent = 'failed to load image: ' + err.message;
@@ -182,6 +285,9 @@ class UpdateView {
   }
 
   // ---- render --------------------------------------------------------------
+  // Async submit/poll (2026-10-24): the old sync /run blocked the request
+  // up to 900 s. Both recipes now submit and poll /jobs/{id}; the sync
+  // endpoint stays server-side for old callers.
   async run() {
     if (this.running || !this.stack) return;
     const preset = this.el.preset.value;
@@ -194,19 +300,36 @@ class UpdateView {
     const prompt = this.el.prompt.value;
     this.running = true;
     this.el.run.disabled = true;
-    this.el.status.textContent = 'queued to ComfyUI…';
-    const frozenSeed = this.lastSeed;
     try {
-      const r = await fetch('/api/update/run', {
+      let url, body;
+      if (this.maskedMode) {
+        if (!this.maskPainted || !this.maskCanvas) {
+          throw new Error('paint a region to regenerate first');
+        }
+        url = '/api/update/inpaint-async';
+        body = { path: srcEntry.path, prompt,
+          mask_b64: this.maskCanvas.toDataURL('image/png'),
+          denoise: parseFloat(this.el.denoise.value) || 0.45,
+          seed, random: useRandom };
+        this.el.status.textContent = 'inpaint queued to ComfyUI…';
+      } else {
+        url = '/api/update/run-async';
+        body = { preset, path: srcEntry.path, prompt, seed, random: useRandom };
+        this.el.status.textContent = 'queued to ComfyUI…';
+      }
+      const r = await fetch(url, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preset, path: srcEntry.path, prompt, seed, random: useRandom }),
+        body: JSON.stringify(body),
       });
       if (!r.ok) throw new Error((await r.json()).detail || r.status);
-      const data = await r.json();
+      const { job_id } = await r.json();
+      const data = await this.pollJob(job_id);
       this.lastSeed = data.seed;
       this.el.seed.value = String(data.seed);
       this.stack = pushRender(this.stack, {
-        url: data.image, name: `render seed=${data.seed}`, path: data.render_path || '',
+        url: data.image, name: `render seed=${data.seed}`,
+        path: data.render_path || '',
+        recipe: data.recipe || preset, masked: !!data.masked,
       });
       this.showCurrent();
       this.el.status.textContent = `render done (seed ${data.seed})`;
@@ -216,6 +339,18 @@ class UpdateView {
     this.running = false;
     this.el.run.disabled = false;
     this.updateButtons();
+  }
+
+  async pollJob(jobId) {
+    for (;;) {
+      await new Promise(res => setTimeout(res, 2000));
+      const r = await fetch(`/api/update/jobs/${jobId}`);
+      if (!r.ok) throw new Error((await r.json()).detail || r.status);
+      const job = await r.json();
+      if (job.status === 'done') return job.result;
+      if (job.status === 'error') throw new Error(job.error || 'job failed');
+      this.el.status.textContent = `ComfyUI ${job.status}…`;
+    }
   }
 
   // ---- save ----------------------------------------------------------------
@@ -233,6 +368,8 @@ class UpdateView {
           tag,
           intermediates: this.stack.entries.slice(1, this.stack.idx)
             .map(e => e.path).filter(Boolean),
+          recipe: entry.recipe || null,
+          masked: !!entry.masked,
         }),
       });
       if (!r.ok) throw new Error((await r.json()).detail || r.status);
@@ -319,7 +456,39 @@ class UpdateView {
 
   // ---- events --------------------------------------------------------------
   bind() {
-    this.el.preset.addEventListener('change', () => this.updateButtons());
+    this.el.preset.addEventListener('change', () => {
+      this.setMaskedMode(this.el.preset.value === '__masked_inpaint');
+    });
+    this.el.denoise.addEventListener('input', () => {
+      this.el.denoiseVal.textContent = (+this.el.denoise.value).toFixed(2);
+    });
+    this.el.brush.addEventListener('input', () => {
+      this.maskBrush = parseInt(this.el.brush.value, 10) || 40;
+    });
+    this.panel.querySelector('[data-act="upd-mask-paint"]')
+      .addEventListener('click', () => { this.maskMode = 'paint'; });
+    this.panel.querySelector('[data-act="upd-mask-erase"]')
+      .addEventListener('click', () => { this.maskMode = 'erase'; });
+    this.panel.querySelector('[data-act="upd-mask-clear"]')
+      .addEventListener('click', () => {
+        if (!this.maskCanvas) return;
+        const ctx = this.maskCanvas.getContext('2d');
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, this.maskCanvas.width, this.maskCanvas.height);
+        this.maskPainted = false;
+        this.drawMaskView();
+      });
+    const mvc = this.el.maskCanvas;
+    let masking = false;
+    mvc.addEventListener('pointerdown', e => {
+      masking = true; this._lastMaskPt = null;
+      mvc.setPointerCapture(e.pointerId);
+      this.maskStroke(e);
+    });
+    mvc.addEventListener('pointermove', e => { if (masking) this.maskStroke(e); });
+    const endMask = () => { masking = false; this._lastMaskPt = null; };
+    mvc.addEventListener('pointerup', endMask);
+    mvc.addEventListener('pointercancel', endMask);
     this.el.run.addEventListener('click', () => this.run());
     this.el.save.addEventListener('click', () => this.save());
     this.el.saved.addEventListener('change', () => {
@@ -337,6 +506,7 @@ class UpdateView {
         if (!this.stack) return;
         this.stack = swap(this.stack);
         this.el.status.textContent = `source set to entry ${this.stack.sourceIdx + 1}`;
+        if (this.maskedMode) this.initMaskForSource();  // mask belongs to the source
         this.updateButtons();
       });
     this.panel.querySelector('[data-act="upd-revert"]')

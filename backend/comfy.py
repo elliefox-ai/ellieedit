@@ -257,8 +257,21 @@ def _comfy_upload(png_bytes, name, image_type="input", overwrite=True):
     req = urllib.request.Request(
         COMFY_URL + "/upload/image", data=body, method="POST",
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read())["name"]
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read())["name"]
+    except urllib.error.HTTPError as e:
+        # Disk-failure surfacing (2026-10-24): a Comfy drive at 98% made
+        # /upload/image 500 with a bare "Server got itself in trouble"
+        # body — downstream that reads exactly like a workflow bug unless
+        # it is named HERE, at the upload boundary. Name the failure
+        # class and the check; never let it masquerade as a graph error.
+        body_txt = e.read().decode(errors="replace")[:500]
+        hint = (" A full Comfy drive 500s uploads exactly like this — "
+                "check free space on the Comfy drive before treating "
+                "this as a workflow bug." if e.code == 500 else "")
+        raise RuntimeError(
+            f"ComfyUI upload failed (HTTP {e.code}).{hint} Body: {body_txt}")
 
 
 def _delete_saved_file(im):

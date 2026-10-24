@@ -19,10 +19,12 @@ Design (operator spec, 2026-10-09):
 
 import base64
 import copy
+import io
 import json
 import os
 import random
 import shutil
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -32,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
+from PIL import Image
 from pydantic import BaseModel
 
 from .. import comfy as _comfy
@@ -48,6 +51,25 @@ SAVED_PROMPTS_PATH = Path(os.environ.get(
 
 COMFY_URL = _comfy.COMFY_URL
 RUN_TIMEOUT_S = int(os.environ.get("ELLIEEDIT_UPDATE_TIMEOUT", "900"))
+
+# Masked-inpaint denoise fence — deliberately the SAME 0.2–0.8 fence as
+# Puppet's (puppet.py DENOISE_MIN/MAX, widened 2026-10-22 by Alexander):
+# the inpaint recipe runs Puppet's Klein graph, so it inherits Puppet's
+# fence. Kept as a local copy, not an import, so the two routers stay
+# decoupled; if the fence ever moves, move both together.
+INPAINT_DENOISE_MIN = 0.2
+INPAINT_DENOISE_MAX = 0.8
+INPAINT_DENOISE_DEFAULT = 0.45
+
+
+def clamp_inpaint_denoise(v) -> float:
+    try:
+        d = float(v)
+    except (TypeError, ValueError):
+        return INPAINT_DENOISE_DEFAULT
+    if d != d:  # NaN
+        return INPAINT_DENOISE_DEFAULT
+    return min(INPAINT_DENOISE_MAX, max(INPAINT_DENOISE_MIN, d))
 # SaveImage prefix shared by the seeded presets: outputs land in the
 # gallery-root tmp subfolder, addressable for the later promote, swept by
 # the gallery tmp hygiene after 24h if never saved.
@@ -244,10 +266,14 @@ def _unique_dest(dest_dir: Path, name: str) -> Path:
 
 
 def save_family(render_rel: str, original_path: str, tag: str | None,
-                intermediates: list[str] | None = None) -> dict:
+                intermediates: list[str] | None = None,
+                recipe: str | None = None, masked: bool = False) -> dict:
     """Promote the chosen render via the existing promote machinery, copy
     the stack original into the library alongside it, and append a
-    version-family record so originals travel with finals."""
+    version-family record so originals travel with finals. recipe/masked
+    (2026-10-24) note how the final was made — a masked-inpaint final
+    records recipe='masked-inpaint', masked=True — additive fields only,
+    so old records stay valid."""
     render_src = resolve_source(render_rel)
     record = _library_mod.promote_move(render_src,
                                        (tag or "").strip().lower() or None)
@@ -266,14 +292,18 @@ def save_family(render_rel: str, original_path: str, tag: str | None,
         "sha256": _library_mod.sha256_of(orig_dest),
         "kind": "version-original", "family_id": family_id,
     })
-    _library_mod.append_index({
+    final_rec = {
         "path": final_rel, "tags": record["tags"],
         "promoted_from": record.get("promoted_from", ""), "ts": now,
         "sha256": record.get("sha256", ""),
         "kind": "version-family", "family_id": family_id,
         "original": orig_rel, "final": final_rel,
         "intermediates": list(intermediates or []),
-    })
+    }
+    if recipe is not None:   # additive: old callers omit it, records stay valid
+        final_rec["recipe"] = recipe
+        final_rec["masked"] = bool(masked)
+    _library_mod.append_index(final_rec)
     log.info("save-family %s: original=%s final=%s tag=%s",
              family_id, orig_rel, final_rel, record["tags"])
     return {"ok": True, "family_id": family_id, "final": final_rel,
@@ -297,12 +327,77 @@ def presets_endpoint():
     return {"presets": load_presets()}
 
 
-@router.post("/run")
-def run(body: RunBody):
+# ---------------------------------------------------------------------------
+# Async jobs (FoxDen-style submit/poll, 2026-10-24)
+#
+# /run used to block the request up to 900 s (Claude flagged it). The
+# async endpoints below are the new path: submit returns a job_id at
+# once, the client polls /jobs/{id}. The synchronous /run stays as a
+# thin wrapper over the same _execute_run so old callers and tests keep
+# working until the async variant is proven, then it can go away.
+# Jobs are in-memory only (a restart drops them — same tradeoff as
+# FoxDen's pending meta); no temp files are written per poll or per
+# attempt, and a job's only disk write is its single result file.
+# ---------------------------------------------------------------------------
+
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+
+
+def _job_new() -> str:
+    jid = uuid.uuid4().hex[:16]
+    with _jobs_lock:
+        _jobs[jid] = {"status": "queued"}
+    return jid
+
+
+def _job_run(jid: str, fn) -> None:
+    with _jobs_lock:
+        _jobs[jid]["status"] = "running"
+    try:
+        result = fn()
+    except HTTPException as e:
+        with _jobs_lock:
+            _jobs[jid] = {"status": "error",
+                          "error": str(e.detail)[:2000]}
+    except Exception as e:
+        with _jobs_lock:
+            _jobs[jid] = {"status": "error", "error": str(e)[:2000]}
+    else:
+        with _jobs_lock:
+            _jobs[jid] = {"status": "done", "result": result}
+
+
+def _start_job(fn) -> str:
+    jid = _job_new()
+    threading.Thread(target=_job_run, args=(jid, fn), daemon=True).start()
+    return jid
+
+
+@router.get("/jobs/{job_id}")
+def job_status(job_id: str):
+    if not job_id.replace("-", "").isalnum():
+        raise HTTPException(400, "bad job id")
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"unknown job: {job_id}")
+    return {"job_id": job_id, **job}
+
+
+def _execute_run(body: RunBody) -> dict:
+    """One preset run, factored out of /run so the async job runs the
+    identical code path (same return shape, same upload/poll/fetch)."""
     preset = load_preset(body.preset)
     src = resolve_source(body.path)
     seed = random.getrandbits(48) if (body.random or body.seed is None) else int(body.seed)
-    image_name = _comfy._comfy_upload(src.read_bytes(), f"update_{uuid.uuid4().hex[:8]}{src.suffix or '.png'}")
+    try:
+        image_name = _comfy._comfy_upload(
+            src.read_bytes(), f"update_{uuid.uuid4().hex[:8]}{src.suffix or '.png'}")
+    except RuntimeError as e:
+        # Upload failures (incl. the full-drive 500) surface as a 502
+        # with the named cause, not a bare 500.
+        raise HTTPException(502, str(e))
     wf = build_run_graph(preset, image_name, body.prompt, seed)
     pid = comfy_submit(wf)
     log.info("update run queued %s preset=%s seed=%d src=%s", pid, body.preset, seed, body.path)
@@ -317,7 +412,123 @@ def run(body: RunBody):
         render_rel = (Path(sub) / im["filename"]).as_posix()
     return {"ok": True, "prompt_id": pid, "seed": seed,
             "image": "data:image/png;base64," + base64.b64encode(data).decode(),
-            "render_path": render_rel}
+            "render_path": render_rel, "recipe": body.preset, "masked": False}
+
+
+@router.post("/run")
+def run(body: RunBody):
+    return _execute_run(body)
+
+
+@router.post("/run-async")
+def run_async(body: RunBody):
+    """Submit a preset run; poll /jobs/{job_id} for the result."""
+    return {"job_id": _start_job(lambda: _execute_run(body))}
+
+
+# ---------------------------------------------------------------------------
+# Masked inpaint (2026-10-24) — the FIRST brick of the shared ComfyUI
+# engine layer, and deliberately NOT a fourth inpaint graph.
+#
+# The recipe runs Puppet Theater's existing, test-pinned machinery in
+# backend/comfy.py — comfy_inpaint_klein: the Klein mask-fenced INPAINT
+# graph (BasicScheduler denoise + SetLatentNoiseMask, prompt in charge
+# inside the mask, no ReferenceLatent/ColorMatchV2) plus host-side
+# composite_back, which keeps every unmasked pixel pixel-exact. This
+# endpoint is only the Update-side recipe and mask plumbing around it:
+# mask decode/normalize, denoise fence, async job, result file.
+#
+# Temp-write discipline (2026-10-24 disk-full lesson): the whole path is
+# in-memory bytes — source read, mask decoded, uploads to Comfy, result
+# fetched — plus exactly ONE bounded write: the result PNG under
+# ellieedit_tmp/update, the same lifecycle class as /run renders, so the
+# render can be saved to the Library later. No per-poll, per-attempt,
+# or per-chunk files anywhere.
+# ---------------------------------------------------------------------------
+
+class InpaintBody(BaseModel):
+    path: str
+    prompt: str = ""
+    mask_b64: str = ""     # data URL or bare base64 PNG; WHITE = regenerate
+    denoise: float | None = None
+    seed: int | None = None
+    random: bool = True
+
+
+def _decode_mask(mask_b64: str) -> bytes:
+    s = (mask_b64 or "").strip()
+    if s.startswith("data:"):
+        if "," not in s:
+            raise HTTPException(400, "mask data URL is malformed")
+        s = s.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(s, validate=True)
+    except Exception:
+        raise HTTPException(400, "mask is not valid base64")
+    try:
+        with Image.open(io.BytesIO(raw)) as im:
+            im.load()
+    except Exception:
+        raise HTTPException(400, "mask is not a valid image")
+    return raw
+
+
+def _normalize_mask(mask_raw: bytes, src_png: bytes) -> str:
+    """Mask to source size (BILINEAR), grayscale, base64. Raises 400 when
+    the mask is all black — nothing painted means nothing to regenerate,
+    and a no-op Comfy run would burn a generation for nothing."""
+    with Image.open(io.BytesIO(src_png)) as im:
+        size = im.size
+    with Image.open(io.BytesIO(mask_raw)) as im:
+        mask = im.convert("L")
+    if mask.size != size:
+        mask = mask.resize(size, Image.BILINEAR)
+    if mask.getextrema()[1] == 0:
+        raise HTTPException(400, "mask is empty — paint a region to regenerate first")
+    buf = io.BytesIO()
+    mask.save(buf, "PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _store_update_render(png: bytes) -> str | None:
+    """Single bounded result write, mirroring /run's render lifecycle:
+    ellieedit_tmp/update under the gallery root (gallery-addressable for
+    save-family). Returns the gallery-relative path, or None on failure
+    (the base64 result still returns — the stack entry just can't save
+    until it has a path)."""
+    try:
+        d = _gallery_mod.GALLERY_ROOT / "ellieedit_tmp" / "update"
+        d.mkdir(parents=True, exist_ok=True)
+        name = f"inpaint-{uuid.uuid4().hex[:10]}.png"
+        (d / name).write_bytes(png)
+        return f"ellieedit_tmp/update/{name}"
+    except OSError:
+        return None
+
+
+def _execute_inpaint(body: InpaintBody) -> dict:
+    src = resolve_source(body.path)
+    src_png = src.read_bytes()
+    mask_b64 = _normalize_mask(_decode_mask(body.mask_b64), src_png)
+    seed = random.getrandbits(48) if (body.random or body.seed is None) else int(body.seed)
+    denoise = clamp_inpaint_denoise(body.denoise)
+    try:
+        png = _comfy.comfy_inpaint_klein(
+            base64.b64encode(src_png).decode(), mask_b64,
+            body.prompt or "", denoise=denoise, seed=seed)
+    except Exception as e:
+        log.error("[update inpaint] ERROR: %s", e)
+        raise HTTPException(502, f"masked inpaint failed: {e}")
+    return {"ok": True, "seed": seed, "denoise": denoise,
+            "image": "data:image/png;base64," + base64.b64encode(png).decode(),
+            "render_path": _store_update_render(png),
+            "recipe": "masked-inpaint", "masked": True}
+
+
+@router.post("/inpaint-async")
+def inpaint_async(body: InpaintBody):
+    """Submit a masked inpaint; poll /jobs/{job_id} for the result."""
+    return {"job_id": _start_job(lambda: _execute_inpaint(body))}
 
 
 @router.get("/prompts")
@@ -345,9 +556,11 @@ class SaveFamilyBody(BaseModel):
     original_path: str
     tag: str | None = None
     intermediates: list[str] = []
+    recipe: str | None = None
+    masked: bool = False
 
 
 @router.post("/save-family")
 def save_family_endpoint(body: SaveFamilyBody):
     return save_family(body.render_path, body.original_path, body.tag,
-                       body.intermediates)
+                       body.intermediates, body.recipe, body.masked)
