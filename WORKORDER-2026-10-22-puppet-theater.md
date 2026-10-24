@@ -239,3 +239,8 @@ load-and-decode path handles fetch; no new upload endpoints needed.
    handoffs unchanged (back-compat tests still green).
 7. Mid-render target rejection shows a toast.
 8. Full pytest + tests/js suites green.
+
+## v1.4 ruling (Alexander, 2026-10-24): no auto-cut on arrival
+Gallery→Puppet and all send-to arrivals place the ORIGINAL image; Cut Out stays
+manual. Rationale: auto-rmbg is presumptuous — send-to may carry precut images.
+Shipped v1.4 behavior is already correct (Echo followed current drop behavior).
