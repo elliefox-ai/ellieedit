@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'frontend');
-const files = ['index.html', 'js/shell.js', 'sw.js', 'js/send-to.js', 'js/components/send-menu.js',
+const files = ['index.html', 'js/shell.js', 'sw.js', 'js/send-to.js', 'js/key-guards.js', 'js/components/send-menu.js',
   ...['gallery', 'facecycle', 'review', 'dupe', 'foxden', 'foxden-recent',
       'puppet', 'puppet-core'].map(m => `js/modules/${m}.js`)];
 

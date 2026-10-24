@@ -269,3 +269,35 @@ def test_derive_tag_deepest_folder(env):
     (deep / "d.png").write_bytes(_png())
     assert library_mod.derive_tag(deep / "d.png") == "passes"
     assert library_mod.derive_tag(env["gallery"] / "ZengoSoft Face" / "a.png") == "zengosoft"
+
+
+# ------------------------------------------------------------ banks (v1.5)
+
+import json as _json
+
+
+def test_promote_readonly_bank_blocked(client, env, monkeypatch):
+    home = env["tmp"] / "home"
+    home.mkdir()
+    (home / "h.png").write_bytes(_png((9, 9, 9)))
+    monkeypatch.setenv("ELLIEEDIT_GALLERY_BANKS", _json.dumps([
+        {"label": "Home", "root": str(home)}]))
+    r = client.post("/api/library/promote",
+                    json={"path": "h.png", "bank": "home", "tag": "home"})
+    assert r.status_code == 400
+    assert "read-only" in r.json()["detail"]
+    assert (home / "h.png").exists()   # nothing moved
+
+
+def test_promote_writable_bank_moves(client, env, monkeypatch):
+    work = env["tmp"] / "work"
+    work.mkdir()
+    (work / "w.png").write_bytes(_png((8, 8, 8)))
+    monkeypatch.setenv("ELLIEEDIT_GALLERY_BANKS", _json.dumps([
+        {"label": "Work", "root": str(work), "writable": True}]))
+    r = client.post("/api/library/promote",
+                    json={"path": "w.png", "bank": "work", "tag": "worktag"})
+    assert r.status_code == 200, r.text
+    assert r.json()["path"] == "worktag/w.png"
+    assert not (work / "w.png").exists()
+    assert (env["library"] / "worktag" / "w.png").exists()

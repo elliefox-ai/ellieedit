@@ -230,3 +230,60 @@ def test_add_and_confirm_expected_count_mismatch_409(client, env):
     # confirm with the seen count -> deletes
     r = client.post("/api/pending/confirm", json={"expected_count": 2})
     assert r.status_code == 200 and r.json()["deleted"] == 2
+
+
+# ------------------------------------------------------------ banks (v1.5)
+
+import io as _io
+import json as _json
+
+
+@pytest.fixture
+def bank_env(tmp_path, monkeypatch):
+    primary = tmp_path / "gallery"
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    for root in (primary, home, work):
+        root.mkdir(parents=True)
+    for root, name in ((primary, "p.png"), (home, "h.png"), (work, "w.png")):
+        img = Image.new("RGB", (32, 32), (5, 5, 5))
+        buf = _io.BytesIO(); img.save(buf, "PNG")
+        (root / name).write_bytes(buf.getvalue())
+    monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", primary)
+    monkeypatch.setattr(pending_mod, "MANIFEST", tmp_path / "pending.json")
+    monkeypatch.setattr(pending_mod, "AUDIT", tmp_path / "audit.jsonl")
+    monkeypatch.setenv("ELLIEEDIT_GALLERY_BANKS", _json.dumps([
+        {"label": "Home", "root": str(home)},
+        {"label": "Work", "root": str(work), "writable": True},
+    ]))
+    return TestClient(app)
+
+
+def test_add_readonly_bank_blocked(bank_env):
+    r = bank_env.post("/api/pending", json={"paths": ["bank:home:h.png"]})
+    assert r.status_code == 400
+    assert "read-only" in r.json()["detail"]
+
+
+def test_add_writable_bank_key_works(bank_env):
+    r = bank_env.post("/api/pending", json={"paths": ["bank:work:w.png"]})
+    assert r.status_code == 200 and r.json()["added"] == 1
+    items = bank_env.get("/api/pending").json()["items"]
+    assert items[0]["path"] == "bank:work:w.png"
+
+
+def test_confirm_keeps_readonly_bank_entries(bank_env):
+    # A bank that flipped to read-only after marking must survive confirm.
+    bank_env.post("/api/pending", json={"paths": ["p.png", "bank:work:w.png"]})
+    import json as _j
+    mpath = None
+    # locate the manifest via the module constant (patched in fixture)
+    from backend.routers import pending as _pm
+    m = _j.loads(_pm.MANIFEST.read_text())
+    m["bank:home:h.png"] = m.pop("bank:work:w.png")
+    _pm.MANIFEST.write_text(_j.dumps(m))
+    r = bank_env.post("/api/pending/confirm", json={})
+    assert r.status_code == 200
+    assert r.json()["deleted"] == 1          # only the primary file
+    remaining = _j.loads(_pm.MANIFEST.read_text())
+    assert list(remaining) == ["bank:home:h.png"]

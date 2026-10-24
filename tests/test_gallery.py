@@ -300,3 +300,71 @@ def test_list_nested_subdirs_at_depth(client, monkeypatch):
     assert r.status_code == 200
     assert [i["name"] for i in r.json()["items"]] == ["deep.png"]
     assert r.json()["subdirs"] == []
+
+
+# ------------------------------------------------------------ banks (v1.5)
+
+import json as _json
+
+
+@pytest.fixture
+def bank_client(tmp_path, monkeypatch):
+    """Primary root + one read-only extra bank + one writable extra bank."""
+    primary = tmp_path / "primary"
+    home = tmp_path / "home"
+    work = tmp_path / "work"
+    for root in (primary, home, work):
+        root.mkdir(parents=True)
+    for root, name in ((primary, "p.png"), (home, "h.png"), (work, "w.png")):
+        img = Image.new("RGB", (64, 48), (9, 9, 9))
+        buf = io.BytesIO(); img.save(buf, "PNG")
+        (root / name).write_bytes(buf.getvalue())
+    monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", primary)
+    monkeypatch.setattr(gallery_mod, "THUMB_CACHE_DIR", tmp_path / ".thumbs")
+    monkeypatch.setenv("ELLIEEDIT_GALLERY_BANKS", _json.dumps([
+        {"label": "Home", "root": str(home)},
+        {"label": "Work", "root": str(work), "writable": True},
+    ]))
+    return TestClient(app), primary, home, work
+
+
+def test_banks_endpoint(bank_client):
+    client, _p, _h, _w = bank_client
+    r = client.get("/api/gallery/banks")
+    assert r.status_code == 200
+    banks = {b["id"]: b for b in r.json()["banks"]}
+    assert banks["primary"]["writable"] is True
+    assert banks["home"]["writable"] is False
+    assert banks["work"]["writable"] is True
+
+
+def test_list_bank_items_carry_bank_fields(bank_client):
+    client, _p, _h, _w = bank_client
+    r = client.get("/api/gallery/list", params={"bank": "home"})
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) == 1
+    it = items[0]
+    assert it["bank"] == "home" and it["bank_label"] == "Home"
+    assert it["writable"] is False
+    assert it["manifest_key"] == "bank:home:h.png"
+    assert r.json()["bank"] == "home"
+
+
+def test_list_primary_shape_unchanged(bank_client):
+    client, _p, _h, _w = bank_client
+    r = client.get("/api/gallery/list")
+    it = r.json()["items"][0]
+    assert it["bank"] == "primary" and it["manifest_key"] == it["path"]
+
+
+def test_list_bank_unknown_400(bank_client):
+    client, _p, _h, _w = bank_client
+    assert client.get("/api/gallery/list", params={"bank": "nope"}).status_code == 400
+
+
+def test_file_bank_serves_and_jails(bank_client):
+    client, _p, _h, _w = bank_client
+    assert client.get("/api/gallery/file", params={"path": "h.png", "bank": "home"}).status_code == 200
+    assert client.get("/api/gallery/file", params={"path": "../h.png", "bank": "home"}).status_code == 400
+    assert client.get("/api/gallery/thumb", params={"path": "h.png", "bank": "home"}).status_code == 200

@@ -592,3 +592,58 @@ def test_send_plumbing_never_carries_data_urls():
     for rel in ("send-to.js", "components/send-menu.js"):
         s = _src(rel)
         assert "readAsDataURL" not in s and "image_b64" not in s and "toDataURL" not in s, rel
+
+
+def test_puppet_v15_gallery_banks_and_ux_wiring():
+    """v1.5/v1.5.1: bank picker + dupe-review queue + multi-select Puppet
+    layers + shift-click range + promote tag memory/mass promote."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    gal = (mods / "gallery.js").read_text()
+    for needle in ('data-act="bank"', 'data-act="dupe-review"',
+                   'queueDupeReview', '/api/dupe/scan-folder',
+                   'ellieedit:dupe-folder-review',
+                   'data-act="to-puppet-multi"', 'launchPuppetMulti',
+                   'lastSelKey', 'setCellSelected',
+                   'askTag', 'tagChips', 'ellieedit.promote.tags',
+                   'promoteMulti', 'recordTag', 'keyOf', 'manifest_key'):
+        assert needle in gal, needle
+    # Backspace deletion is gone from the gallery viewer handler.
+    onkey = gal.split('this.onKey = e => {')[1].split('};')[0]
+    assert "e.key === 'Delete'" in onkey
+    assert 'Backspace' not in onkey
+
+
+def test_puppet_v15_key_guards_shared():
+    """Shortcut guards workorder: one shared helper, used by every
+    document-level keydown handler with letter shortcuts; Backspace
+    deletion removed in FaceCycle region delete too."""
+    js = HERE.parent / "frontend" / "js"
+    guards = (js / "key-guards.js").read_text()
+    assert 'isTypingTarget' in guards and 'TEXTAREA' in guards
+    for mod in ('modules/gallery.js', 'modules/dupe.js', 'modules/facecycle.js'):
+        assert 'key-guards.js' in (js / mod).read_text(), mod
+    fc = (js / "modules/facecycle.js").read_text()
+    assert "if (e.key === 'Delete') {" in fc
+    assert "e.key === 'Backspace'" not in fc
+
+
+def test_puppet_v15_dupe_folder_filter_wiring():
+    """Folder-scan families open in the existing dupe review UI via a
+    'Folder scans' pill mapped to source=cluster-engine-v2."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    view = (mods / "dupe-view.js").read_text()
+    assert 'filter === "folder"' in view
+    assert 'cluster-engine-v2' in view
+    dupe = (mods / "dupe.js").read_text()
+    assert 'data-f="folder"' in dupe
+    assert 'ellieedit:dupe-folder-review' in dupe
+
+
+def test_js_key_guards():
+    """Shared shortcut-guard helper (v1.5 workorder) — node test, repo style."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "key-guards.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+    assert "PASS" in r.stdout
