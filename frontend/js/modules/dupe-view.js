@@ -163,12 +163,15 @@ export function listCacheDecision(cachedKey, freshKey, dirty) {
 // the plain state query with no source narrowing.
 export function listQuery(filter) {
   if (filter === "straggler") return { state: "all", source: "straggler" };
+  if (filter === "folder") return { state: "unresolved", source: "cluster-engine-v2" };
   return { state: filter, source: "" };
 }
 
 // Family row -> extra chip HTML for import-batch provenance. Reference
 // only: a library counterpart is never a member and gets no thumb.
 export function stragglerChips(f) {
+  if (f && f.source === "cluster-engine-v2")
+    return `<span class="ghost-chip" title="found by an in-gallery incremental folder scan, not the original index">folder scan</span>`;
   if (!f || f.source !== "straggler-scan") return "";
   let out = `<span class="ghost-chip straggler" title="import batch — found by the straggler scan, not the original index">straggler</span>`;
   const n = f.library_matches || 0;
