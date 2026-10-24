@@ -28,10 +28,12 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi import Response as FResponse
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -311,12 +313,51 @@ def deleted_soon_paths() -> set[str]:
     return gone
 
 
-def list_library(tag: str = "", cursor: int = 0) -> dict:
+def _index_maps(records: list[dict]) -> tuple[dict, set, dict]:
+    """One-pass derivation from index records (Phase 0: the listing reads
+    the index ONCE, where the old code read it twice — latest_tags plus
+    deleted_soon_paths). Returns (tags_by_path, gone, family_by_path).
+    family_by_path is the §2.7 reader fix: the latest record CARRYING
+    family fields wins per path, so a retag record (tags only, no kind)
+    never clobbers the original↔final linkage. No data is rewritten."""
+    tags: dict[str, list[str]] = {}
+    gone: set[str] = set()
+    fam: dict[str, dict] = {}
+    for rec in records:
+        p = rec.get("path")
+        if not p:
+            continue
+        if rec.get("tags") is not None:
+            tags[p] = list(rec["tags"] or [])
+        if rec.get("deleted_soon"):
+            gone.add(p)
+        else:
+            gone.discard(p)  # latest entry wins, even un-flagging
+        if rec.get("kind") or rec.get("family_id"):
+            fam[p] = {"kind": rec.get("kind"),
+                      "family_id": rec.get("family_id"),
+                      "original": rec.get("original"),
+                      "final": rec.get("final"),
+                      "intermediates": rec.get("intermediates") or []}
+    return tags, gone, fam
+
+
+def list_library(tag: str = "", cursor: int = 0, kind: str = "") -> dict:
     """Paged listing of library images with tags. Latest-wins tags joined
     with what's actually on disk (index entries for vanished files are
-    skipped)."""
-    tags_by_path = latest_tags()
-    gone = deleted_soon_paths()
+    skipped). Phase 0:
+      - `tags` and `total_all` come from the UNFILTERED set (the old code
+        computed them after the tag filter, so the tag bar collapsed and
+        'all (N)' showed the filtered count);
+      - rows carry family fields (kind, family_id, original, final);
+      - kind filter: '' (default) hides version-original rows (finals +
+        loose images; originals are reached through their family),
+        'originals' shows only originals, 'all' shows everything;
+      - timing_ms reports index/walk/total for the Phase 1 decision.
+    """
+    t0 = time.perf_counter()
+    tags_by_path, gone, fam = _index_maps(read_index())
+    t_index = time.perf_counter()
     rows: list[dict] = []
     for dirpath, dirnames, filenames in os.walk(LIBRARY_ROOT):
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
@@ -329,18 +370,38 @@ def list_library(tag: str = "", cursor: int = 0) -> dict:
                 continue  # deleted-soon: queued, never listed again
             file_tags = tags_by_path.get(rel, [normalize_tag(full.parent.name)]
                                          if full.parent != LIBRARY_ROOT else [])
+            info = fam.get(rel, {})
             rows.append({"path": rel, "name": fn, "mtime": full.stat().st_mtime,
-                         "tags": file_tags})
+                         "tags": file_tags,
+                         "kind": info.get("kind"),
+                         "family_id": info.get("family_id"),
+                         "original": info.get("original"),
+                         "final": info.get("final")})
+    t_walk = time.perf_counter()
     rows.sort(key=lambda r: r["mtime"], reverse=True)
+    # Unfiltered set first: the tag bar and the 'all' count must survive
+    # filtering (Phase 0 bug fix).
+    all_tags = sorted({t for r in rows for t in r["tags"]})
+    total_all = len(rows)
+    if kind == "originals":
+        rows = [r for r in rows if r["kind"] == "version-original"]
+    elif kind == "all":
+        pass
+    else:  # default: finals + loose; originals via their family
+        rows = [r for r in rows if r["kind"] != "version-original"]
     if tag:
         t = tag.strip().lower()
         rows = [r for r in rows if t in r["tags"]]
-    all_tags = sorted({t for r in rows for t in r["tags"]})
     total = len(rows)
     page = rows[cursor:cursor + PAGE_SIZE]
     next_cursor = cursor + PAGE_SIZE if cursor + PAGE_SIZE < total else None
-    return {"items": page, "total": total, "shown": len(page),
-            "tag": tag or None, "tags": all_tags, "next_cursor": next_cursor}
+    t_total = time.perf_counter()
+    return {"items": page, "total": total, "total_all": total_all,
+            "shown": len(page), "tag": tag or None, "tags": all_tags,
+            "next_cursor": next_cursor, "kind": kind or "finals",
+            "timing_ms": {"index": (t_index - t0) * 1000,
+                          "walk": (t_walk - t_index) * 1000,
+                          "total": (t_total - t0) * 1000}}
 
 
 router = APIRouter(prefix="/api/library", tags=["library"])
@@ -362,8 +423,18 @@ class DeleteBody(BaseModel):
 
 
 @router.get("/list")
-def list_endpoint(tag: str = "", cursor: int = 0):
-    return list_library(tag=tag, cursor=cursor)
+def list_endpoint(tag: str = "", cursor: int = 0, kind: str = "",
+                  response: FResponse = None):
+    if kind not in ("", "originals", "all"):
+        raise HTTPException(400, "kind must be '' | originals | all")
+    d = list_library(tag=tag, cursor=cursor, kind=kind)
+    if response is not None:   # Server-Timing mirrors Gallery (Phase 0)
+        tm = d.get("timing_ms", {})
+        response.headers["Server-Timing"] = (
+            f"walk;dur={tm.get('walk', 0):.1f}, "
+            f"index;dur={tm.get('index', 0):.1f}, "
+            f"total;dur={tm.get('total', 0):.1f}")
+    return d
 
 
 @router.post("/promote")
