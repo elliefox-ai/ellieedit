@@ -473,3 +473,122 @@ def test_puppet_v132_merge_down_recipe():
     assert body.count("loadLayerImage") == 1             # one reload only
     assert "rb.mask = K" in body                         # mask stays LIVE
     assert "resetMask(rb, W, H); rb.maskDirty = true" not in body  # not wiped
+
+
+# ---------------------------------------------------------------------------
+# v1.4 — cross-tab "send to" (work order 2026-10-23)
+
+_FE = HERE.parent / "frontend" / "js"
+
+
+def _src(rel):
+    return (_FE / rel).read_text()
+
+
+def test_js_send_to_router():
+    """Pure router: uniform payload → each target's own event, data rule,
+    FaceCycle cap, and the back-compat payload shapes (node)."""
+    r = subprocess.run(
+        ["node", "--test", str(HERE / "js" / "send-to.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+
+
+def test_js_facecycle_handoff_backcompat_pin():
+    """Gallery→FaceCycle planner is unchanged (v1.4 must not break it)."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "facecycle-handoff.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+
+
+def test_send_to_gate_covers_new_files():
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "syntax-check.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"syntax gate failed:\n{r.stdout}\n{r.stderr}"
+    assert "ok js/send-to.js" in r.stdout
+    assert "ok js/components/send-menu.js" in r.stdout
+
+
+def test_shell_routes_send_to_through_the_pure_planner():
+    sh = _src("shell.js")
+    assert "export function registerReceiver" in sh
+    assert "import { planSend } from './send-to.js'" in sh
+    assert "window.addEventListener('ellieedit:send-to'" in sh
+    h = sh[sh.index("window.addEventListener('ellieedit:send-to'"):]
+    h = h[:h.index("// Import modules")]
+    # a refusal toasts and returns BEFORE the target tab is activated
+    assert h.index("toast(plan.error") < h.index("activate(plan.route.target)")
+    # activate first, THEN forward (FaceCycle's listener ignores a hidden panel)
+    assert h.index("activate(plan.route.target)") < h.index("window.dispatchEvent(new CustomEvent(ev.type")
+    # the receivers map handed to the planner is the one registerReceiver fills
+    assert "receivers });" in h and "receivers.set(name" in sh
+    # existing activation event still there
+    assert "window.addEventListener('ellieedit:activate'" in sh
+
+
+def test_existing_handoff_events_still_dispatched_and_listened():
+    gal, fc, upd = _src("modules/gallery.js"), _src("modules/facecycle.js"), _src("modules/update.js")
+    assert "new CustomEvent('ellieedit:facecycle-handoff'" in gal
+    assert "new CustomEvent('ellieedit:open-in-update'" in gal
+    assert "addEventListener('ellieedit:facecycle-handoff'" in fc
+    assert "addEventListener('ellieedit:open-in-update'" in upd
+
+
+def test_facecycle_receipt_names_the_sender_defaulting_to_gallery():
+    fc = _src("modules/facecycle.js")
+    assert "const { urls, names, meld, provenance, source } = e.detail" in fc
+    assert "const src = meld ? 'Dupe family' : (source || 'Gallery');" in fc
+
+
+def test_gallery_send_menu_entries():
+    gal = _src("modules/gallery.js")
+    assert "createSendMenu" in gal
+    for needle in ("target: 'puppet', as: 'layer'", "target: 'puppet', as: 'background'",
+                   "target: 'foxden'", "source: 'Gallery'"):
+        assert needle in gal, needle
+    assert gal.count("act('to-update').before(sendMenu.el)") == 1   # sits beside ✎ Update
+
+
+def test_foxden_send_menu_and_receiver_use_existing_upload_path():
+    fx = _src("modules/foxden.js")
+    assert "registerReceiver('foxden'" in fx
+    assert "addEventListener('ellieedit:foxden-receive'" in fx
+    rv = fx[fx.index("addEventListener('ellieedit:foxden-receive'"):]
+    rv = rv[:rv.index("// First paint")]
+    assert "api('/upload'" in rv and "setInput(name)" in rv      # same as a local upload
+    assert "readAsDataURL" not in rv and "image_b64" not in rv   # data rule
+    for needle in ("target: 'puppet', as: 'layer'", "target: 'puppet', as: 'background'",
+                   "target: 'facecycle'", "source: 'FoxDen'"):
+        assert needle in fx, needle
+
+
+def test_puppet_receiver_gates_midrender_and_reuses_drop_and_background_paths():
+    pp = _src("modules/puppet.js")
+    assert "registerReceiver('puppet'" in pp
+    gate = pp[pp.index("registerReceiver('puppet'"):]
+    gate = gate[:gate.index("addEventListener('ellieedit:puppet-receive'")]
+    assert "passBusy" in gate and "initDone" in gate
+    # the in-flight flag brackets BOTH the final pass and the fill
+    assert pp.count("passBusy = true;") == 2
+    assert pp.count("finally { passBusy = false;") == 2
+    rv = pp[pp.index("addEventListener('ellieedit:puppet-receive'"):]
+    rv = rv[:rv.index("el.tofox.addEventListener")]
+    assert "await addPuppetFile(f)" in rv                         # same path as a drop
+    assert "uploadAsset('background'" in rv and "setBackground(up.file, up.url)" in rv
+    assert "passBusy" in rv                                       # belt and braces at the handler
+    # composite → FoxDen sends the SERVER export url, after saving
+    tf = pp[pp.index("el.tofox.addEventListener"):]
+    assert tf.index("await save()") < tf.index("ellieedit:send-to")
+    assert "/projects/${projectId}/export.png" in tf
+    assert "target: 'foxden'" in tf
+
+
+def test_send_plumbing_never_carries_data_urls():
+    for rel in ("send-to.js", "components/send-menu.js"):
+        s = _src(rel)
+        assert "readAsDataURL" not in s and "image_b64" not in s and "toDataURL" not in s, rel

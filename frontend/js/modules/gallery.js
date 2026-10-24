@@ -11,6 +11,7 @@
 //   'ellieedit:facecycle-handoff' { urls, names }    + activate 'facecycle'
 import { registerModule } from '../shell.js';
 import { planFaceCycleHandoff } from '../handoff.js';
+import { createSendMenu } from '../components/send-menu.js';
 import { planMarkBatch } from './marking-batch.js';
 import { crumbsFor, joinDir, isBrowsableDir } from './gallery-path.js';
 import { diffManifest, planManifestChange, pickSurvivor, scrollDeltaFor } from './gallery-scroll.js';
@@ -1024,7 +1025,7 @@ export class Gallery {
     this.el.viewer.style.display = 'flex';
   }
 
-  closeViewer() { this.disarmViewerDelete(); this.el.viewer.style.display = 'none'; this.el.viewerImg.src = ''; }
+  closeViewer() { if (this.sendMenu) this.sendMenu.close(); this.disarmViewerDelete(); this.el.viewer.style.display = 'none'; this.el.viewerImg.src = ''; }
 
   nav(dir) {
     if (!this.items.length) return;
@@ -1038,6 +1039,24 @@ export class Gallery {
     act('next').addEventListener('click', () => this.nav(1));
     act('viewer-promote').addEventListener('click', () => this.promoteFromViewer());
     act('viewer-delete').addEventListener('click', () => this.armViewerDelete());
+    // v1.4 "Send to ▸": Puppet Theater (layer / background) and FoxDen
+    // (input image) beside ✎ Update. Single image = the one in the lightbox.
+    const sendMenu = createSendMenu({
+      className: 'ee-btn',
+      entries: [
+        { label: '🎭 Puppet Theater — new layer', target: 'puppet', as: 'layer' },
+        { label: '🎭 Puppet Theater — as background', target: 'puppet', as: 'background' },
+        { label: '🦊 FoxDen — input image', target: 'foxden' },
+      ],
+      getPayload: () => {
+        const item = this.items[this.viewIdx];
+        if (!item) return { error: 'No image open.' };
+        return { urls: [this.fileUrl(item.path)], names: [item.name], source: 'Gallery',
+          provenance: { kind: 'gallery', paths: [item.path] } };
+      },
+    });
+    act('to-update').before(sendMenu.el);
+    this.sendMenu = sendMenu;
     act('to-update').addEventListener('click', () => {
       const item = this.items[this.viewIdx];
       if (!item) return;

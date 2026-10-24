@@ -4,7 +4,8 @@
 // low-denoise harmonization pass (0.2–0.8, server-clamped) via
 // /api/puppet/render. Poses are pixels, not prompt-wishes.
 // Backend: /api/puppet/*. Pure logic: puppet-core.js (node-tested).
-import { registerModule } from '../shell.js';
+import { registerModule, registerReceiver } from '../shell.js';
+import { nameFromUrl, receiptText } from '../send-to.js';
 import { clampDenoise, presetSize, normalizeState, defaultState, fitPlacement,
   moveLayerZ, stageToLocal, localToStage, handlePositions, resizeRect,
   rotationFromPointer, pointerAngle, History, CANVAS_PRESETS,
@@ -33,6 +34,7 @@ registerModule({
     <div class="pt-wrap">
       <div class="pt-side">
         <div class="pt-status" data-id="conn">connecting…</div>
+        <div class="pt-status ok" data-id="receipt" style="display:none"></div>
         <div><label>Project name</label><input type="text" data-id="pname"></div>
         <div class="pt-row">
           <select data-id="popen" style="flex:1;min-width:120px"><option value="">Open project…</option></select>
@@ -124,6 +126,7 @@ registerModule({
         <div class="pt-row">
           <button class="ee-btn pt-btn" data-id="expng">⬇ Composite PNG</button>
           <button class="ee-btn pt-btn" data-id="exjson">⬇ Layer stack JSON</button>
+          <button class="ee-btn pt-btn" data-id="tofox" title="Send the composite to FoxDen as its input image">🦊 Send to FoxDen</button>
         </div>
         <div class="pt-status" data-id="status"></div>
       </div>
@@ -160,7 +163,7 @@ registerModule({
       'apply-size', 'bgprompt', 'bggen', 'bgup', 'bgclear', 'bgfile', 'add', 'afile',
       'steps', 'fillclear', 'fillhint', 'fillgo', 'fillnote',
       'tools', 'bsize', 'bsize-val', 'bhard', 'bhard-val', 'cutgo', 'restorecut', 'maskreset', 'undo', 'redo',
-      'rprompt', 'denoise', 'dval', 'engines', 'rmodes', 'rmnote', 'render', 'expng', 'exjson', 'status',
+      'rprompt', 'denoise', 'dval', 'engines', 'rmodes', 'rmnote', 'render', 'expng', 'exjson', 'tofox', 'receipt', 'status',
       'stagewrap', 'stage', 'bgimg', 'fillov', 'dropind', 'empty', 'preview', 'previewimg', 'pvnote', 'pvaccept',
       'pvdiscard', 'lcount', 'llist'];
     const el = Object.fromEntries(ids.map(k => [k, $(k)]));
@@ -665,6 +668,7 @@ registerModule({
       say('opening…');
       const j = await api(`/projects/${pid}`);
       projectId = pid;
+      showReceipt('');
       try { localStorage.setItem('ellieedit.puppet.lastProject', pid); } catch (e) {}
       state = normalizeState(j.state);
       selectedId = null;
@@ -723,6 +727,7 @@ registerModule({
     });
     el.pnew.addEventListener('click', () => {
       projectId = null; selectedId = null; bgUrl = ''; previewAsset = null;
+      showReceipt('');
       try { localStorage.removeItem('ellieedit.puppet.lastProject'); } catch (e) {}
       state = defaultState();
       const last = readLastSize();
@@ -1096,11 +1101,16 @@ registerModule({
             : 'Target: the background — layers are untouched by a background fill. Uses the prompt, engine and denoise from the Final pass section.')
         : 'Paint a Fill Area region first (this step), then Fill. The same painted mask also drives a Fill-Area final pass.';
     }
+    // v1.4: a final pass / fill in flight refuses 'send to' (it saves the
+    // stack first and a mid-flight layer would silently miss that pass).
+    let passBusy = false;
+    let initDone = false;
     el.fillgo.addEventListener('click', async () => {
       if (!fillPainted()) { say('Paint a Fill Area region first — there is nothing to fill yet.', 'err'); return; }
       const sel = selected();
       const targetLayer = (sel && sel.visible !== false) ? sel : null;
       setBusy(el.fillgo, true, '✨ Filling…');
+      passBusy = true;
       try {
         say('saving, then filling…');
         if (targetLayer && extendLayerToCanvas(targetLayer)) {
@@ -1125,7 +1135,7 @@ registerModule({
         el.preview.style.display = 'flex';
         say(`Fill done — ${j.engine === 'krea2' ? 'Krea2' : 'Klein inpaint'} at denoise ${Number(j.denoise).toFixed(2)}. Accept applies it to ${pvTarget === 'background' ? 'the background' : '“' + pvTargetName + '” only'}.`, 'ok');
       } catch (e) { say('Fill failed: ' + e.message, 'err'); }
-      finally { setBusy(el.fillgo, false); }
+      finally { passBusy = false; setBusy(el.fillgo, false); }
     });
     el.add.addEventListener('click', () => el.afile.click());
     el.afile.addEventListener('change', () => { addPuppetFiles([...el.afile.files]); el.afile.value = ''; });
@@ -1644,6 +1654,7 @@ registerModule({
     });
     el.render.addEventListener('click', async () => {
       setBusy(el.render, true, '✨ Rendering…');   // state shows immediately
+      passBusy = true;
       try {
         say('saving stack, then rendering the final pass…');
         await save();
@@ -1662,7 +1673,7 @@ registerModule({
         el.preview.style.display = 'flex';
         say(`Final pass done — ${j.engine === 'krea2' ? 'Krea2' : 'Klein'} at denoise ${Number(j.denoise).toFixed(2)} (mask: ${j.mask_used === 'fill' ? 'Fill Area' : 'full canvas'}) — accept (adds a layer) or discard.`, 'ok');
       } catch (e) { say('Render failed: ' + e.message, 'err'); }
-      finally { setBusy(el.render, false); }
+      finally { passBusy = false; setBusy(el.render, false); }
     });
     el.pvdiscard.addEventListener('click', () => {
       el.preview.style.display = 'none';
@@ -1764,8 +1775,67 @@ registerModule({
       }
     });
 
+    // ------------------------------------------------- v1.4 send-to / receive
+    // Receivers load a handed-off image the way a local drop/upload would:
+    // fetch the server url → File → the SAME addPuppetFile / background
+    // upload paths (no new endpoints, no base64 through the event).
+    function showReceipt(text) {
+      el.receipt.textContent = text;
+      el.receipt.style.display = text ? '' : 'none';
+    }
+    registerReceiver('puppet', {
+      canAccept: route => {
+        if (!initDone) return { ok: false, reason: 'Puppet Theater is still loading — try again in a moment.' };
+        if (passBusy) return { ok: false, reason: 'Puppet Theater is mid-render — wait for the final pass or fill to finish, then send again.' };
+        return { ok: true };
+      },
+    });
+    window.addEventListener('ellieedit:puppet-receive', async e => {
+      const { urls, names, as, source } = e.detail || {};
+      if (!Array.isArray(urls) || !urls.length) return;
+      if (passBusy) { say('Puppet Theater is mid-render — send again when it finishes.', 'err'); return; }
+      const mode = as === 'background' ? 'background' : 'layer';
+      try {
+        say(`receiving from ${source || 'another tab'}…`);
+        // Background takes one image; layers take them all, in order.
+        const take = mode === 'background' ? [0] : urls.map((_, i) => i);
+        let placed = 0;
+        for (const i of take) {
+          const r = await fetch(urls[i]);
+          if (!r.ok) throw new Error(`${(names && names[i]) || urls[i]}: HTTP ${r.status}`);
+          const blob = await r.blob();
+          const fname = (names && names[i]) || nameFromUrl(urls[i]);
+          const f = new File([blob], fname, { type: blob.type || 'image/png' });
+          if (mode === 'background') {
+            const up = await uploadAsset('background', await fileToDataURL(f));
+            setBackground(up.file, up.url);
+          } else {
+            await addPuppetFile(f);
+          }
+          placed++;
+        }
+        showReceipt(receiptText(placed, source, mode));
+        say(mode === 'background'
+          ? `Background set from ${source || 'another tab'} — layers untouched.`
+          : `Received ${placed} image${placed !== 1 ? 's' : ''} from ${source || 'another tab'} as new layer${placed !== 1 ? 's' : ''}.`, 'ok');
+      } catch (err) { say('Receive failed: ' + err.message, 'err'); }
+    });
+    el.tofox.addEventListener('click', async () => {
+      setBusy(el.tofox, true, '🦊 Sending…');
+      try {
+        await save();
+        if (!projectId) throw new Error('nothing on the stage to send yet');
+        window.dispatchEvent(new CustomEvent('ellieedit:send-to', { detail: {
+          target: 'foxden',
+          urls: [`${API}/projects/${projectId}/export.png`],
+          names: [`puppet-${projectId}.png`],
+          source: 'Puppet Theater' } }));
+      } catch (err) { say('Send to FoxDen failed: ' + err.message, 'err'); }
+      finally { setBusy(el.tofox, false); }
+    });
+
     // ---------------------------------------------------------------- init
-    (async () => {
+    (async () => { try {
       try {
         const c = await api('/config');
         const rm = c.rmbg || {};
@@ -1786,7 +1856,7 @@ registerModule({
       if (lastPid) {
         try { await openProject(lastPid); } catch (e) { say(e.message, 'err'); }
       }
-    })();
+    } finally { initDone = true; } })();
     const lastSize = readLastSize();
     if (lastSize) { state.canvas.width = lastSize.width; state.canvas.height = lastSize.height; el.preset.value = 'last'; }
     renderStage();

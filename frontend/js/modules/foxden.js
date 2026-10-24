@@ -2,7 +2,9 @@
 // One page: workflow, prompt, LoRA toggles + strengths, seed, aspect presets,
 // Generate -> poll status -> inline outputs (tap to enlarge) + recent strip.
 // Backend: /api/foxden/*. No frameworks, no build step.
-import { registerModule } from '../shell.js';
+import { registerModule, registerReceiver } from '../shell.js';
+import { createSendMenu } from '../components/send-menu.js';
+import { nameFromUrl, receiptText } from '../send-to.js';
 import { readCollapsed, writeCollapsed, recentLabel } from './foxden-recent.js';
 import { createPins } from './foxden-loras.js';
 import { normalizeState, presetState, debounce, cleanName } from './foxden-state.js';
@@ -43,7 +45,7 @@ registerModule({
             <button class="ee-btn fx-btn" data-a="portrait">▯ 576×1024</button>
           </div>
           <div class="fx-inputs">
-            <label>Input image (img2img) <span data-id="icount"></span></label>
+            <label>Input image (img2img) <span data-id="icount"></span> <span data-id="ireceipt" class="fx-receipt" style="color:#8ad08a"></span></label>
             <div class="fx-chips" data-id="ichips"></div>
             <div class="fx-row">
               <button class="ee-btn fx-btn" data-id="iup">⬆ Upload</button>
@@ -85,7 +87,7 @@ registerModule({
     const el = Object.fromEntries(['conn', 'wf', 'prompt', 'aspects', 'seed', 'dice',
       'lcount', 'lfilter', 'loras', 'pins', 'susp',
       'preset-pick', 'preset-lock', 'preset-save', 'preset-del',
-      'icount', 'ichips', 'iup', 'iclear', 'ifile', 'denoise', 'dval', 'go', 'status', 'out', 'recent', 'recentwrap',
+      'icount', 'ireceipt', 'ichips', 'iup', 'iclear', 'ifile', 'denoise', 'dval', 'go', 'status', 'out', 'recent', 'recentwrap',
       'refresh', 'rtoggle', 'rcount', 'big', 'bigmeta', 'reuse', 'bigclose', 'bigimg'].map(k => [k, $(k)]));
 
     let aspect = 'landscape';
@@ -223,6 +225,7 @@ registerModule({
       }
     }
     function setInput(name) {
+      el.ireceipt.textContent = '';            // any manual change retires the receipt
       inputImage = name || null; inputDims = null;
       if (inputImage) {
         const probe = new Image();
@@ -383,14 +386,33 @@ registerModule({
       im.addEventListener('click', () => openBig(url, entry));
       return im;
     }
+    let bigUrl = '';
     function openBig(url, entry) {
+      bigUrl = url;
       bigEntry = entry || null;
       el.bigimg.src = url;
       el.bigmeta.textContent = entry ? `${entry.workflow} · seed ${entry.seed} · ${entry.prompt}` : '';
       el.reuse.style.display = entry ? '' : 'none';
       el.big.style.display = 'flex';
     }
-    el.bigclose.addEventListener('click', () => { el.big.style.display = 'none'; el.bigimg.src = ''; });
+    el.bigclose.addEventListener('click', () => { el.big.style.display = 'none'; el.bigimg.src = ''; bigUrl = ''; });
+    // v1.4 "Send to ▸": a finished render can go to Puppet Theater (as a
+    // layer or the background) or to FaceCycle. Server urls only.
+    const sendMenu = createSendMenu({
+      className: 'ee-btn fx-btn',
+      entries: [
+        { label: '🎭 Puppet Theater — new layer', target: 'puppet', as: 'layer' },
+        { label: '🎭 Puppet Theater — as background', target: 'puppet', as: 'background' },
+        { label: '🎭 FaceCycle — as subject', target: 'facecycle' },
+      ],
+      getPayload: () => {
+        if (!bigUrl) return { error: 'No render open.' };
+        const out = { urls: [bigUrl], names: [nameFromUrl(bigUrl)], source: 'FoxDen' };
+        el.bigclose.click();                 // the viewer shouldn't be waiting when the user returns
+        return out;
+      },
+    });
+    el.reuse.before(sendMenu.el);
     el.reuse.addEventListener('click', () => {
       const e = bigEntry; if (!e) return;
       el.prompt.value = e.prompt; el.seed.value = e.seed;
@@ -446,6 +468,32 @@ registerModule({
     const toggleRecent = () => setCollapsed(!el.recentwrap.classList.contains('collapsed'));
     el.rtoggle.addEventListener('click', toggleRecent);
     el.rcount.addEventListener('click', toggleRecent);
+
+    // ── v1.4 receive: Gallery / Puppet composite → input image ──
+    // Loads the way a local upload would: fetch the server url, POST it to
+    // the existing /upload, select it. No new endpoint; no base64 in events.
+    registerReceiver('foxden', {
+      canAccept: () => restored ? { ok: true }
+        : { ok: false, reason: 'FoxDen is still loading — try again in a moment.' },
+    });
+    window.addEventListener('ellieedit:foxden-receive', async e => {
+      const { urls, names, source } = e.detail || {};
+      if (!Array.isArray(urls) || !urls.length) return;
+      try {
+        say('receiving image…');
+        const r = await fetch(urls[0]);
+        if (!r.ok) throw new Error(`${(names && names[0]) || urls[0]}: HTTP ${r.status}`);
+        const blob = await r.blob();
+        const fname = (names && names[0]) || nameFromUrl(urls[0]);
+        const fd = new FormData(); fd.append('image', new File([blob], fname, { type: blob.type || 'image/png' }));
+        const j = await api('/upload', { method: 'POST', body: fd });
+        const name = j.subfolder ? `${j.subfolder}/${j.name}` : j.name;
+        if (!inputItems.includes(name)) inputItems.unshift(name);
+        setInput(name); scheduleSave();
+        el.ireceipt.textContent = receiptText(1, source) + (urls.length > 1 ? ` (first of ${urls.length}; input takes one)` : '');
+        say(`Input image set: ${name}.`, 'ok');
+      } catch (err) { say('Receive failed: ' + err.message, 'err'); }
+    });
 
     // First paint: config (workflow options must exist) -> restore the
     // auto-remembered composition -> only THEN allow auto-save.
