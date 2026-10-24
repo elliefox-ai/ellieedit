@@ -647,3 +647,17 @@ def test_js_key_guards():
     )
     assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
     assert "PASS" in r.stdout
+
+
+def test_library_phase0_frontend_wiring():
+    """Phase 0 (library report §6): family badge + original toggle in the
+    viewer, Send to ▸ menu replacing the hard-coded Update dispatch, and
+    the tag bar fed by the unfiltered total."""
+    lib = (HERE.parent / "frontend" / "js" / "modules" / "library.js").read_text()
+    for needle in ('lib-fambadge', 'libv-family', 'toggleFamily',
+                   'viewingOriginal', 'createSendMenu', 'libv-sendwrap',
+                   'Puppet Theater — new layer', 'FoxDen — input image',
+                   'total_all'):
+        assert needle in lib, needle
+    assert 'sendToUpdate' not in lib   # hard-coded dispatch is gone
+    assert 'libv-update' not in lib

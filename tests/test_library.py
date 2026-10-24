@@ -301,3 +301,78 @@ def test_promote_writable_bank_moves(client, env, monkeypatch):
     assert r.json()["path"] == "worktag/w.png"
     assert not (work / "w.png").exists()
     assert (env["library"] / "worktag" / "w.png").exists()
+
+
+# -------------------------------------------------- Phase 0 (library report)
+
+def _seed_family(lroot, idx_path):
+    """A final + original pair with version-family records, as
+    update.save_family writes them (plus a later retag on the final that
+    carries no family fields — the §2.7 reader case)."""
+    import json as _j
+    (lroot / "proj").mkdir(parents=True, exist_ok=True)
+    (lroot / "proj" / "final.png").write_bytes(_png((1, 1, 1)))
+    (lroot / "proj" / "final-original.png").write_bytes(_png((2, 2, 2)))
+    recs = [
+        {"path": "proj/final.png", "tags": ["proj"],
+         "promoted_from": "render.png", "ts": "2026-10-24T00:00:00",
+         "sha256": "a" * 64},
+        {"path": "proj/final-original.png", "tags": ["proj"],
+         "promoted_from": "orig.png", "ts": "2026-10-24T00:00:00",
+         "sha256": "b" * 64, "kind": "version-original",
+         "family_id": "fam123456789"},
+        {"path": "proj/final.png", "tags": ["proj"],
+         "promoted_from": "render.png", "ts": "2026-10-24T00:00:01",
+         "sha256": "a" * 64, "kind": "version-family",
+         "family_id": "fam123456789", "original": "proj/final-original.png",
+         "final": "proj/final.png", "intermediates": []},
+        # Later retag on the final: tags only — must NOT clobber family.
+        {"path": "proj/final.png", "tags": ["proj", "hero"],
+         "promoted_from": "", "ts": "2026-10-24T00:00:02", "sha256": ""},
+    ]
+    idx_path.write_text("\n".join(_j.dumps(r) for r in recs) + "\n")
+
+
+def test_phase0_tag_bar_not_collapsing(client, env, monkeypatch):
+    """The §2.1 bug: after filtering by a tag, the bar must still offer
+    every tag and 'all' must show the unfiltered total."""
+    monkeypatch.setattr(library_mod, "PAGE_SIZE", 40)
+    client.post("/api/library/promote", json={"path": "loose.png", "tag": "toon"})
+    client.post("/api/library/promote", json={"path": "ZengoSoft Face/a.png"})
+    full = client.get("/api/library/list").json()
+    assert sorted(full["tags"]) == ["toon", "zengosoft"]
+    assert full["total_all"] == 2
+    filt = client.get("/api/library/list", params={"tag": "toon"}).json()
+    assert filt["total"] == 1                       # filtered count stays
+    assert sorted(filt["tags"]) == ["toon", "zengosoft"]  # bar does NOT collapse
+    assert filt["total_all"] == 2                    # 'all (N)' stays honest
+
+
+def test_phase0_families_and_kind_filter(client, env, monkeypatch):
+    lroot = env["library"]
+    _seed_family(lroot, lroot / ".library-index.jsonl")
+    d = client.get("/api/library/list").json()
+    paths = [i["path"] for i in d["items"]]
+    assert "proj/final.png" in paths
+    assert "proj/final-original.png" not in paths   # default hides originals
+    final = next(i for i in d["items"] if i["path"] == "proj/final.png")
+    assert final["kind"] == "version-family"
+    assert final["family_id"] == "fam123456789"
+    assert final["original"] == "proj/final-original.png"
+    assert sorted(final["tags"]) == ["hero", "proj"]  # retag won for tags…
+    # …but did NOT clobber the family linkage (§2.7 reader fix).
+    assert final["family_id"] == "fam123456789"
+    assert d["kind"] == "finals"
+    dall = client.get("/api/library/list", params={"kind": "all"}).json()
+    assert "proj/final-original.png" in [i["path"] for i in dall["items"]]
+    dorig = client.get("/api/library/list", params={"kind": "originals"}).json()
+    assert [i["path"] for i in dorig["items"]] == ["proj/final-original.png"]
+    assert client.get("/api/library/list", params={"kind": "bogus"}).status_code == 400
+
+
+def test_phase0_server_timing_header(client, env):
+    r = client.get("/api/library/list")
+    assert r.status_code == 200
+    assert "Server-Timing" in r.headers
+    assert "walk" in r.headers["Server-Timing"]
+    assert "index" in r.headers["Server-Timing"]

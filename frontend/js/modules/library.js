@@ -9,6 +9,7 @@
 // MOVED to the deletion queue's pending area, never unlinked). No
 // P-promote here — library items are already promoted.
 import { registerModule } from '../shell.js';
+import { createSendMenu } from '../components/send-menu.js';
 import { buildListParams, countLine } from './library-core.js';
 
 const PAGE_SIZE = 40; // must match backend PAGE_SIZE for cursor math
@@ -47,6 +48,12 @@ function panelHTML() {
       position: absolute; bottom: 0; left: 0; right: 0; padding: 2px 6px;
       background: rgba(0,0,0,0.55); color: #b0b0d0; font-size: 9px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+    }
+    /* Version-family badge (Phase 0): finals that have an original. */
+    .lib-cell .lib-fambadge {
+      position: absolute; top: 4px; right: 4px; z-index: 2;
+      background: rgba(20,20,40,0.8); color: #e8b84d; font-size: 13px;
+      padding: 1px 6px; border-radius: 8px; border: 1px solid #4a4a6c;
     }
     .lib-foot { padding: 10px 16px; display: flex; justify-content: center;
       border-top: 1px solid #2a2a44; }
@@ -94,7 +101,8 @@ function panelHTML() {
       <div class="bar">
         <span class="fname" id="libv-name"></span>
         <button class="ee-btn" id="libv-retag" title="Retag">🏷 Retag</button>
-        <button class="ee-btn" id="libv-update" title="Open in Update tab (version stack)">✎ Update</button>
+        <button class="ee-btn" id="libv-family" style="display:none" title="Show this final's original (Update version family)">⧉ Original</button>
+        <span id="libv-sendwrap"></span>
         <button class="ee-btn danger" id="libv-delete" title="Move to deletion queue pending area — nothing is deleted until you confirm">🗑 Delete</button>
         <button class="ee-btn" id="libv-close">✕</button>
       </div>
@@ -120,7 +128,8 @@ class LibraryView {
       vImg: panel.querySelector('#libv-img'),
       vNote: panel.querySelector('#libv-note'),
       vRetag: panel.querySelector('#libv-retag'),
-      vUpdate: panel.querySelector('#libv-update'),
+      vFamily: panel.querySelector('#libv-family'),
+      vSendWrap: panel.querySelector('#libv-sendwrap'),
       vDelete: panel.querySelector('#libv-delete'),
     };
     this.tag = '';
@@ -129,6 +138,7 @@ class LibraryView {
     this.shown = 0;
     this.items = [];   // flat filtered listing — the lightbox navigates this
     this.viewIdx = -1;
+    this.viewingOriginal = false;   // family toggle state in the viewer
     this.el.more.addEventListener('click', () => this.load());
     window.addEventListener('ellieedit:tab-activated', e => {
       if (e.detail?.name === 'library') this.reload();
@@ -152,7 +162,7 @@ class LibraryView {
       const r = await fetch('/api/library/list?' + qs);
       if (!r.ok) throw new Error(r.status);
       const d = await r.json();
-      if (this.cursor === 0) this.renderTags(d.tags, d.total);
+      if (this.cursor === 0) this.renderTags(d.tags, d.total_all ?? d.total);
       for (const item of d.items) {
         this.items.push(item);
         this.addCell(item, this.items.length - 1);
@@ -201,6 +211,13 @@ class LibraryView {
     const name = document.createElement('div');
     name.className = 'name'; name.textContent = item.name;
     cell.append(img, chips, name);
+    // ⧉ badge on finals that carry a version family (Phase 0).
+    if (item.kind === 'version-family' && item.original) {
+      const b = document.createElement('span');
+      b.className = 'lib-fambadge'; b.textContent = '⧉';
+      b.title = 'Version family — open to see the original';
+      cell.appendChild(b);
+    }
     // Lightbox instead of raw-file navigation (2026-10-09e).
     cell.addEventListener('click', () => this.openViewer(idx));
     this.el.grid.appendChild(cell);
@@ -212,6 +229,7 @@ class LibraryView {
     const it = this.items[idx];
     if (!it) return;
     this.disarmDelete();
+    this.viewingOriginal = false;
     this.el.vNote.style.display = 'none';
     this.el.vImg.onerror = () => {
       if (this.el.viewer.style.display === 'flex') this.el.vNote.style.display = 'block';
@@ -219,10 +237,27 @@ class LibraryView {
     this.el.vImg.src = this.fileUrl(it.path);
     const tags = (it.tags || []).join(', ');
     this.el.vName.textContent = `${it.name}${tags ? ' · ' + tags : ''}`;
+    // Family toggle (Phase 0): finals with an original offer it directly.
+    const hasFam = !!(it.family_id && it.original);
+    this.el.vFamily.style.display = hasFam ? '' : 'none';
+    this.el.vFamily.textContent = '⧉ Original';
     this.el.viewer.style.display = 'flex';
   }
 
+  // Toggle the viewer between a final and its version original (Phase 0).
+  toggleFamily() {
+    const it = this.items[this.viewIdx];
+    if (!it || !it.original) return;
+    this.viewingOriginal = !this.viewingOriginal;
+    this.el.vImg.src = this.fileUrl(this.viewingOriginal ? it.original : it.path);
+    this.el.vFamily.textContent = this.viewingOriginal ? '⧉ Final' : '⧉ Original';
+    const tags = (it.tags || []).join(', ');
+    this.el.vName.textContent = `${it.name}${tags ? ' · ' + tags : ''}` +
+      (this.viewingOriginal ? ' · original' : '');
+  }
+
   closeViewer() {
+    if (this.sendMenu) this.sendMenu.close();
     this.disarmDelete();
     this.el.viewer.style.display = 'none';
     this.el.vImg.src = '';
@@ -309,21 +344,34 @@ class LibraryView {
     }
   }
 
-  sendToUpdate() {
-    const item = this.items[this.viewIdx];
-    if (!item) return;
-    window.dispatchEvent(new CustomEvent('ellieedit:open-in-update',
-      { detail: { url: this.fileUrl(item.path), name: item.name, path: item.path } }));
-    window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'update' } }));
-    this.closeViewer();
-  }
-
   bindViewer() {
     this.panel.querySelector('#libv-close').addEventListener('click', () => this.closeViewer());
     this.panel.querySelector('#libv-prev').addEventListener('click', () => this.nav(-1));
     this.panel.querySelector('#libv-next').addEventListener('click', () => this.nav(1));
     this.el.vRetag.addEventListener('click', () => this.retagFromViewer());
-    this.el.vUpdate.addEventListener('click', () => this.sendToUpdate());
+    this.el.vFamily.addEventListener('click', () => this.toggleFamily());
+    // Send to ▸ (Phase 0): replaces the hard-coded ✎ Update dispatch with
+    // the v1.4 shell router — Update stays reachable, Puppet / FoxDen /
+    // FaceCycle join it. The viewer closes on send, as before.
+    const sendMenu = createSendMenu({
+      className: 'ee-btn',
+      entries: [
+        { label: '🎭 Puppet Theater — new layer', target: 'puppet', as: 'layer' },
+        { label: '🎭 Puppet Theater — as background', target: 'puppet', as: 'background' },
+        { label: '🦊 FoxDen — input image', target: 'foxden' },
+        { label: '→ FaceCycle', target: 'facecycle' },
+        { label: '✎ Update', target: 'update' },
+      ],
+      getPayload: () => {
+        const item = this.items[this.viewIdx];
+        if (!item) return { error: 'No image open.' };
+        return { urls: [this.fileUrl(item.path)], names: [item.name],
+          source: 'Library',
+          provenance: { kind: 'library', paths: [item.path] } };
+      },
+    });
+    this.el.vSendWrap.appendChild(sendMenu.el);
+    this.sendMenu = sendMenu;
     this.el.vDelete.addEventListener('click', () => this.armDelete());
     this.el.vImg.addEventListener('click', e => { if (e.target === this.el.vImg) this.closeViewer(); });
     this.onKey = e => {
