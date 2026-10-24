@@ -244,3 +244,42 @@ load-and-decode path handles fetch; no new upload endpoints needed.
 Gallery→Puppet and all send-to arrivals place the ORIGINAL image; Cut Out stays
 manual. Rationale: auto-rmbg is presumptuous — send-to may carry precut images.
 Shipped v1.4 behavior is already correct (Echo followed current drop behavior).
+
+---
+
+# INCREMENT 4 — v1.5: gallery banks + in-gallery dupe review
+
+**Date:** 2026-10-24 · **Builder:** echo · **Status:** Ready for build.
+**Base:** current `master`. Same delivery discipline (bundle/patches, no
+bumps, no restarts, suites green at handoff).
+
+## Design decisions (Alexander, 2026-10-24 — do not revisit)
+
+- **Gallery multi-bank:** the gallery must feed from MORE than one root. The
+  comfy `output/` folder stays a bank, but new "home" folders can be added as
+  additional banks so renders stop being the only source of weight on the
+  comfy drive. Primary root (the existing GALLERY_ROOT) stays the default and
+  remains fully read-write; additional banks are configurable (extra roots via
+  config/env), visible in the gallery with a bank indicator, and — unless a
+  bank is explicitly marked writable — treated as read-only for
+  delete/move operations (viewing, send-to, dupe review all work).
+- **In-gallery dupe review queue:** from the gallery, the operator can queue
+  a NEW duplicate review scoped to the current folder. The scan must be
+  INCREMENTAL: check against the existing dupe families already on record
+  (the old families previously established), not a cold re-scan — do not
+  rewrite existing families, do not re-trust duplicate cache entries; new
+  findings extend or link into the existing family graph. This reuses the
+  existing dupe-scan machinery (dupe router, cache guard, idempotence pins).
+- **No auto-rmbg anywhere in this flow** (per v1.4 ruling).
+
+## Acceptance checklist (operator-side, after land)
+
+1. A second bank folder configured → its images appear in the gallery
+   alongside the comfy-output bank, with a visible bank indicator.
+2. Send-to / lightbox actions work on bank images.
+3. Delete/move on a read-only bank is blocked (or hidden), primary unchanged.
+4. Gallery folder view offers "queue dupe review" → review runs scoped to
+   that folder, incremental against existing families (old families not
+   rewritten; confirmed by test).
+5. Scan results open in the existing dupe review UI.
+6. Full pytest + tests/js suites green.
