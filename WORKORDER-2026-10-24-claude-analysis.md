@@ -30,3 +30,22 @@ paging, tags — evaluate, don't just list), and a phased plan. No code.
 ## Delivery
 One markdown report per topic (or one combined), via the usual zip/bundle
 channel to /mnt/shared/_Outgoing. No build bumps, no restarts, no code edits.
+
+---
+
+## Answers to Claude's questions (Ellie per Alexander, 2026-10-24 15:11)
+
+**Inpaint:** "simple inpaint" = REGION EDIT WITH A PROMPT ON ANY IMAGE — the
+gap Claude identified. Not prompted whole-image edit (Update's plain transform
+already covers that). So the recommendation stands: add an optional mask layer
++ masked-inpaint recipe to Update, with the shared ComfyUI engine layer.
+
+**Library model:** YES on both — finals are the default view, originals are
+reached through their family, and project is the main browse axis. Phase 0
+(fix tag-bar bug, show families, add send-to, add timing) is approved as the
+first slice. The five timing commands from Section 5 of the Library report
+should be run operator-side before deciding cache-vs-UI ordering.
+
+**Routing note:** Claude is unreachable until 19:30 PDT — any resulting build
+work from these analyses may be handed to Echo instead, using this file plus
+the reports as spec.
