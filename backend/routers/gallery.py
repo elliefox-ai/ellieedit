@@ -7,7 +7,9 @@ the real path escapes it (symlinks included).
 
 import hashlib
 import io
+import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +24,106 @@ Image.MAX_IMAGE_PIXELS = None  # local tool; images may be large
 log = __import__("logging").getLogger("ellieedit.gallery")
 
 GALLERY_ROOT = Path(os.environ.get("ELLIEEDIT_GALLERY_ROOT", "/mnt/e/comfyui/output"))
+
+
+# ---- gallery banks (v1.5) ---------------------------------------------------
+# The gallery feeds from MORE than one root. The primary root (GALLERY_ROOT)
+# stays the default and fully read-write; extra banks come from
+# ELLIEEDIT_GALLERY_BANKS — either a JSON list
+#   [{"label": "Home", "root": "/mnt/shared/_Home", "writable": false}]
+# or a plain os.pathsep-separated list of roots (label = folder name,
+# read-only). Unless a bank is explicitly marked writable it is READ-ONLY
+# for delete/move operations (viewing, send-to, dupe review all work).
+# Banks are computed per call (not import time) so tests can monkeypatch
+# GALLERY_ROOT / the env and the operator can re-point without a restart.
+def _parse_extra_banks() -> list[dict]:
+    raw = (os.environ.get("ELLIEEDIT_GALLERY_BANKS") or "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            out = []
+            for b in data:
+                if isinstance(b, dict) and b.get("root"):
+                    out.append({"label": str(b.get("label") or Path(b["root"]).name),
+                                "root": str(b["root"]),
+                                "writable": bool(b.get("writable", False))})
+            return out
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass  # fall through to the plain-paths form
+    return [{"label": Path(p).name or p, "root": p, "writable": False}
+            for p in raw.split(os.pathsep) if p.strip()]
+
+
+def get_banks() -> list[dict]:
+    """[{id, label, root: Path, writable}] — primary first, then extras."""
+    banks = [{"id": "primary", "label": "Comfy output",
+              "root": GALLERY_ROOT, "writable": True}]
+    for i, b in enumerate(_parse_extra_banks()):
+        slug = re.sub(r"[^a-z0-9]+", "-", b["label"].lower()).strip("-") or f"bank{i + 1}"
+        banks.append({"id": slug, "label": b["label"],
+                      "root": Path(b["root"]), "writable": b["writable"]})
+    # De-duplicate ids (two banks with the same label): keep first, suffix rest.
+    seen: dict[str, int] = {}
+    for b in banks:
+        if b["id"] in seen:
+            seen[b["id"]] += 1
+            b["id"] = f"{b['id']}-{seen[b['id']]}"
+        else:
+            seen[b["id"]] = 0
+    return banks
+
+
+def bank_by_id(bank_id: str | None) -> dict | None:
+    for b in get_banks():
+        if b["id"] == (bank_id or "primary"):
+            return b
+    return None
+
+
+def bank_jailed(bank_id: str | None, rel: str) -> Path:
+    """Resolve rel under the named bank's root; reject escapes like jailed()."""
+    bank = bank_by_id(bank_id)
+    if bank is None:
+        raise HTTPException(400, f"unknown gallery bank: {bank_id}")
+    if not rel or Path(rel).is_absolute() or rel.startswith("~"):
+        raise HTTPException(400, "path escapes gallery bank")
+    root_real = bank["root"].resolve()
+    candidate = (bank["root"] / rel.lstrip("/")).resolve()
+    if candidate == root_real or root_real not in candidate.parents:
+        raise HTTPException(400, "path escapes gallery bank")
+    return candidate
+
+
+def manifest_key(bank_id: str | None, rel: str) -> str:
+    """Identity of a gallery file across banks. Primary keeps the plain
+    rel path (back-compat with every existing manifest key); extra banks
+    are qualified so the same rel in two banks never collides."""
+    bank = bank_id or "primary"
+    return rel if bank == "primary" else f"bank:{bank}:{rel}"
+
+
+def parse_manifest_key(key: str) -> tuple[str, str]:
+    """Inverse of manifest_key: ('primary', rel) or (bank_id, rel)."""
+    if key.startswith("bank:"):
+        rest = key[5:]
+        bank_id, _, rel = rest.partition(":")
+        if bank_id and rel:
+            return bank_id, rel
+    return "primary", key
+
+
+def resolve_manifest_key(key: str) -> tuple[Path, dict]:
+    """Resolve a manifest key to (abs path, bank dict). Raises 400 on jail
+    escapes and unknown banks. Read-only banks resolve fine here — the
+    writability gate lives at the mutation points (pending add, confirm,
+    promote), not at resolution, so listings can still read them."""
+    bank_id, rel = parse_manifest_key(key)
+    bank = bank_by_id(bank_id)
+    if bank is None:
+        raise HTTPException(400, f"unknown gallery bank: {bank_id}")
+    return bank_jailed(bank_id, rel), bank
 # Repaint intermediates land here (ComfyUI writes ellieedit_tmp/ inside its
 # output root, which is shared with the gallery root). Env-overridable for
 # the case where ComfyUI's output root differs from GALLERY_ROOT.
@@ -264,9 +366,18 @@ def _dims_many(files: list[tuple[str, int]]) -> list:
     return out
 
 
+@router.get("/banks")
+def list_banks():
+    """Gallery banks (v1.5): primary first, then configured extra banks."""
+    return {"banks": [{"id": b["id"], "label": b["label"],
+                       "root": str(b["root"]), "writable": b["writable"]}
+                      for b in get_banks()]}
+
+
 @router.get("/list")
 def list_images(response: FResponse, dir: str = "", cursor: str = "",
-                pending: str = "all", refresh: bool = False):
+                pending: str = "all", refresh: bool = False,
+                bank: str = "primary"):
     """pending filter (default 'all' = everything, backward compatible):
       active  — exclude every path in the pending-delete manifest
       pending — only manifest paths
@@ -281,10 +392,13 @@ def list_images(response: FResponse, dir: str = "", cursor: str = "",
     from .pending import load_manifest  # lazy: pending.py imports this module
     pending_set = set(load_manifest().keys())
 
-    root_real = GALLERY_ROOT.resolve()
+    bank_obj = bank_by_id(bank)
+    if bank_obj is None:
+        raise HTTPException(400, f"unknown gallery bank: {bank}")
+    root_real = bank_obj["root"].resolve()
     if dir and (Path(dir).is_absolute() or dir.startswith("~")):
         raise HTTPException(400, "dir escapes gallery root")
-    base = (GALLERY_ROOT / dir.lstrip("/")).resolve() if dir else GALLERY_ROOT.resolve()
+    base = (bank_obj["root"] / dir.lstrip("/")).resolve() if dir else root_real
     if base != root_real and root_real not in base.parents:
         raise HTTPException(400, "dir escapes gallery root")
     if not base.is_dir():
@@ -307,9 +421,11 @@ def list_images(response: FResponse, dir: str = "", cursor: str = "",
         return (base / name).relative_to(root_real).as_posix()
 
     # Pending filter applies before cursoring so cursors stay per-view correct.
+    # Manifest keys are bank-qualified outside the primary bank.
     if pending != "all":
         files = [(m, n) for (m, n) in files
-                 if (rel_of(n) in pending_set) == (pending == "pending")]
+                 if (manifest_key(bank_obj["id"], rel_of(n)) in pending_set)
+                 == (pending == "pending")]
 
     start = _cursor_start(files, cursor) if cursor else 0
     page = files[start:start + PAGE_SIZE]
@@ -327,7 +443,13 @@ def list_images(response: FResponse, dir: str = "", cursor: str = "",
             "mtime": int(mtime),
             "width": w, "height": h,
             "thumb": True,  # generated lazily by /thumb
-            "pending": rel in pending_set,
+            # v1.5 bank identity: manifest keys are bank-qualified outside
+            # the primary bank, so the same rel in two banks never collides.
+            "bank": bank_obj["id"],
+            "bank_label": bank_obj["label"],
+            "writable": bank_obj["writable"],
+            "manifest_key": manifest_key(bank_obj["id"], rel),
+            "pending": manifest_key(bank_obj["id"], rel) in pending_set,
         })
     next_cursor = f"{page[-1][0]}:{page[-1][1]}" if page and start + PAGE_SIZE < len(files) else None
     ahead = files[start + PAGE_SIZE:start + 2 * PAGE_SIZE]
@@ -337,7 +459,9 @@ def list_images(response: FResponse, dir: str = "", cursor: str = "",
         f"dims;dur={(t_dims - t_walk) * 1000:.1f}, "
         f"total;dur={(time.perf_counter() - t0) * 1000:.1f}")
     return {"items": items, "subdirs": subdirs, "next_cursor": next_cursor,
-            "root": str(root_real)}
+            "root": str(root_real),
+            "bank": bank_obj["id"], "bank_label": bank_obj["label"],
+            "writable": bank_obj["writable"]}
 
 
 def _pending_listing(pending_set: set, cursor: str, root_real: Path) -> dict:
@@ -345,31 +469,41 @@ def _pending_listing(pending_set: set, cursor: str, root_real: Path) -> dict:
     Same item shape, tagging, and cursoring as the folder walk — one data
     source so the status count and grid count cannot diverge."""
     files = []
-    for rel in pending_set:
+    for key in pending_set:
         try:
-            f = resolve_flex(rel)
+            # v1.5: bank-qualified manifest keys resolve under their bank;
+            # plain keys keep the gallery/dupe flexible jail.
+            if key.startswith("bank:"):
+                f, bank_obj = resolve_manifest_key(key)
+                _bid, rel = parse_manifest_key(key)
+            else:
+                f = resolve_flex(key)
+                rel, bank_obj = key, {"id": "primary", "label": "Comfy output",
+                                      "writable": True}
             st = f.stat()
             if f.suffix.lower() not in EXTS:
                 continue
-            files.append((int(st.st_mtime), f.name, rel, f))
+            files.append((int(st.st_mtime), f.name, rel, f, key, bank_obj))
         except (HTTPException, OSError):
-            continue  # vanished or jailed under both roots: skip in the grid
+            continue  # vanished or jailed under every root: skip in the grid
     files.sort(reverse=True)
     start = _cursor_start(files, cursor) if cursor else 0
     page = files[start:start + PAGE_SIZE]
-    dims = _dims_many([(str(f), m) for m, _n, _r, f in page])
+    dims = _dims_many([(str(f), m) for m, _n, _r, f, _k, _b in page])
     items = []
-    for (mtime, name, rel, _f), wh in zip(page, dims):
+    for (mtime, name, rel, _f, key, bank_obj), wh in zip(page, dims):
         if not wh:
             continue
         w, h = wh
-        # path stays the manifest key (gallery- or dupe-relative); the media
-        # endpoints resolve through the same flexible jail.
+        # path is the bank-relative rel; manifest_key is the cross-bank
+        # identity the frontend keys selection/pending state on.
         items.append({"name": name, "path": rel, "mtime": int(mtime),
-                      "width": w, "height": h, "thumb": True, "pending": True})
+                      "width": w, "height": h, "thumb": True, "pending": True,
+                      "bank": bank_obj["id"], "bank_label": bank_obj["label"],
+                      "writable": bank_obj["writable"], "manifest_key": key})
     next_cursor = f"{page[-1][0]}:{page[-1][1]}" if page and start + PAGE_SIZE < len(files) else None
-    warm_thumbs([str(f) for _m, _n, _r, f in page]
-                + [str(f) for _m, _n, _r, f in files[start + PAGE_SIZE:start + 2 * PAGE_SIZE]])
+    warm_thumbs([str(f) for _m, _n, _r, f, _k, _b in page]
+                + [str(f) for _m, _n, _r, f, _k, _b in files[start + PAGE_SIZE:start + 2 * PAGE_SIZE]])
     return {"items": items, "subdirs": [], "next_cursor": next_cursor,
             "root": str(root_real)}
 
@@ -412,8 +546,10 @@ def cleanup_tmp_dir():
 
 
 @router.get("/thumb")
-def thumbnail(path: str = Query(...)):
-    src = resolve_flex(path)
+def thumbnail(path: str = Query(...), bank: str = "primary"):
+    # v1.5: bank param selects the bank jail; primary keeps the legacy
+    # gallery/dupe flexible jail (dupe-pool thumbs still resolve).
+    src = bank_jailed(bank, path) if bank != "primary" else resolve_flex(path)
     if not src.is_file() or src.suffix.lower() not in EXTS:
         raise HTTPException(404, "not an image")
     try:
@@ -425,8 +561,8 @@ def thumbnail(path: str = Query(...)):
 
 
 @router.get("/file")
-def file(path: str = Query(...)):
-    src = resolve_flex(path)
+def file(path: str = Query(...), bank: str = "primary"):
+    src = bank_jailed(bank, path) if bank != "primary" else resolve_flex(path)
     if not src.is_file() or src.suffix.lower() not in EXTS:
         raise HTTPException(404, "not an image")
     media = {"jpg": "image/jpeg", "jpeg": "image/jpeg",

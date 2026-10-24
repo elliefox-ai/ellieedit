@@ -20,7 +20,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from .gallery import EXTS, GALLERY_ROOT, jailed, resolve_flex
+from .gallery import (EXTS, GALLERY_ROOT, jailed, parse_manifest_key,
+                      resolve_flex, resolve_manifest_key)
 
 log = __import__("logging").getLogger("ellieedit.pending")
 
@@ -101,8 +102,11 @@ def _entries(m: dict) -> list[dict]:
     total = 0
     for rel, added_at in sorted(m.items()):
         try:
-            # Gallery root first, dupe-pool fallback (same as confirm/listing).
-            size = resolve_flex(rel).stat().st_size
+            # v1.5: bank-qualified keys resolve under their bank; plain keys
+            # keep the gallery/dupe flexible jail (same as confirm/listing).
+            src = (resolve_manifest_key(rel)[0] if rel.startswith("bank:")
+                   else resolve_flex(rel))
+            size = src.stat().st_size
         except Exception:
             size = None  # file vanished; keep it listed, size unknown
         if size:
@@ -139,7 +143,15 @@ def add_pending(body: PathsBody, request: Request = None,
         now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
         touched: list[str] = []
         for rel in body.paths:
-            src = jailed(rel)  # raises 400 on any jail violation
+            if rel.startswith("bank:"):
+                # v1.5: read-only banks cannot be marked — delete/move is
+                # blocked at the gate, not silently dropped.
+                src, bank_obj = resolve_manifest_key(rel)
+                if not bank_obj["writable"]:
+                    raise HTTPException(
+                        400, f"gallery bank '{bank_obj['label']}' is read-only")
+            else:
+                src = jailed(rel)  # raises 400 on any jail violation
             if not src.is_file() or src.suffix.lower() not in EXTS:
                 continue  # missing (or not an image): ignore per spec
             if rel not in m:
@@ -162,7 +174,10 @@ def pardon_pending(body: PathsBody, request: Request = None,
         removed = 0
         touched: list[str] = []
         for rel in body.paths:
-            jailed(rel)  # jail applies on pardon too
+            if rel.startswith("bank:"):
+                resolve_manifest_key(rel)  # jail applies on pardon too
+            else:
+                jailed(rel)  # jail applies on pardon too
             if rel in m:
                 del m[rel]
                 removed += 1
@@ -207,19 +222,31 @@ def confirm_pending(body: ConfirmBody | None = None, request: Request = None):
         deleted = 0
         bytes_freed = 0
         gone: list[str] = []
+        kept: dict = {}   # v1.5: read-only-bank entries survive confirm
         for rel in list(m):
-            try:
-                src = jailed(rel)
-            except HTTPException:
-                # Entries can also come from the Dupe view, whose pool root is a
-                # different tree than GALLERY_ROOT. Confirm remains the ONLY
-                # destructive endpoint — it just resolves through the dupe jail
-                # too, so those members are actually deletable.
+            if rel.startswith("bank:"):
+                # A bank that flipped to read-only after marking must NOT
+                # be deleted from: keep the entry, skip the unlink.
                 try:
-                    from .dupe import jailed as dupe_jailed
-                    src = dupe_jailed(rel)
-                except Exception:
-                    continue  # resolves under neither root: skip
+                    src, bank_obj = resolve_manifest_key(rel)
+                except HTTPException:
+                    continue  # unknown bank: skip, drop like other orphans
+                if not bank_obj["writable"]:
+                    kept[rel] = m[rel]
+                    continue
+            else:
+                try:
+                    src = jailed(rel)
+                except HTTPException:
+                    # Entries can also come from the Dupe view, whose pool root is a
+                    # different tree than GALLERY_ROOT. Confirm remains the ONLY
+                    # destructive endpoint — it just resolves through the dupe jail
+                    # too, so those members are actually deletable.
+                    try:
+                        from .dupe import jailed as dupe_jailed
+                        src = dupe_jailed(rel)
+                    except Exception:
+                        continue  # resolves under neither root: skip
             try:
                 size = src.stat().st_size
                 src.unlink()
@@ -240,6 +267,6 @@ def confirm_pending(body: ConfirmBody | None = None, request: Request = None):
                     continue
             except OSError as e:
                 log.warning("pending confirm: could not unlink %s: %s", rel, e)
-        _save({})
+        _save(kept)
     _audit("confirm", gone, request)
     return {"deleted": deleted, "bytes": bytes_freed}

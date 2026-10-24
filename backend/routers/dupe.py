@@ -16,6 +16,7 @@ DUPE_ROOT is env-overridable (ELLIEEDIT_DUPE_ROOT). Canonical live tree:
   /mnt/shared/_Incoming/DupeReview  (627 families, index 2026-10-03).
 """
 
+import hashlib
 import json
 import os
 import re
@@ -234,11 +235,25 @@ _jail_cache: dict[str, bool] = {}                           # rel path -> jailed
 router = APIRouter(prefix="/api/dupe", tags=["dupe"])
 
 
+def _member_roots() -> list[Path]:
+    """Absolute-path allowlist for family members: the static
+    DUPE_MEMBER_ROOTS plus every gallery bank root (v1.5 — folder scans
+    link members from gallery banks, and the review UI must serve them).
+    Computed per call so gallery bank config follows monkeypatching."""
+    roots = list(DUPE_MEMBER_ROOTS)
+    try:
+        roots += [b["root"] for b in _gallery_mod.get_banks()]
+    except Exception:
+        pass
+    return roots
+
+
 def jailed(rel: str) -> Path:
     """Allowlist jail (2026-10-09h): relative paths resolve under DUPE_ROOT
     (as before — no absolute, ~, .., symlink escapes, directories). Absolute
-    paths are accepted ONLY if they resolve under one of the DUPE_MEMBER_ROOTS
-    realpaths — straggler-scan families link members outside the dupe root.
+    paths are accepted ONLY if they resolve under one of the member-root
+    realpaths — straggler-scan families link members outside the dupe root,
+    and v1.5 folder scans link gallery-bank members.
     Symlinks are resolved before the containment check, so a link escaping an
     allowlisted root is rejected. """
     rel = (rel or "").replace("\\", "/")  # family files store windows-ish paths
@@ -250,7 +265,7 @@ def jailed(rel: str) -> Path:
         roots = [DUPE_ROOT]
     else:
         candidate = Path(rel).resolve()
-        roots = [r for r in DUPE_MEMBER_ROOTS if r != DUPE_ROOT] + [DUPE_ROOT]
+        roots = [r for r in _member_roots() if r != DUPE_ROOT] + [DUPE_ROOT]
     for r in roots:
         root_real = r.resolve()
         if candidate != root_real and root_real in candidate.parents:
@@ -681,6 +696,94 @@ def scan_stragglers_ep(body: StragglerBody):
 @router.get("/scan-stragglers/status")
 def scan_stragglers_status():
     return dict(_straggler_state)
+
+
+# ------------------------------------------------ folder scan (v1.5)
+# In-gallery dupe review queue: a scan scoped to ONE gallery folder
+# (bank + dir), INCREMENTAL against the existing family graph. It reuses
+# cluster_engine.scan_incremental, which guarantees the workorder's
+# invariants by construction:
+#   - files already claimed by ANY existing family are excluded (never
+#     re-scanned into a second family);
+#   - existing family files and index rows are never modified — new rows
+#     are appended under source cluster-engine-v2 only;
+#   - a new file matching exactly one existing family becomes a
+#     proposed_merge proposal LINKING into that family (ambiguity rule:
+#     matches to >1 family propose nothing);
+#   - the hash cache is trusted only on (root-label, rel, size, mtime) —
+#     a changed file re-hashes; cache entries are never re-trusted blind.
+# Ledger-referenced paths are skipped and previously-ruled proposals are
+# applied first (same as the v2 straggler pass), so re-queueing a folder
+# never resurrects decided work.
+_folder_scan_lock = threading.Lock()
+_folder_scan_state: dict = {"running": False, "progress": None,
+                            "last": None, "folder": None}
+
+
+class FolderScanBody(BaseModel):
+    bank: str = "primary"
+    dir: str = ""
+    background: bool = True
+
+
+@router.post("/scan-folder")
+def scan_folder_ep(body: FolderScanBody):
+    from backend import cluster_engine as ce
+    from backend import dupe_scan as engine
+    bank_obj = _gallery_mod.bank_by_id(body.bank)
+    if bank_obj is None:
+        raise HTTPException(400, f"unknown gallery bank: {body.bank}")
+    if body.dir:
+        folder = _gallery_mod.bank_jailed(body.bank, body.dir)
+    else:
+        folder = bank_obj["root"]
+    if not folder.is_dir():
+        raise HTTPException(404, "not a directory")
+    if not _folder_scan_lock.acquire(blocking=False):
+        raise HTTPException(409, "a folder scan is already running")
+    _folder_scan_lock.release()
+    if _folder_scan_state["running"]:
+        raise HTTPException(409, "a folder scan is already running")
+    label = ("gallery-" + body.bank + "-" +
+             hashlib.sha1(str(folder.resolve()).encode()).hexdigest()[:8])
+
+    def run():
+        _folder_scan_state.update(running=True, progress=None, last=None,
+                                  folder=str(folder))
+        try:
+            merged = ce.apply_decisions(DUPE_ROOT, DUPE_DATA,
+                                        _proposal_decisions())
+            skip = engine.ledger_paths(LEDGER, DUPE_ROOT)
+            summary = ce.scan_incremental(
+                [{"label": label, "root": str(folder)}],
+                DUPE_ROOT, DUPE_DATA, skip_paths=skip,
+                progress=lambda p: _folder_scan_state.update(progress=p))
+            summary["merged"] = merged["merged"]
+            summary["bank"] = body.bank
+            summary["dir"] = body.dir
+            _folder_scan_state["last"] = summary
+        except Exception as e:
+            log.exception("folder scan failed")
+            _folder_scan_state["last"] = {"error": str(e)}
+        finally:
+            _folder_scan_state["running"] = False
+            _folder_scan_state["progress"] = None
+
+    if body.background:
+        threading.Thread(target=run, daemon=True, name="folder-scan").start()
+        return {"started": True, "background": True,
+                "status": "/api/dupe/scan-folder/status",
+                "bank": body.bank, "dir": body.dir}
+    run()
+    last = _folder_scan_state["last"] or {}
+    if "error" in last:
+        raise HTTPException(500, f"folder scan failed: {last['error']}")
+    return {"started": False, "summary": last}
+
+
+@router.get("/scan-folder/status")
+def scan_folder_status():
+    return dict(_folder_scan_state)
 
 
 @router.get("/families")
