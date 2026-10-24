@@ -9,6 +9,7 @@ import { makeGenLayer, stepRing, followRegion, pickRepaintTarget, isRemaskable, 
 import { divergenceMask } from './meld-divergence.js';
 import {} from './facecycle-sheets.js'; // controller retired 2026-10-16f (sheets → drawers); module kept for its tests
 import { registerModule } from '../shell.js';
+import { isTypingTarget } from '../key-guards.js';
 import { CanvasStack, drawFeatheredSource } from '../components/canvas-stack.js';
 import { JobPanel } from '../components/jobpanel.js';
 
@@ -408,7 +409,7 @@ export class FaceCycle {
         this.el.repaintDrawer.hidden = true;
         pq('[data-act="open-repaint"]').setAttribute('aria-expanded', 'false');
         return; }
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+      if (isTypingTarget(e)) return;   // shared guard (key-guards.js)
       this.onKeyDownInner(e);
     });
 
@@ -1352,7 +1353,7 @@ export class FaceCycle {
       return;
     }
 
-    if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (e.key === 'Delete') {   // Backspace removed: it also edits text
       if (this.selectedRegionId !== null) {
         e.preventDefault();
         if (this.maskEditId === this.selectedRegionId) this.maskEditId = null;

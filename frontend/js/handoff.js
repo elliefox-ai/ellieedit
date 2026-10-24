@@ -9,8 +9,9 @@
 export const FACECYCLE_MIN = 1;
 export const FACECYCLE_MAX = 8;   // bigger stacks get unwieldy in the thumb strip
 
-export function facecycleFileUrl(path) {
-  return `/api/gallery/file?path=${encodeURIComponent(path)}`;
+export function facecycleFileUrl(path, bank) {
+  return `/api/gallery/file?path=${encodeURIComponent(path)}` +
+    (bank && bank !== 'primary' ? `&bank=${encodeURIComponent(bank)}` : '');
 }
 
 // items: gallery selection values ({ path, name, ... }). Returns
@@ -23,10 +24,10 @@ export function planFaceCycleHandoff(items) {
     return { error: `FaceCycle accepts at most ${FACECYCLE_MAX} images (got ${count}).`, count };
   }
   return {
-    urls: clean.map(it => facecycleFileUrl(it.path)),
+    urls: clean.map(it => facecycleFileUrl(it.rel || it.path, it.bank)),
     names: clean.map(it => it.name || it.path.split('/').pop() || 'image.png'),
     // Replace sources needs to know where each image came from: the receiver
     // only gets blobs, so the real (jailed) paths travel alongside.
-    provenance: { kind: 'gallery', paths: clean.map(it => it.path) },
+    provenance: { kind: 'gallery', paths: clean.map(it => it.rel || it.path) },
   };
 }

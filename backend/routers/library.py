@@ -105,7 +105,9 @@ def derive_tag(src: Path) -> str:
     the source root (2026-10-09e — subfolder navigation means the deepest
     folder is the one the operator browsed into); bare files at the root
     fall back to the filename stem's leading token, then to BARE_FILE_TAG."""
-    for root in (_gallery_mod.GALLERY_ROOT, _dupe_mod.DUPE_ROOT):
+    roots = [_gallery_mod.GALLERY_ROOT, _dupe_mod.DUPE_ROOT]
+    roots += [b["root"] for b in _gallery_mod.get_banks()]
+    for root in roots:
         try:
             rel = src.resolve().relative_to(root.resolve())
         except ValueError:
@@ -171,14 +173,19 @@ def sha256_of(p: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def valid_source(p: Path) -> bool:
-    """True if p is a file strictly under GALLERY_ROOT or DUPE_ROOT."""
+    """True if p is a file strictly under GALLERY_ROOT, DUPE_ROOT, or any
+    gallery bank root (v1.5). Writability is NOT checked here — promote
+    gates read-only banks in _resolve_source; a read-only file is a valid
+    file, just not a movable one."""
     try:
         rp = p.resolve()
     except OSError:
         return False
     if not rp.is_file():
         return False
-    for root in (_gallery_mod.GALLERY_ROOT, _dupe_mod.DUPE_ROOT):
+    roots = [_gallery_mod.GALLERY_ROOT, _dupe_mod.DUPE_ROOT]
+    roots += [b["root"] for b in _gallery_mod.get_banks()]
+    for root in roots:
         try:
             rr = root.resolve()
         except OSError:
@@ -255,7 +262,9 @@ def promote_move(src: Path, tag: str | None = None) -> dict:
         raise HTTPException(404, "source vanished mid-promote")
     # Relative provenance: best-effort rel path under its source root.
     promoted_from = src.name
-    for root in (_gallery_mod.GALLERY_ROOT, _dupe_mod.DUPE_ROOT):
+    _roots = [_gallery_mod.GALLERY_ROOT, _dupe_mod.DUPE_ROOT]
+    _roots += [b["root"] for b in _gallery_mod.get_banks()]
+    for root in _roots:
         try:
             promoted_from = src.resolve().relative_to(root.resolve()).as_posix()
             break
@@ -340,6 +349,7 @@ router = APIRouter(prefix="/api/library", tags=["library"])
 class PromoteBody(BaseModel):
     path: str
     tag: str | None = None
+    bank: str | None = None   # v1.5: bank the path lives in (primary default)
 
 
 class RetagBody(BaseModel):
@@ -358,14 +368,14 @@ def list_endpoint(tag: str = "", cursor: int = 0):
 
 @router.post("/promote")
 def promote(body: PromoteBody):
-    src = _resolve_source(body.path)
+    src = _resolve_source(body.path, bank=body.bank)
     record = promote_move(src, (body.tag or "").strip().lower() or None)
     return {"ok": True, **record}
 
 
 @router.get("/derive")
-def derive(path: str = Query(...)):
-    return {"tag": derive_tag(_resolve_source(path))}
+def derive(path: str = Query(...), bank: str | None = None):
+    return {"tag": derive_tag(_resolve_source(path, bank=bank))}
 
 
 @router.post("/retag")
@@ -458,9 +468,23 @@ def file(path: str = Query(...)):
     return FileResponse(p)
 
 
-def _resolve_source(rel: str) -> Path:
+def _resolve_source(rel: str, bank: str | None = None) -> Path:
     """Jail a client path against GALLERY_ROOT, falling back to DUPE_ROOT
-    (mirrors gallery.resolve_flex)."""
+    (mirrors gallery.resolve_flex). With an explicit non-primary bank, the
+    path resolves under that bank — and a read-only bank is a 400, since
+    promote is a MOVE."""
+    if bank and bank != "primary":
+        bank_obj = _gallery_mod.bank_by_id(bank)
+        if bank_obj is None:
+            raise HTTPException(400, f"unknown gallery bank: {bank}")
+        if not bank_obj["writable"]:
+            raise HTTPException(
+                400, f"gallery bank '{bank_obj['label']}' is read-only — "
+                     "promote is a move")
+        p = _gallery_mod.bank_jailed(bank, rel)
+        if p.is_file():
+            return p
+        raise HTTPException(404, "not found under gallery bank")
     p = _gallery_mod.jailed(rel)
     if p.is_file():
         return p

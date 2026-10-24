@@ -21,6 +21,7 @@
 //                    prev/next, tap = pick, verdict dots.
 // NOTHING persists before Commit; commit = verdict POST + send-pending.
 import { registerModule } from '../shell.js';
+import { isTypingTarget } from '../key-guards.js';
 import { sigIsOverride, sigChipText } from './dupe-signals.js';
 import { zoomMembers, orderBySimilarity, twinInfo, nextUnhandled,
          TWIN_NEAR, listCacheDecision, listQuery, stragglerChips,
@@ -321,6 +322,7 @@ registerModule({
         <span class="pill" data-f="resolved" title="committed families — browse read-only, or re-open for review">Committed</span>
         <span class="pill" data-f="all">All</span>
         <span class="pill" data-f="straggler" title="import batch — files the original scan never indexed, found by the straggler scan">Stragglers</span>
+      <span class="pill" data-f="folder" title="in-gallery incremental folder scans — new files checked against the existing families">Folder scans</span>
         <span class="seg" id="dupe-viewseg" title="browse the same queue by family or by date">
           <span class="seg-btn active" data-v="families">Families</span><span class="seg-btn" data-v="dates">Dates</span>
         </span>
@@ -423,6 +425,12 @@ registerModule({
       filter = p.dataset.f;
       renderList();
     }));
+    // Gallery queued a folder scan and finished: open its families here.
+    window.addEventListener('ellieedit:dupe-folder-review', () => {
+      filter = 'folder';
+      listDirty = true;
+      renderList();
+    });
     el.loadmore.addEventListener('click', () => renderList(cursor));
     el.seg.forEach(b => b.addEventListener('click', () => {
       if (viewMode === b.dataset.v) return;
@@ -755,9 +763,7 @@ registerModule({
 
     function onDupeKey(e) {
       if (!panel.classList.contains('active')) return;
-      const t = e.target;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' ||
-                t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (isTypingTarget(e)) return;   // shared guard (key-guards.js)
       if (!current || !el.detail.classList.contains('open')) return;
       try {
         const k = e.key;

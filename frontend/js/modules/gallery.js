@@ -10,6 +10,7 @@
 //   'ellieedit:blend-launch' { detail: { items } }   + activate 'ladder'
 //   'ellieedit:facecycle-handoff' { urls, names }    + activate 'facecycle'
 import { registerModule } from '../shell.js';
+import { isTypingTarget } from '../key-guards.js';
 import { planFaceCycleHandoff } from '../handoff.js';
 import { createSendMenu } from '../components/send-menu.js';
 import { planMarkBatch } from './marking-batch.js';
@@ -163,6 +164,7 @@ function panelHTML() {
   <div class="gal-header">
     <h1>Gallery <span class="subtitle">— generated images</span></h1>
     <div class="gal-crumbs" data-id="crumbs"></div>
+    <select data-act="bank" title="Gallery bank — primary is the Comfy output folder; extra banks are read-only unless marked writable"></select>
     <span class="gal-status" data-id="status"></span>
     <div class="gal-viewseg">
       <button class="ee-btn gal-btn" data-act="view-all">All</button>
@@ -170,6 +172,7 @@ function panelHTML() {
       <button class="ee-btn gal-btn" data-act="view-pending">🗑 Deletion (<span data-id="pending-count">0</span>)</button>
     </div>
     <button class="ee-btn gal-btn" data-act="refresh" title="Check the current folder for new/removed files — cheap: does nothing when nothing changed, in-place update otherwise">⟳ Refresh</button>
+    <button class="ee-btn gal-btn" data-act="dupe-review" title="Queue an incremental duplicate review of this folder — new files are checked against the existing dupe families, never a cold re-scan">🔍 Dupe review</button>
     <button class="ee-btn gal-btn" data-act="select-mode">☰ Select</button>
     <button class="ee-btn gal-btn danger" data-act="delete-mode" title="Mark images for pending delete">🚨</button>
   </div>
@@ -179,6 +182,8 @@ function panelHTML() {
     <button class="ee-btn" data-act="clear-sel">Clear</button>
     <button class="ee-btn" data-act="blend-pair" style="display:none">Blend pair</button>
     <button class="ee-btn" data-act="to-facecycle-multi" style="display:none">→ FaceCycle</button>
+    <button class="ee-btn" data-act="to-puppet-multi" style="display:none">→ Puppet layers</button>
+    <button class="ee-btn" data-act="promote-multi" style="display:none">⬆ Promote</button>
     <button class="ee-btn primary" data-act="ladder">Ladder <span data-id="sel-count">0</span></button>
   </div>
   <div class="gal-bar marking" data-id="marking-bar">
@@ -235,12 +240,17 @@ export class Gallery {
       viewerImg: panel.querySelector('[data-id="viewer-img"]'),
       viewerNote: panel.querySelector('[data-id="viewer-note"]'),
       pendingBar: panel.querySelector('[data-id="pending-bar"]'),
+      bankSel: panel.querySelector('[data-act="bank"]'),
       pdMsg: panel.querySelector('[data-id="pd-msg"]'),
       pdDeleteAll: panel.querySelector('[data-act="pd-delete-all"]'),
     };
     this.items = [];
     this.cursor = null;
     this.dir = '';
+    this.bank = 'primary';
+    this.banks = [];
+    this.lastSelKey = null;   // shift-click range anchor (keyOf)
+    this.dupePoll = null;
     this.viewIdx = -1;
     this.viewFilter = 'active';    // all | active | pending (server-side filter)
     this.pendingSet = new Set();   // manifest paths, mirrors /api/pending
@@ -277,7 +287,19 @@ export class Gallery {
     this.reload();  // initial listing — never rely on syncManifest's changed-path
   }
 
-  fileUrl(path) { return `/api/gallery/file?path=${encodeURIComponent(path)}`; }
+  fileUrl(item) {
+    const path = typeof item === 'string' ? item : relOf(item);
+    const bank = typeof item === 'string' ? null : item.bank;
+    return `/api/gallery/file?path=${encodeURIComponent(path)}` +
+      (bank && bank !== 'primary' ? `&bank=${encodeURIComponent(bank)}` : '');
+  }
+
+  thumbUrl(item) {
+    const path = relOf(item);
+    const bank = item.bank;
+    return `/api/gallery/thumb?path=${encodeURIComponent(path)}` +
+      (bank && bank !== 'primary' ? `&bank=${encodeURIComponent(bank)}` : '');
+  }
 
   // ---- toolbar / sticky bars --------------------------------------------
   bindChrome() {
@@ -296,6 +318,78 @@ export class Gallery {
     this.el.pdDeleteAll.addEventListener('click', () => this.pdConfirmStep());
     act('pd-audit').addEventListener('click', () => this.pdAudit());
     act('refresh').addEventListener('click', () => this.cheapRefresh());
+    act('dupe-review').addEventListener('click', () => this.queueDupeReview());
+    act('to-puppet-multi').addEventListener('click', () => this.launchPuppetMulti());
+    act('promote-multi').addEventListener('click', () => this.promoteMulti());
+    this.el.bankSel.addEventListener('change', () => this.setBank(this.el.bankSel.value));
+    this.loadBanks();
+  }
+
+  async loadBanks() {
+    try {
+      const j = await fetch('/api/gallery/banks').then(r => r.json());
+      this.banks = j.banks || [];
+      this.el.bankSel.innerHTML = '';
+      for (const b of this.banks) {
+        const o = document.createElement('option');
+        o.value = b.id;
+        o.textContent = b.writable ? b.label : `${b.label} (read-only)`;
+        this.el.bankSel.appendChild(o);
+      }
+      this.el.bankSel.value = this.bank;
+    } catch { /* single-bank fallback: the select stays empty */ }
+  }
+
+  setBank(bank) {
+    if (this.bank === bank) return;
+    this.bank = bank;
+    this.dir = '';
+    this.renderCrumbs();
+    this.reload();
+  }
+
+  // ---- in-gallery dupe review queue (v1.5) -------------------------------
+  // Scoped to the current bank + folder; the server scan is incremental
+  // against the existing family graph. Polls until done, then opens the
+  // Dupe tab filtered to the folder-scan families.
+  async queueDupeReview() {
+    if (this.dupePoll) return;
+    const btn = this.panel.querySelector('[data-act="dupe-review"]');
+    btn.disabled = true;
+    const label0 = btn.textContent;
+    btn.textContent = '⏳ Dupe review…';
+    try {
+      const r = await fetch('/api/dupe/scan-folder', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bank: this.bank,
+          dir: this.viewFilter === 'pending' ? '' : this.dir,
+          background: true }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || r.status);
+      }
+      this.toast(`Dupe review queued — scanning ${this.dir || 'the bank root'}…`);
+      this.dupePoll = setInterval(async () => {
+        let st;
+        try { st = await fetch('/api/dupe/scan-folder/status').then(x => x.json()); }
+        catch { return; }   // keep polling through transient failures
+        if (st.running) return;
+        clearInterval(this.dupePoll); this.dupePoll = null;
+        btn.disabled = false; btn.textContent = label0;
+        const last = st.last || {};
+        if (last.error) { this.toast('Dupe review failed: ' + last.error, true); return; }
+        this.toast(`Dupe review done — ${last.families || 0} new families, ` +
+          `${last.proposals || 0} merge proposals. Opening review…`);
+        window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'dupe' } }));
+        window.dispatchEvent(new CustomEvent('ellieedit:dupe-folder-review',
+          { detail: { source: 'cluster-engine-v2' } }));
+      }, 2000);
+    } catch (err) {
+      this.toast('Dupe review failed: ' + err.message, true);
+      btn.disabled = false; btn.textContent = label0;
+    }
   }
 
   async pdAudit() {
@@ -339,7 +433,8 @@ export class Gallery {
       if (p && this.isVisible()) this.insertNewTop(p);
     });
     window.addEventListener('ellieedit:ladder-complete', e => {
-      this.championPath = e.detail?.champion?.path || null;
+      const ch = e.detail?.champion;
+      this.championPath = ch ? (typeof ch === 'string' ? ch : keyOf(ch)) : null;
       this.championPending = !!this.championPath;
       this.applyChampion();
     });
@@ -426,7 +521,7 @@ export class Gallery {
     for (const cell of [...g.children]) {
       if (cell.dataset.path && set.has(cell.dataset.path)) cell.remove();
     }
-    this.items = this.items.filter(i => !set.has(i.path));
+    this.items = this.items.filter(i => !set.has(keyOf(i)));
     for (const p of set) this.selected.delete(p);
     if (viewing) {
       if (!set.has(viewing.path)) this.viewIdx = this.items.indexOf(viewing);
@@ -569,8 +664,29 @@ export class Gallery {
 
   clearSelection() {
     this.selected.clear();
+    this.lastSelKey = null;
     for (const c of this.el.grid.children) c.classList.remove('sel');
     this.updateActionBars();
+  }
+
+  cellForKey(key) {
+    return [...this.el.grid.children].find(c => c.dataset.path === key) || null;
+  }
+
+  setCellSelected(item, on) {
+    const key = keyOf(item);
+    const cell = this.cellForKey(key);
+    if (on) {
+      this.selected.set(key, item);
+      cell?.classList.add('sel');
+      const check = cell?.querySelector('.check');
+      if (check) check.textContent = '✓';
+    } else {
+      this.selected.delete(key);
+      cell?.classList.remove('sel');
+      const check = cell?.querySelector('.check');
+      if (check) check.textContent = '';
+    }
   }
 
   updateActionBars() {
@@ -581,7 +697,25 @@ export class Gallery {
     this.el.selMsg.textContent = n ? `${n} selected` : 'Tap images to select';
     this.el.blendPairBtn.style.display = n === 2 ? '' : 'none';
     this.el.fcBtn.style.display = n >= 1 ? '' : 'none';
+    this.panel.querySelector('[data-act="to-puppet-multi"]').style.display = n >= 1 ? '' : 'none';
+    const pm = this.panel.querySelector('[data-act="promote-multi"]');
+    pm.style.display = n >= 1 ? '' : 'none';
+    pm.textContent = `⬆ Promote ${n}`;
     this.updateSelectBtn();
+  }
+
+  // Multi-select send-to (v1.5.1): one Puppet layer per image, stacked in
+  // selection order. Puppet's receiver already places multi-url payloads
+  // as layers in order — the gallery side is just this dispatch.
+  launchPuppetMulti() {
+    const items = [...this.selected.values()];
+    if (!items.length) return;
+    window.dispatchEvent(new CustomEvent('ellieedit:send-to', { detail: {
+      target: 'puppet', as: 'layer',
+      urls: items.map(i => this.fileUrl(i)),
+      names: items.map(i => i.name),
+      source: 'Gallery',
+      provenance: { kind: 'gallery', paths: items.map(i => relOf(i)) } } }));
   }
 
   launchLadder() {
@@ -659,38 +793,133 @@ export class Gallery {
   // ---- promote to library ----------------------------------------------
   // Returns an outcome so callers can react: 'moved' | 'already' (source
   // file was already gone — treated as resolved) | 'cancel' | 'error'.
-  async promoteCell(item, cell) {
-    let tag = '';
+  //
+  // Tag memory (v1.5.1): the dialog no longer starts blank. It is prefilled
+  // with the most recent tag, and offers chips for the recent tags plus the
+  // most commonly used ones (localStorage, per browser).
+  loadTagMemory() {
     try {
-      const d = await fetch(`/api/library/derive?path=${encodeURIComponent(item.path)}`).then(r => r.json());
-      tag = d.tag || '';
-    } catch { /* derive is best-effort — empty prompt is fine */ }
-    const input = prompt(`Promote to Library — tag/project:`, tag);
-    if (input === null) return 'cancel';
-    tag = input.trim().toLowerCase() || tag;
+      const m = JSON.parse(localStorage.getItem('ellieedit.promote.tags') || '{}');
+      return { recent: Array.isArray(m.recent) ? m.recent : [],
+               counts: (m.counts && typeof m.counts === 'object') ? m.counts : {} };
+    } catch { return { recent: [], counts: {} }; }
+  }
+
+  recordTag(tag) {
+    if (!tag) return;
+    const m = this.loadTagMemory();
+    m.recent = [tag, ...m.recent.filter(t => t !== tag)].slice(0, 8);
+    m.counts[tag] = (m.counts[tag] || 0) + 1;
+    try { localStorage.setItem('ellieedit.promote.tags', JSON.stringify(m)); } catch { /* private mode */ }
+  }
+
+  tagChips(mem) {
+    const seen = new Set();
+    const out = [];
+    for (const t of mem.recent.slice(0, 5)) {
+      if (!seen.has(t)) { seen.add(t); out.push(t); }
+    }
+    for (const t of Object.entries(mem.counts).sort((a, b) => b[1] - a[1]).map(e => e[0])) {
+      if (out.length >= 8) break;
+      if (!seen.has(t)) { seen.add(t); out.push(t); }
+    }
+    return out;
+  }
+
+  // Small inline dialog (replaces window.prompt): input + recent/common
+  // chips. Resolves to the tag string, or null on cancel.
+  askTag(def, mem) {
+    return new Promise(resolve => {
+      const ov = document.createElement('div');
+      ov.style.cssText = 'position:fixed;inset:0;background:rgba(8,8,16,0.8);z-index:300;' +
+        'display:flex;align-items:center;justify-content:center;';
+      const box = document.createElement('div');
+      box.style.cssText = 'background:#1d1d33;border:1px solid #4a4a6c;border-radius:10px;' +
+        'padding:18px;max-width:420px;width:90vw;display:flex;flex-direction:column;gap:10px;';
+      const lab = document.createElement('div');
+      lab.textContent = 'Promote to Library — tag/project:';
+      lab.style.cssText = 'font-size:13px;color:#b0b0d0;';
+      const input = document.createElement('input');
+      input.value = def || '';
+      input.style.cssText = 'background:#22223a;color:#e8e8f4;border:1px solid #4a4a6c;' +
+        'border-radius:6px;padding:8px;font-size:14px;width:100%;box-sizing:border-box;';
+      const chips = document.createElement('div');
+      chips.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
+      for (const t of this.tagChips(mem)) {
+        const c = document.createElement('button');
+        c.type = 'button'; c.className = 'ee-btn'; c.textContent = t;
+        c.style.cssText = 'font-size:12px;padding:4px 10px;';
+        c.addEventListener('click', () => { input.value = t; input.focus(); });
+        chips.appendChild(c);
+      }
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+      const ok = document.createElement('button');
+      ok.className = 'ee-btn primary'; ok.textContent = 'Promote';
+      const cancel = document.createElement('button');
+      cancel.className = 'ee-btn'; cancel.textContent = 'Cancel';
+      row.append(ok, cancel);
+      box.append(lab, input, chips, row);
+      ov.appendChild(box);
+      document.body.appendChild(ov);
+      const done = v => { ov.remove(); resolve(v); };
+      ok.addEventListener('click', () => done(input.value.trim().toLowerCase()));
+      cancel.addEventListener('click', () => done(null));
+      ov.addEventListener('click', e => { if (e.target === ov) done(null); });
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') done(input.value.trim().toLowerCase());
+        else if (e.key === 'Escape') done(null);
+      });
+      input.focus(); input.select();
+    });
+  }
+
+  async promoteCell(item, cell, tagOverride) {
+    // Read-only banks cannot be promoted: promote is a MOVE (server 400s
+    // too — this is the friendly client-side stop).
+    if (item.writable === false) {
+      this.toast(`${item.name} lives on a read-only bank — cannot promote (move)`, true);
+      return 'error';
+    }
+    let tag = tagOverride;
+    let derived = '';
+    if (tag === undefined) {
+      try {
+        const q = new URLSearchParams({ path: relOf(item) });
+        if (item.bank && item.bank !== 'primary') q.set('bank', item.bank);
+        const d = await fetch(`/api/library/derive?${q}`).then(r => r.json());
+        derived = d.tag || '';
+      } catch { /* derive is best-effort — empty prompt is fine */ }
+      const mem = this.loadTagMemory();
+      tag = await this.askTag(mem.recent[0] || derived, mem);
+      if (tag === null) return 'cancel';
+      tag = tag || derived;
+    }
     try {
       const r = await fetch('/api/library/promote', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: item.path, tag }),
+        body: JSON.stringify({ path: relOf(item), tag,
+          bank: item.bank && item.bank !== 'primary' ? item.bank : undefined }),
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         if (r.status === 404) {  // double-promote: source already moved
           this.toast(`${item.name} already promoted`);
           cell?.remove();         // reflect reality — no ghost card
-          this.items = this.items.filter(i => i.path !== item.path);
+          this.items = this.items.filter(i => keyOf(i) !== keyOf(item));
           this.updateActionBars();
           return 'already';
         }
         throw new Error(err.detail || r.status);
       }
-      // Move succeeded: the file is gone from GALLERY_ROOT — remove the
+      // Move succeeded: the file is gone from its bank — remove the
       // card, don't show a ghost.
       cell?.remove();
-      this.items = this.items.filter(i => i.path !== item.path);
-      this.selected.delete(item.path);
+      this.items = this.items.filter(i => keyOf(i) !== keyOf(item));
+      this.selected.delete(keyOf(item));
       this.updateActionBars();
       this.updateMarkCount();
+      if (tagOverride === undefined) this.recordTag(tag);
       this.toast(`Promoted ${item.name} → ${tag}`);
       window.dispatchEvent(new CustomEvent('ellieedit:library-changed'));
       return 'moved';
@@ -698,6 +927,43 @@ export class Gallery {
       this.toast(`Promote failed: ${err.message}`, true);
       return 'error';
     }
+  }
+
+  // Mass promote (v1.5.1): one tag dialog for the whole selection, applied
+  // to every selected image. Read-only-bank items are skipped up front.
+  async promoteMulti() {
+    const items = [...this.selected.values()];
+    if (!items.length) return;
+    const blocked = items.filter(i => i.writable === false);
+    const todo = items.filter(i => i.writable !== false);
+    if (!todo.length) {
+      this.toast('All selected images are on read-only banks — nothing to promote', true);
+      return;
+    }
+    if (blocked.length) this.toast(`${blocked.length} read-only-bank image(s) skipped`, true);
+    let derived = '';
+    try {
+      const q = new URLSearchParams({ path: relOf(todo[0]) });
+      if (todo[0].bank && todo[0].bank !== 'primary') q.set('bank', todo[0].bank);
+      const d = await fetch(`/api/library/derive?${q}`).then(r => r.json());
+      derived = d.tag || '';
+    } catch { /* best-effort */ }
+    const mem = this.loadTagMemory();
+    const tag = await this.askTag(mem.recent[0] || derived, mem);
+    if (tag === null) return;
+    const finalTag = tag || derived;
+    let moved = 0, failed = 0;
+    for (const item of todo) {
+      const cell = this.cellForKey(keyOf(item));
+      const res = await this.promoteCell(item, cell, finalTag);
+      if (res === 'moved' || res === 'already') moved++;
+      else failed++;
+    }
+    if (moved) this.recordTag(finalTag);
+    this.toast(failed
+      ? `Promoted ${moved} → ${finalTag} (${failed} failed)`
+      : `Promoted ${moved} → ${finalTag}`);
+    this.clearSelection();
   }
 
   // Lightbox promote (P / ⬆ button): promote, then advance to the image
@@ -708,7 +974,7 @@ export class Gallery {
     const idx = this.viewIdx;
     const item = this.items[idx];
     if (!item) return;
-    const cell = [...this.el.grid.children].find(c => c.dataset.path === item.path);
+    const cell = this.cellForKey(keyOf(item));
     const res = await this.promoteCell(item, cell);
     if (res !== 'moved' && res !== 'already') return;  // cancel/error: stay
     if (this.el.viewer.style.display !== 'flex') return;
@@ -730,6 +996,11 @@ export class Gallery {
   // enqueue into the EXISTING pending-delete manifest — never an unlink.
   // Then advance exactly like promote (close-at-end).
   armViewerDelete() {
+    const item = this.items[this.viewIdx];
+    if (item && item.writable === false) {
+      this.toast(`${item.bank_label || 'This bank'} is read-only — cannot mark for deletion`, true);
+      return;
+    }
     const btn = this.panel.querySelector('[data-act="viewer-delete"]');
     if (!btn.dataset.armed) {
       btn.dataset.armed = '1';
@@ -753,7 +1024,7 @@ export class Gallery {
     try {
       const r = await fetch('/api/pending', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paths: [item.path] }),
+        body: JSON.stringify({ paths: [keyOf(item)] }),
       });
       if (!r.ok) throw new Error(r.status);
       this.toast(`Marked ${item.name} for deletion — confirm in the Deletion view`);
@@ -764,10 +1035,10 @@ export class Gallery {
     await this.syncManifest();
     // Advance like promote: remove from the listing, next image takes the
     // same index; close-at-end when it was the last one.
-    const cell = [...this.el.grid.children].find(c => c.dataset.path === item.path);
+    const cell = this.cellForKey(keyOf(item));
     cell?.remove();
-    this.items = this.items.filter(i => i.path !== item.path);
-    this.selected.delete(item.path);
+    this.items = this.items.filter(i => keyOf(i) !== keyOf(item));
+    this.selected.delete(keyOf(item));
     this.updateActionBars();
     this.updateMarkCount();
     if (this.el.viewer.style.display !== 'flex') return;
@@ -819,6 +1090,7 @@ export class Gallery {
   setDir(dir) {
     if (this.dir === dir) return;
     this.dir = dir;
+    this.lastSelKey = null;
     this.renderCrumbs();
     this.reload();
   }
@@ -835,6 +1107,7 @@ export class Gallery {
     this.el.grid.innerHTML = '';
     this.items = []; this.cursor = null;
     this.selected.clear();
+    this.lastSelKey = null;
     await this.loadMore();
     if (keep) {
       while (this.cursor && this.items.length < keep.n) {
@@ -857,13 +1130,20 @@ export class Gallery {
       // the folder dropdown, so status count and grid count agree by
       // construction (both come from this same fetch → this.items).
       const dir = this.viewFilter === 'pending' ? '' : this.dir;
-      const p = new URLSearchParams({ dir, pending: this.viewFilter });
+      const p = new URLSearchParams({ dir, pending: this.viewFilter, bank: this.bank });
       if (this.cursor) p.set('cursor', this.cursor);
       const r = await fetch('/api/gallery/list?' + p);
       if (!r.ok) throw new Error(r.status);
       const data = await r.json();
       if (gen !== this.gen) return;   // view was reloaded while this page was in flight
       const start = this.items.length;
+      // v1.5 normalization: rel + bank + cross-bank identity on every item.
+      for (const it of data.items) {
+        it.rel = it.path;
+        it.bank = it.bank || 'primary';
+        it.manifest_key = it.manifest_key || it.path;
+        it.writable = it.writable !== false;
+      }
       this.items.push(...data.items);
       this.cursor = data.next_cursor;
       for (let i = 0; i < data.items.length; i++) this.addCell(data.items[i], start + i);
@@ -902,11 +1182,11 @@ export class Gallery {
   addCell(item, idx) {
     const cell = document.createElement('div');
     cell.className = 'gal-cell';
-    cell.dataset.path = item.path;
-    if (item.pending || this.pendingSet.has(item.path)) cell.classList.add('ispending');
-    if (item.path === this.championPath) cell.classList.add('champion');
+    cell.dataset.path = keyOf(item);
+    if (item.pending || this.pendingSet.has(keyOf(item))) cell.classList.add('ispending');
+    if (keyOf(item) === this.championPath) cell.classList.add('champion');
     const img = document.createElement('img');
-    img.dataset.src = `/api/gallery/thumb?path=${encodeURIComponent(item.path)}`;
+    img.dataset.src = this.thumbUrl(item);
     img.alt = item.name; img.loading = 'lazy'; img.decoding = 'async';
     // Skeleton now; IO assigns src; decode/decode-failure reveals once.
     cell.classList.add('thumb-loading');
@@ -922,7 +1202,10 @@ export class Gallery {
     const name = document.createElement('div');
     name.className = 'name';
     // Pending spans folders: show the folder-qualified path as the label.
-    name.textContent = item.path.includes('/') ? item.path : item.name;
+    // Non-primary banks get their bank label up front (bank indicator).
+    name.textContent = item.bank && item.bank !== 'primary'
+      ? `${item.bank_label || item.bank} · ${item.name}`
+      : (item.path.includes('/') ? item.path : item.name);
     // Clemency: per-cell Return in the Pending filter view.
     const ret = document.createElement('button');
     ret.className = 'ee-btn pd-return'; ret.textContent = 'Return';
@@ -930,32 +1213,43 @@ export class Gallery {
       e.stopPropagation();
       await fetch('/api/pending', {
         method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paths: [item.path] }),
+        body: JSON.stringify({ paths: [keyOf(item)] }),
       });
       this.toast(`Returned ${item.name} to Active`);
       await this.syncManifest();
     });
     cell.append(img, check, name, ret);
-    cell.addEventListener('click', () => {
+    cell.addEventListener('click', (e) => {
       if (this.deleteMode) {
+        // Read-only banks cannot be marked: delete is blocked at the gate.
+        if (item.writable === false) {
+          this.toast(`${item.bank_label || 'This bank'} is read-only — cannot mark for deletion`, true);
+          return;
+        }
         // Deferred: visual flip only — no fetch, no re-render, no grid swap.
         const on = !cell.classList.contains('marked');
         cell.classList.toggle('marked', on);
         check.textContent = on ? '✕' : '';
-        this.markTouched.set(item.path, on);
+        this.markTouched.set(keyOf(item), on);
         this.updateMarkCount();
         return;
       }
       if (this.selectMode) {
-        if (this.selected.has(item.path)) {
-          this.selected.delete(item.path);
-          cell.classList.remove('sel');
-          check.textContent = '';
-        } else {
-          this.selected.set(item.path, item);
-          cell.classList.add('sel');
-          check.textContent = '✓';
+        // Shift-click range (v1.5.1): select everything between the anchor
+        // and this cell, in listing order.
+        if (e.shiftKey && this.lastSelKey) {
+          const a = this.items.findIndex(i => keyOf(i) === this.lastSelKey);
+          const b = this.items.findIndex(i => keyOf(i) === keyOf(item));
+          if (a >= 0 && b >= 0) {
+            const [lo, hi] = [Math.min(a, b), Math.max(a, b)];
+            for (let k = lo; k <= hi; k++) this.setCellSelected(this.items[k], true);
+            this.updateActionBars();
+            return;
+          }
         }
+        const key = keyOf(item);
+        this.setCellSelected(item, !this.selected.has(key));
+        this.lastSelKey = key;
         this.updateActionBars();
         return;
       }
@@ -975,7 +1269,8 @@ export class Gallery {
   insertNewTop(path) {
     if (this.viewFilter !== 'active') return;   // other views refresh on activation
     if (this.items.some(i => i.path === path)) return;
-    const item = { path, name: path.split('/').pop() };
+    const item = { path, rel: path, name: path.split('/').pop(),
+                   bank: 'primary', manifest_key: path, writable: true };
     this.items.unshift(item);
     const cell = this.addCell(item, 0);
     const firstImage = [...this.el.grid.children].find(c => !c.classList.contains('folder'));
@@ -992,7 +1287,7 @@ export class Gallery {
     const el0 = this.el.status.textContent;
     this.el.status.textContent = 'Checking…';
     try {
-      const p = new URLSearchParams({ dir: this.viewFilter === 'pending' ? '' : this.dir, pending: this.viewFilter });
+      const p = new URLSearchParams({ dir: this.viewFilter === 'pending' ? '' : this.dir, pending: this.viewFilter, bank: this.bank });
       const j = await fetch('/api/gallery/list?' + p).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
       const fresh = (j.items || []).map(i => i.path);
       const known = this.items.slice(0, fresh.length).map(i => i.path);
@@ -1020,8 +1315,15 @@ export class Gallery {
       // navigation still works — no error dialog.
       if (this.el.viewer.style.display === 'flex') this.el.viewerNote.style.display = 'block';
     };
-    this.el.viewerImg.src = this.fileUrl(it.path);
-    this.el.viewerName.textContent = `${it.name} · ${it.width}×${it.height} · ${new Date(it.mtime * 1000).toLocaleString()}`;
+    this.el.viewerImg.src = this.fileUrl(it);
+    this.el.viewerName.textContent = `${it.name} · ${it.width}×${it.height} · ${new Date(it.mtime * 1000).toLocaleString()}` +
+      (it.bank && it.bank !== 'primary' ? ` · 🏦 ${it.bank_label || it.bank}` : '');
+    // Read-only banks: the destructive/move buttons go inert in the viewer.
+    const w = it.writable !== false;
+    const delBtn = this.panel.querySelector('[data-act="viewer-delete"]');
+    const proBtn = this.panel.querySelector('[data-act="viewer-promote"]');
+    if (delBtn) { delBtn.disabled = !w; delBtn.title = w ? delBtn.title : 'Read-only bank — cannot mark for deletion'; }
+    if (proBtn) { proBtn.disabled = !w; proBtn.title = w ? 'Promote to Library (P)' : 'Read-only bank — cannot promote (move)'; }
     this.el.viewer.style.display = 'flex';
   }
 
@@ -1051,8 +1353,8 @@ export class Gallery {
       getPayload: () => {
         const item = this.items[this.viewIdx];
         if (!item) return { error: 'No image open.' };
-        return { urls: [this.fileUrl(item.path)], names: [item.name], source: 'Gallery',
-          provenance: { kind: 'gallery', paths: [item.path] } };
+        return { urls: [this.fileUrl(item)], names: [item.name], source: 'Gallery',
+          provenance: { kind: 'gallery', paths: [relOf(item)] } };
       },
     });
     act('to-update').before(sendMenu.el);
@@ -1061,16 +1363,17 @@ export class Gallery {
       const item = this.items[this.viewIdx];
       if (!item) return;
       window.dispatchEvent(new CustomEvent('ellieedit:open-in-update',
-        { detail: { url: this.fileUrl(item.path), name: item.name, path: item.path } }));
+        { detail: { url: this.fileUrl(item), name: item.name, path: relOf(item) } }));
       window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'update' } }));
       this.closeViewer();
     });
     this.el.viewerImg.addEventListener('click', e => { if (e.target === this.el.viewerImg) this.closeViewer(); });
     this.onKey = e => {
       if (this.el.viewer.style.display !== 'flex') return;
+      if (isTypingTarget(e)) return;   // shared guard (key-guards.js)
       if (e.key === 'Escape') this.closeViewer();
       else if (e.key === 'p' || e.key === 'P') this.promoteFromViewer();
-      else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); this.armViewerDelete(); }
+      else if (e.key === 'Delete') { e.preventDefault(); this.armViewerDelete(); }
       else if (e.key === 'ArrowLeft') this.nav(-1);
       else if (e.key === 'ArrowRight') this.nav(1);
     };
@@ -1086,6 +1389,11 @@ export class Gallery {
     }, { passive: true });
   }
 }
+
+// Cross-bank identity (v1.5): the manifest key is the gallery-wide identity
+// (primary bank: plain rel path; extra banks: 'bank:<id>:<rel>').
+function keyOf(item) { return item.manifest_key || item.path; }
+function relOf(item) { return item.rel || item.path; }
 
 function fmtBytes(b) {
   if (b >= 1024 * 1024) return (b / 1048576).toFixed(1) + ' MB';

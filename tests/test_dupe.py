@@ -1450,3 +1450,111 @@ def test_deathrow_member_ghost_states_resolved(env, client, monkeypatch):
     drow = next(r for r in dr["items"] if r["id"] == "fam-aaaaaaaaaaaa")
     assert drow["on_disk"] >= 1 and drow["archived"] is False
     assert len((tmp / "verdicts.jsonl").read_text().splitlines()) == n_before
+
+
+# -------------------------------------------------- folder scan (v1.5)
+
+def _pattern_png(path: Path, kind: str):
+    """Two identical noise images + one different noise image. Flat graphics
+    are NOT a usable fixture here: solid/flat images hash to dhash 0 and
+    near-identical phashes under the engine's T1 predicate, so they cluster
+    no matter how different their colors look. Seeded noise has rich
+    gradients: identical noise hashes identically, different noise is far."""
+    import random
+    rng = random.Random(7 if kind == "noise" else 99)
+    im = Image.new("RGB", (64, 64))
+    px = im.load()
+    for x in range(64):
+        for y in range(64):
+            px[x, y] = (rng.randrange(256), rng.randrange(256), rng.randrange(256))
+    im.save(path)
+
+
+@pytest.fixture
+def folder_env(tmp_path, monkeypatch):
+    gal = tmp_path / "gal"
+    (gal / "sub").mkdir(parents=True)
+    _pattern_png(gal / "a.png", "noise")
+    _pattern_png(gal / "b.png", "noise")      # exact dupe of a
+    _pattern_png(gal / "sub" / "c.png", "other")
+    dupe_root = tmp_path / "dupe"
+    dupe_data = tmp_path / "dupes"
+    (dupe_data / "families").mkdir(parents=True)
+    # Pre-existing family (must NOT be rewritten by the folder scan).
+    # Its hashes come from a REAL unrelated image (a blue disc), so they
+    # cannot spuriously match the fixture images the way zero hashes can.
+    from backend import cluster_engine as _ce
+    from backend import dupe_scan as _ds
+    _seed_img = tmp_path / "seed.png"
+    _disc = Image.new("RGB", (64, 64), (30, 30, 30))
+    _px = _disc.load()
+    for _x in range(64):
+        for _y in range(64):
+            if (_x - 32) ** 2 + (_y - 32) ** 2 < 400:
+                _px[_x, _y] = (30, 200, 30)
+    _disc.save(_seed_img)
+    _h = _ce.hash_file_v2(_seed_img)
+    seed = {"format": "dupe-analyzer.family", "version": 1,
+            "id": "fam-eeeeeeeeeeee", "created": "2026-10-03T01:00:00-07:00",
+            "root": str(dupe_root), "authored": False, "source": "canonical",
+            "members": [{"path": "old.png", "size": 10, "mtime": 1,
+                         "dhash": _ds.hex64(_h["dhash"]),
+                         "phash": _ds.hex64(_h["phash"])}]}
+    (dupe_data / "families" / "fam-eeeeeeeeeeee.json").write_text(
+        json.dumps(seed))
+    (dupe_data / "index.json").write_text(json.dumps(
+        {"version": 1, "generated": "", "families": [
+            {"id": "fam-eeeeeeeeeeee", "size": 1, "tiers": ["exact"],
+             "first_member": "old.png", "source": "canonical"}]}))
+    monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", gal)
+    monkeypatch.setattr(dupe_mod, "DUPE_ROOT", dupe_root)
+    monkeypatch.setattr(dupe_mod, "DUPE_DATA", dupe_data)
+    monkeypatch.setattr(dupe_mod, "LEDGER", tmp_path / "verdicts.jsonl")
+    return TestClient(app), gal, dupe_data, seed
+
+
+def test_scan_folder_incremental(folder_env):
+    client, gal, dupe_data, seed = folder_env
+    seed_before = (dupe_data / "families" / "fam-eeeeeeeeeeee.json").read_bytes()
+    r = client.post("/api/dupe/scan-folder",
+                    json={"bank": "primary", "dir": "", "background": False})
+    assert r.status_code == 200, r.text
+    summary = r.json()["summary"]
+    assert summary["families"] >= 1      # the identical pair clusters
+    idx = json.loads((dupe_data / "index.json").read_text())
+    rows = {f["id"]: f for f in idx["families"]}
+    assert "fam-eeeeeeeeeeee" in rows                    # old family kept
+    assert rows["fam-eeeeeeeeeeee"]["first_member"] == "old.png"
+    assert (dupe_data / "families" / "fam-eeeeeeeeeeee.json").read_bytes() == seed_before  # never rewritten
+    new_rows = [f for f in idx["families"] if f.get("source") == "cluster-engine-v2"]
+    assert new_rows and new_rows[0]["size"] == 2
+    # Idempotent: a second scan finds nothing new (members now claimed).
+    r2 = client.post("/api/dupe/scan-folder",
+                     json={"bank": "primary", "dir": "", "background": False})
+    assert r2.json()["summary"]["families"] == 0
+
+
+def test_scan_folder_scoped_to_dir(folder_env):
+    client, gal, dupe_data, seed = folder_env
+    r = client.post("/api/dupe/scan-folder",
+                    json={"bank": "primary", "dir": "sub", "background": False})
+    assert r.status_code == 200, r.text
+    summary = r.json()["summary"]
+    assert summary["per_root"][next(iter(summary["per_root"]))]["files"] == 1
+    assert summary["families"] == 0     # lone striped file, no match
+
+
+def test_scan_folder_status_and_member_jail(folder_env):
+    client, gal, dupe_data, seed = folder_env
+    client.post("/api/dupe/scan-folder",
+                json={"bank": "primary", "dir": "", "background": False})
+    st = client.get("/api/dupe/scan-folder/status").json()
+    assert st["running"] is False and st["last"]["families"] >= 1
+    # New-family members live under the gallery bank: the review UI jail
+    # must serve them (absolute paths under a bank root).
+    fams = client.get("/api/dupe/families?state=unresolved&source=cluster-engine-v2").json()
+    assert fams["items"], "folder-scan families must list under their source"
+    fid = fams["items"][0]["id"]
+    fam = client.get(f"/api/dupe/families/{fid}").json()
+    member = fam["members"][0]["path"]
+    assert client.get("/api/dupe/file", params={"path": member}).status_code == 200
