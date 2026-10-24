@@ -310,3 +310,146 @@ def test_save_family_rejects_escape(roots, client):
     r = client.post("/api/update/save-family", json={
         "render_path": "../../../etc/passwd", "original_path": "x.png", "tag": "t"})
     assert r.status_code in (400, 404)
+
+
+# -------------------------------------------------- Update masked inpaint
+# (2026-10-24): async jobs + Klein inpaint recipe on Puppet's engine.
+
+def _poll_job(client, jid, tries=100):
+    import time as _t
+    for _ in range(tries):
+        r = client.get(f"/api/update/jobs/{jid}")
+        assert r.status_code == 200, r.text
+        job = r.json()
+        if job["status"] in ("done", "error"):
+            return job
+        _t.sleep(0.05)
+    raise AssertionError(f"job {jid} never finished")
+
+
+def _mask_b64(white=True, size=16):
+    import base64, io
+    from PIL import Image
+    im = Image.new("L", (size, size), 255 if white else 0)
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def test_run_async_flow(roots, client, monkeypatch):
+    groot, _lroot = roots
+    (groot / "src.png").write_bytes(_png_bytes())
+    (groot / "out.png").write_bytes(_png_bytes())
+    monkeypatch.setattr(update_mod._comfy, "_comfy_upload", lambda b, n: "src.png")
+    monkeypatch.setattr(update_mod, "comfy_submit", lambda wf: "pid1")
+    monkeypatch.setattr(update_mod, "comfy_poll",
+                        lambda pid: {"filename": "out.png", "subfolder": "", "type": "output"})
+    monkeypatch.setattr(update_mod, "comfy_fetch_image", lambda im: _png_bytes())
+    r = client.post("/api/update/run-async", json={
+        "preset": "plain-transform.json", "path": "src.png",
+        "prompt": "a cat", "random": False, "seed": 7})
+    assert r.status_code == 200, r.text
+    job = _poll_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    res = job["result"]
+    assert res["seed"] == 7 and res["render_path"] == "out.png"
+    assert res["recipe"] == "plain-transform.json" and res["masked"] is False
+    assert res["image"].startswith("data:image/png;base64,")
+    assert client.get("/api/update/jobs/nope").status_code == 404
+
+
+def test_inpaint_async_flow_bounded_write(roots, client, monkeypatch):
+    groot, _lroot = roots
+    (groot / "src.png").write_bytes(_png_bytes())
+    seen = []
+    def fake_inpaint(image_b64, mask_b64, prompt, denoise=0.45, seed=0, timeout=600):
+        seen.append((prompt, denoise, seed))
+        return _png_bytes()
+    monkeypatch.setattr(update_mod._comfy, "comfy_inpaint_klein", fake_inpaint)
+    upd_dir = groot / "ellieedit_tmp" / "update"
+    before = len(list(upd_dir.iterdir())) if upd_dir.is_dir() else 0
+    r = client.post("/api/update/inpaint-async", json={
+        "path": "src.png", "prompt": "a red door", "mask_b64": _mask_b64(),
+        "denoise": 0.5, "random": False, "seed": 42})
+    assert r.status_code == 200, r.text
+    job = _poll_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    res = job["result"]
+    assert res["seed"] == 42 and res["denoise"] == 0.5
+    assert res["recipe"] == "masked-inpaint" and res["masked"] is True
+    assert seen[0][0] == "a red door"
+    # Exactly ONE bounded result write — no per-poll/per-attempt temp files.
+    assert len(list(upd_dir.iterdir())) - before == 1
+    assert (groot / res["render_path"]).is_file()
+
+
+def test_inpaint_empty_mask_rejected(roots, client, monkeypatch):
+    groot, _lroot = roots
+    (groot / "src.png").write_bytes(_png_bytes())
+    monkeypatch.setattr(update_mod._comfy, "comfy_inpaint_klein",
+                        lambda *a, **k: _png_bytes())
+    r = client.post("/api/update/inpaint-async", json={
+        "path": "src.png", "prompt": "x", "mask_b64": _mask_b64(white=False),
+        "random": True})
+    assert r.status_code == 200
+    job = _poll_job(client, r.json()["job_id"])
+    assert job["status"] == "error"
+    assert "empty" in job["error"]
+
+
+def test_mask_normalize_and_decode():
+    import base64, io
+    from PIL import Image
+    src = _png_bytes()  # 16x16
+    # 8x8 white mask resizes to the 16x16 source.
+    buf = io.BytesIO()
+    Image.new("L", (8, 8), 255).save(buf, "PNG")
+    out = update_mod._normalize_mask(buf.getvalue(), src)
+    with Image.open(io.BytesIO(base64.b64decode(out))) as im:
+        assert im.size == (16, 16) and im.mode == "L"
+    with pytest.raises(Exception):
+        update_mod._decode_mask("not-base64!!")
+    black_raw = base64.b64decode(_mask_b64(white=False).split(",", 1)[1])
+    with pytest.raises(Exception):
+        update_mod._normalize_mask(black_raw, src)
+
+
+def test_comfy_upload_disk_hint(monkeypatch):
+    import io as _io
+    import urllib.error
+    import backend.comfy as comfy_mod
+    def boom(req, timeout=60):
+        raise urllib.error.HTTPError(
+            req.full_url, 500, "Internal Server Error", {},
+            _io.BytesIO(b"Server got itself in trouble"))
+    monkeypatch.setattr(comfy_mod.urllib.request, "urlopen", boom)
+    with pytest.raises(RuntimeError) as ei:
+        comfy_mod._comfy_upload(b"fake", "x.png")
+    assert "full" in str(ei.value) and "drive" in str(ei.value)
+
+
+def test_save_family_recipe_noted(roots, client):
+    groot, lroot = roots
+    make_png(groot / "ellieedit_tmp" / "update_00001_.png")
+    make_png(groot / "original.png")
+    r = client.post("/api/update/save-family", json={
+        "render_path": "ellieedit_tmp/update_00001_.png",
+        "original_path": "original.png", "tag": "zengosoft",
+        "recipe": "masked-inpaint", "masked": True})
+    assert r.status_code == 200, r.text
+    recs = [json.loads(l) for l in
+            (lroot / ".library-index.jsonl").read_text().splitlines() if l.strip()]
+    fam = next(x for x in recs if x.get("kind") == "version-family")
+    assert fam["recipe"] == "masked-inpaint" and fam["masked"] is True
+
+
+def test_update_inpaint_frontend_wiring():
+    """Update masked inpaint (2026-10-24): mask editor, masked recipe,
+    async submit/poll, denoise slider; FoxDen viewer exposes Update."""
+    upd = (REPO / "frontend" / "js" / "modules" / "update.js").read_text()
+    for needle in ('upd-mask-canvas', 'inpaint-async', 'run-async',
+                   'pollJob', '__masked_inpaint', 'upd-denoise',
+                   'masked-inpaint', 'paint a region to regenerate first'):
+        assert needle in upd, needle
+    fx = (REPO / "frontend" / "js" / "modules" / "foxden.js").read_text()
+    assert "{ label: '✎ Update', target: 'update' }" in fx

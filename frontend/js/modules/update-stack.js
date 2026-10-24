@@ -1,7 +1,9 @@
 // Update tab version stack — pure state machine (DOM-free, node-testable).
 //
 // Session state per source image: original → render(s).
-//   entries   : stack of {url, name, path?} — index 0 is always the original
+//   entries   : stack of {url, name, path?, recipe?, masked?} — index 0
+//                 is always the original; renders note their recipe
+//                 (preset file, or 'masked-inpaint') for save-family
 //   idx       : the entry being VIEWED (save + compare act on this)
 //   sourceIdx : the entry the NEXT run renders FROM (Swap moves this)
 //

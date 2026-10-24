@@ -404,10 +404,15 @@ registerModule({
         { label: '🎭 Puppet Theater — new layer', target: 'puppet', as: 'layer' },
         { label: '🎭 Puppet Theater — as background', target: 'puppet', as: 'background' },
         { label: '🎭 FaceCycle — as subject', target: 'facecycle' },
+        { label: '✎ Update', target: 'update' },
       ],
       getPayload: () => {
         if (!bigUrl) return { error: 'No render open.' };
         const out = { urls: [bigUrl], names: [nameFromUrl(bigUrl)], source: 'FoxDen' };
+        try {
+          const qpath = new URL(bigUrl, location.origin).searchParams.get('path');
+          if (qpath) out.provenance = { kind: 'foxden', paths: [qpath] };
+        } catch { /* non-URL bigUrl: Update opens it pathless, as before */ }
         el.bigclose.click();                 // the viewer shouldn't be waiting when the user returns
         return out;
       },
