@@ -7,7 +7,7 @@
 
 // Bump on every deploy — shown in the job bar so a stale-cache client is
 // instantly visible.
-const BUILD = '2026-10-24c';
+const BUILD = '2026-10-24d';
 
 import { planSend } from './send-to.js';
 
