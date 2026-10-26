@@ -30,14 +30,19 @@ registerModule({
       <div class="fx-body">
         <div class="fx-panel">
           <div class="fx-status" data-id="conn">connecting…</div>
-          <div class="fx-status" data-id="status"></div>
-          <div class="fx-row fx-presets">
-            <select data-id="preset-pick" style="flex:1;min-width:140px"><option value="">Presets…</option></select>
-            <button class="ee-btn fx-btn" data-id="preset-save" title="Save current form as a preset">💾</button>
-            <button class="ee-btn fx-btn" data-id="preset-del" title="Delete the selected preset">🗑</button>
+          <div class="fx-topbar">
+            <button class="ee-btn primary fx-go" data-id="go">⚡ Generate</button>
+            <div class="fx-status" data-id="status"></div>
           </div>
-          <div><label>Workflow</label><select data-id="wf"></select></div>
           <div><label>Prompt</label><textarea data-id="prompt" placeholder="describe the image…"></textarea></div>
+          <div class="fx-row fx-seedrow">
+            <div style="flex:1;min-width:140px"><label>Seed</label><input type="number" data-id="seed" placeholder="random"></div>
+            <label class="fx-lock" title="Lock seed across generates"><input type="checkbox" data-id="preset-lock"> 🔒</label>
+            <button class="ee-btn fx-btn" data-id="dice">🎲 Random</button>
+          </div>
+          <div class="fx-denoise"><label>Denoise <span data-id="dval">1.00</span></label>
+            <input type="range" data-id="denoise" min="0.1" max="1" step="0.05" value="1" aria-label="Denoise">
+          </div>
           <div class="fx-row" data-id="aspects">
             <button class="ee-btn fx-btn on" data-a="landscape">▭ 1024×576</button>
             <button class="ee-btn fx-btn" data-a="portrait">▯ 576×1024</button>
@@ -51,15 +56,12 @@ registerModule({
               <input type="file" accept="image/*" data-id="ifile" style="display:none">
             </div>
           </div>
-          <div class="fx-denoise"><label>Denoise <span data-id="dval">1.00</span></label>
-            <input type="range" data-id="denoise" min="0.1" max="1" step="0.05" value="1" aria-label="Denoise">
+          <div class="fx-row fx-presets">
+            <select data-id="preset-pick" style="flex:1;min-width:140px"><option value="">Presets…</option></select>
+            <button class="ee-btn fx-btn" data-id="preset-save" title="Save current form as a preset">💾</button>
+            <button class="ee-btn fx-btn" data-id="preset-del" title="Delete the selected preset">🗑</button>
           </div>
-          <div class="fx-row fx-seedrow">
-            <div style="flex:1;min-width:140px"><label>Seed</label><input type="number" data-id="seed" placeholder="random"></div>
-            <label class="fx-lock" title="Lock seed across generates"><input type="checkbox" data-id="preset-lock"> 🔒</label>
-            <button class="ee-btn fx-btn" data-id="dice">🎲 Random</button>
-            <button class="ee-btn primary fx-go" data-id="go">⚡ Generate</button>
-          </div>
+          <div><label>Workflow</label><select data-id="wf"></select></div>
           <div><label>LoRAs <span data-id="lcount"></span></label>
             <div class="fx-pins" data-id="pins"></div>
             <div class="fx-susp" data-id="susp"></div>

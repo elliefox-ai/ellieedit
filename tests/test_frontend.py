@@ -679,3 +679,20 @@ def test_fx_send_seed_frontend_wiring():
     assert 'data-id="preset-lock"' in fx  # …but the same checkbox lives on, icon-only
     st = (HERE.parent / "frontend" / "js" / "modules" / "foxden-state.js").read_text()
     assert 'nextSeed' in st
+
+
+def test_foxden_reorg_order():
+    """FoxDen frequency reorg (2026-10-26): Generate + status (sticky
+    topbar), prompt, seed row, denoise, aspect, input images, presets,
+    workflow, LoRAs last. Order is pinned by first-occurrence positions
+    so a future edit can't silently drift the panel back."""
+    fx = (HERE.parent / "frontend" / "js" / "modules" / "foxden.js").read_text()
+    markers = ['data-id="go"', 'data-id="prompt"', 'data-id="seed"',
+               'data-id="denoise"', 'data-id="aspects"', 'data-id="iup"',
+               'data-id="preset-pick"', 'data-id="wf"', 'data-id="loras"']
+    pos = [fx.index(m) for m in markers]
+    assert pos == sorted(pos), f"FoxDen panel order drifted: {list(zip(markers, pos))}"
+    assert 'fx-topbar' in fx
+    css = (HERE.parent / "frontend" / "js" / "modules" / "foxden.css").read_text()
+    assert 'position:sticky' in css
+    assert 'fx-seedrow .fx-go' not in css  # compact-row override died with the row

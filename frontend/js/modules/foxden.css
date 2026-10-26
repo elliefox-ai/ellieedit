@@ -14,11 +14,14 @@
 .fx-btn { min-height:44px; min-width:44px; padding:0 14px; font-size:13px; }
 .fx-btn.on { background:#5b4a8a; border-color:#7a6aaa; color:#fff; }
 .fx-go { min-height:56px; font-size:16px; font-weight:600; width:100%; }
-/* Seed row (2026-10-26): Generate shares the seed row instead of owning a
- * full-width row — it drops the standalone sizing here. The lock checkbox
- * is icon-only beside the seed it locks (its presets-row rule above no
- * longer applies once it moves out of .fx-presets). */
-.fx-seedrow .fx-go { width:auto; min-height:44px; font-size:14px; flex:0 0 auto; }
+/* Top action bar (2026-10-26 reorg): Generate + status stick to the top
+ * of the panel while the rest scrolls inside .fx-body, so the action
+ * stays reachable after browsing LoRAs. Solid background + z-index so
+ * scrolled content slides underneath, not through. */
+.fx-topbar { position:sticky; top:0; z-index:5; background:#12121f; padding:10px 0;
+  display:flex; flex-direction:column; gap:6px; }
+/* Seed row lock (2026-10-26): icon-only beside the seed it locks (its
+ * presets-row rule no longer applies once it moves out of .fx-presets). */
 .fx-seedrow .fx-lock { display:inline-flex; align-items:center; font-size:18px; color:#9a9ab8; min-height:44px; cursor:pointer; }
 .fx-seedrow .fx-lock input { cursor:pointer; }
 .fx-loras { max-height:240px; overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
