@@ -283,7 +283,8 @@ def test_config_scans_loras_and_reports_reachability(client, monkeypatch):
     assert c["loras"] == ["_Flux\\b.safetensors", "a.safetensors"]   # no notes.txt
     assert c["comfy_reachable"] is True
     assert {w["id"]: w["available"] for w in c["workflows"]} == {
-        "klein": True, "krea2": False, "zengorestyle": False, "qwen21": False}  # restyle 2026-10-20, qwen21 2026-10-23
+        "klein": True, "krea2": False, "zengorestyle": False, "qwen21": False,
+        "moss": False}  # restyle 2026-10-20, qwen21 2026-10-23, moss 2026-10-26
 
 
 def test_config_comfy_unreachable_is_graceful(client, monkeypatch):

@@ -40,7 +40,8 @@ router = APIRouter(prefix="/api/foxden", tags=["foxden"])
 WORKFLOW_FILES = {"klein": "klein_gen_basic.json",
                   "krea2": "krea2_gen_basic.json",
                   "zengorestyle": "zengostyle_restyle_f2k4b_mkl.json",
-                  "qwen21": "qwen21_gen_basic.json"}
+                  "qwen21": "qwen21_gen_basic.json",
+                  "moss": "moss_gen_basic.json"}
 LORA_EXTS = {".safetensors", ".pt", ".ckpt", ".pth"}
 UPLOAD_MAX = 25 * 1024 * 1024
 RECENT_MAX = 200
