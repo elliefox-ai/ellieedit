@@ -661,3 +661,21 @@ def test_library_phase0_frontend_wiring():
         assert needle in lib, needle
     assert 'sendToUpdate' not in lib   # hard-coded dispatch is gone
     assert 'libv-update' not in lib
+
+
+def test_fx_send_seed_frontend_wiring():
+    """Workorder 2026-10-26 fx-send-seed: Gallery viewer Send to menu gains
+    FaceCycle (single-image route; the multi-select bar still gates at
+    >= 2); Library already carries FaceCycle from Phase 0 (pinned here);
+    FoxDen seed lock lives beside the seed field with Generate on the
+    same row, driven by the headless nextSeed helper."""
+    gal = (HERE.parent / "frontend" / "js" / "modules" / "gallery.js").read_text()
+    assert "{ label: '→ FaceCycle', target: 'facecycle' }" in gal
+    lib = (HERE.parent / "frontend" / "js" / "modules" / "library.js").read_text()
+    assert "{ label: '→ FaceCycle', target: 'facecycle' }" in lib
+    fx = (HERE.parent / "frontend" / "js" / "modules" / "foxden.js").read_text()
+    assert 'nextSeed' in fx and 'fx-seedrow' in fx
+    assert '🔒 seed' not in fx        # old presets-row label text is gone…
+    assert 'data-id="preset-lock"' in fx  # …but the same checkbox lives on, icon-only
+    st = (HERE.parent / "frontend" / "js" / "modules" / "foxden-state.js").read_text()
+    assert 'nextSeed' in st

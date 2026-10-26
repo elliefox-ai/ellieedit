@@ -34,6 +34,22 @@ export function presetState(state, lockSeed) {
   return s;
 }
 
+// Seed-roll for Generate (2026-10-26, workorder fx-send-seed item 2).
+// The lock checkbox beside the seed field governs generates:
+//   locked   -> keep the typed seed across generates;
+//   unlocked (default) -> a fresh random seed on EVERY generate.
+// A locked-but-empty field rolls once — after that the field holds a
+// value, so subsequent generates keep it. Non-numeric input never pins:
+// it rolls, exactly as an empty field does. Range matches the dice
+// button (0 .. 2^31), so locked and rolled seeds behave identically
+// downstream.
+export function nextSeed({ locked, current }) {
+  const n = Number(current);
+  if (locked && current !== '' && current !== null && current !== undefined
+      && Number.isFinite(n)) return Math.trunc(n);
+  return Math.floor(Math.random() * 2 ** 31);
+}
+
 // Trailing debounce with an immediate flush (used on tab-hide / page-hide so a
 // sleeping tablet doesn't lose the last edit).
 // 2026-10-17: wrap setTimeout/clearTimeout in arrow functions — storing them

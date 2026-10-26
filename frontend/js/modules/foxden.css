@@ -14,6 +14,13 @@
 .fx-btn { min-height:44px; min-width:44px; padding:0 14px; font-size:13px; }
 .fx-btn.on { background:#5b4a8a; border-color:#7a6aaa; color:#fff; }
 .fx-go { min-height:56px; font-size:16px; font-weight:600; width:100%; }
+/* Seed row (2026-10-26): Generate shares the seed row instead of owning a
+ * full-width row — it drops the standalone sizing here. The lock checkbox
+ * is icon-only beside the seed it locks (its presets-row rule above no
+ * longer applies once it moves out of .fx-presets). */
+.fx-seedrow .fx-go { width:auto; min-height:44px; font-size:14px; flex:0 0 auto; }
+.fx-seedrow .fx-lock { display:inline-flex; align-items:center; font-size:18px; color:#9a9ab8; min-height:44px; cursor:pointer; }
+.fx-seedrow .fx-lock input { cursor:pointer; }
 .fx-loras { max-height:240px; overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
 .fx-lora { border:1px solid #2a2a44; border-radius:8px; padding:6px 8px; background:#161628; }
 .fx-lora.on { border-color:#7a6aaa; background:#1d1d33; }

@@ -1343,12 +1343,17 @@ export class Gallery {
     act('viewer-delete').addEventListener('click', () => this.armViewerDelete());
     // v1.4 "Send to ▸": Puppet Theater (layer / background) and FoxDen
     // (input image) beside ✎ Update. Single image = the one in the lightbox.
+    // 2026-10-26: FaceCycle joins it — the single-image route the
+    // multi-select bar can't serve (the bar only appears at >= 2 selected).
+    // Payload is server urls + provenance paths, never data urls; the
+    // shell router caps FaceCycle at 8 and the receiver accepts 1..8.
     const sendMenu = createSendMenu({
       className: 'ee-btn',
       entries: [
         { label: '🎭 Puppet Theater — new layer', target: 'puppet', as: 'layer' },
         { label: '🎭 Puppet Theater — as background', target: 'puppet', as: 'background' },
         { label: '🦊 FoxDen — input image', target: 'foxden' },
+        { label: '→ FaceCycle', target: 'facecycle' },
       ],
       getPayload: () => {
         const item = this.items[this.viewIdx];

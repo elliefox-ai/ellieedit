@@ -7,7 +7,7 @@ import { createSendMenu } from '../components/send-menu.js';
 import { nameFromUrl, receiptText } from '../send-to.js';
 import { readCollapsed, writeCollapsed, recentLabel } from './foxden-recent.js';
 import { createPins } from './foxden-loras.js';
-import { normalizeState, presetState, debounce, cleanName } from './foxden-state.js';
+import { normalizeState, presetState, debounce, cleanName, nextSeed } from './foxden-state.js';
 
 const API = '/api/foxden';
 const PRESETS = { landscape: [1024, 576], portrait: [576, 1024] };
@@ -30,11 +30,9 @@ registerModule({
       <div class="fx-body">
         <div class="fx-panel">
           <div class="fx-status" data-id="conn">connecting…</div>
-          <button class="ee-btn primary fx-go" data-id="go">⚡ Generate</button>
           <div class="fx-status" data-id="status"></div>
           <div class="fx-row fx-presets">
             <select data-id="preset-pick" style="flex:1;min-width:140px"><option value="">Presets…</option></select>
-            <label class="fx-lock"><input type="checkbox" data-id="preset-lock"> 🔒 seed</label>
             <button class="ee-btn fx-btn" data-id="preset-save" title="Save current form as a preset">💾</button>
             <button class="ee-btn fx-btn" data-id="preset-del" title="Delete the selected preset">🗑</button>
           </div>
@@ -56,9 +54,11 @@ registerModule({
           <div class="fx-denoise"><label>Denoise <span data-id="dval">1.00</span></label>
             <input type="range" data-id="denoise" min="0.1" max="1" step="0.05" value="1" aria-label="Denoise">
           </div>
-          <div class="fx-row">
+          <div class="fx-row fx-seedrow">
             <div style="flex:1;min-width:140px"><label>Seed</label><input type="number" data-id="seed" placeholder="random"></div>
+            <label class="fx-lock" title="Lock seed across generates"><input type="checkbox" data-id="preset-lock"> 🔒</label>
             <button class="ee-btn fx-btn" data-id="dice">🎲 Random</button>
+            <button class="ee-btn primary fx-go" data-id="go">⚡ Generate</button>
           </div>
           <div><label>LoRAs <span data-id="lcount"></span></label>
             <div class="fx-pins" data-id="pins"></div>
@@ -346,7 +346,12 @@ registerModule({
         denoise: parseFloat(el.denoise.value),                       // always sent
       };
       if (inputImage) body.input_image = inputImage;
-      if (el.seed.value !== '') body.seed = parseInt(el.seed.value);
+      // Seed-lock (2026-10-26): unchecked (default) rolls a fresh random
+      // seed on every generate; checked keeps the typed seed. The field
+      // updates here, before submit, so the seed being used is visible.
+      const seed = nextSeed({ locked: el['preset-lock'].checked, current: el.seed.value });
+      el.seed.value = seed;
+      body.seed = seed;
       try {
         say('submitting…');
         const j = await api('/generate', { method: 'POST',
@@ -421,6 +426,7 @@ registerModule({
     el.reuse.addEventListener('click', () => {
       const e = bigEntry; if (!e) return;
       el.prompt.value = e.prompt; el.seed.value = e.seed;
+      el['preset-lock'].checked = true;   // reused seed is pinned, not re-rolled
       if ([...el.wf.options].some(o => o.value === e.workflow && !o.disabled)) el.wf.value = e.workflow;
       pins.restoreFrom(e.loras, e.suspended_loras);
       renderLoras();

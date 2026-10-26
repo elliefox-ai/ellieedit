@@ -1,7 +1,7 @@
 // Task 5 add.2 — form-state normalization, lock-seed semantics, debounce.
 // Run: node tests/js/foxden-state.test.mjs
 import assert from 'node:assert/strict';
-import { normalizeState, presetState, debounce, cleanName } from '../../frontend/js/modules/foxden-state.js';
+import { normalizeState, presetState, debounce, cleanName, nextSeed } from '../../frontend/js/modules/foxden-state.js';
 
 const full = { workflow: 'klein', prompt: 'a fox', aspect: 'portrait', seed: 42,
   loras: [{ name: 'a', strength_model: 0.5 }], suspended_loras: [{ name: 'b', strength_model: 1.25 }],
@@ -41,3 +41,23 @@ assert.equal(cleanName(null), '');
 assert.equal(cleanName('x'.repeat(80)).length, 60);
 
 console.log('foxden-state: all contracts hold');
+
+// seed-roll for Generate (2026-10-26, fx-send-seed item 2): lock keeps the
+// typed seed, unlocked rolls fresh every time, locked-but-empty rolls once.
+const realRandom = Math.random;
+Math.random = () => 0.5;
+const half = Math.floor(0.5 * 2 ** 31);
+assert.equal(nextSeed({ locked: false, current: 42 }), half);   // unlocked ignores the field
+assert.equal(nextSeed({ locked: true, current: '' }), half);    // locked-but-empty rolls once
+assert.equal(nextSeed({ locked: true, current: 'junk' }), half); // garbage never pins
+Math.random = realRandom;
+assert.equal(nextSeed({ locked: true, current: 42 }), 42);
+assert.equal(nextSeed({ locked: true, current: '7' }), 7);       // string field value pins as int
+// three unlocked rolls are three different seeds, all in dice range
+let i = 0; const seq = [0.1, 0.5, 0.9];
+Math.random = () => seq[i++ % seq.length];
+const rolled = [nextSeed({ locked: false }), nextSeed({ locked: false }), nextSeed({ locked: false })];
+assert.equal(new Set(rolled).size, 3);
+assert.ok(rolled.every(x => Number.isInteger(x) && x >= 0 && x < 2 ** 31));
+Math.random = realRandom;
+console.log('PASS foxden-state (incl. nextSeed)');
