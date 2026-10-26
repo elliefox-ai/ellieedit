@@ -47,8 +47,21 @@ def health():
     return {"ok": True, "app": "ellieedit"}
 
 
+class NoCacheStaticFiles(StaticFiles):
+    """Static JS/CSS must revalidate every load. No Cache-Control header means
+    Safari applies heuristic caching (10% of file age) and skips revalidation
+    entirely on module imports — stale-module mixups on iPad Safari twice
+    (fx-send-seed deploy 2026-10-26). ETag revalidation keeps 304s cheap."""
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        if resp.headers.get("content-type", "").startswith(("text/javascript", "text/css")):
+            resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 # Static shell last so API routes take precedence.
-app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+app.mount("/", NoCacheStaticFiles(directory=STATIC_DIR, html=True), name="static")
 
 
 @app.get("/")
