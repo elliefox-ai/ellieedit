@@ -39,6 +39,12 @@ function panelHTML() {
     .lib-cell { position: relative; border-radius: 6px; overflow: hidden;
       background: #1a1a2e; cursor: pointer; }
     .lib-cell img { width: 100%; height: 120px; object-fit: contain; display: block; }
+    /* Gallery-style thumb reveal (2026-10-29): skeleton shimmer until
+      decoded, then a short fade — thumbnails never pop in raw. */
+    .lib-cell.thumb-loading { background: linear-gradient(110deg, #1a1a2e 30%, #24243c 45%, #1a1a2e 60%); background-size: 200% 100%; animation: lib-shimmer 1.4s linear infinite; }
+    .lib-cell.thumb-loading img { opacity: 0; }
+    .lib-cell.thumb-loaded img { opacity: 1; transition: opacity 0.25s ease-in; }
+    @keyframes lib-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
     .lib-cell .lib-chips { display: flex; gap: 4px; flex-wrap: wrap; padding: 3px 5px; }
     .lib-cell .chip {
       background: #22223a; color: #a8b8ff; border-radius: 8px;
@@ -228,6 +234,24 @@ class LibraryView {
     this.setViewMode = false;
     this.currentSet = null;
     this.metaPaths = [];
+    this.loading = false;
+    this.gen = 0;
+    // Gallery-style streaming (2026-10-29): thumbnails are only
+    // requested when near the viewport, and the next page loads
+    // automatically near the bottom — no "Load more" click, no
+    // 40-at-once thumbnail burst.
+    this.io = new IntersectionObserver(entries => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const img = e.target.querySelector('img');
+        if (img && img.dataset.src) { img.src = img.dataset.src; delete img.dataset.src; }
+        this.io.unobserve(e.target);
+      }
+    }, { rootMargin: '900px' });
+    this.el.grid.addEventListener('scroll', () => {
+      const g = this.el.grid;
+      if (g.scrollTop + g.clientHeight >= g.scrollHeight - 1500) this.load();
+    });
     this.el.more.addEventListener('click', () => this.load());
     this.el.subject.addEventListener('change', () => { this.subject = this.el.subject.value; this.reload(); });
     this.el.shot.addEventListener('change', () => { this.shot = this.el.shot.value; this.reload(); });
@@ -254,6 +278,8 @@ class LibraryView {
   fileUrl(path) { return `/api/library/file?path=${encodeURIComponent(path)}`; }
 
   async reload() {
+    this.gen++;  // drop any in-flight page from the old view
+    this.loading = false;
     this.cursor = 0;
     this.items = [];
     this.el.grid.innerHTML = '';
@@ -262,12 +288,17 @@ class LibraryView {
   }
 
   async load() {
+    if (this.loading) return;
+    if (this.cursor !== 0 && this.cursor == null) return;
+    this.loading = true;
+    const gen = this.gen;
     try {
       const qs = buildListParams({ tag: this.tag, cursor: this.cursor,
         subject: this.subject, shot: this.shot, q: this.q });
       const r = await fetch('/api/library/list?' + qs);
       if (!r.ok) throw new Error(r.status);
       const d = await r.json();
+      if (gen !== this.gen) { this.loading = false; return; }  // view changed while paging
       if (this.cursor === 0) {
         this.renderTags(d.tags, d.total_all ?? d.total);
         this.renderMetaFilters(d.meta_vocab);
@@ -276,14 +307,28 @@ class LibraryView {
         this.items.push(item);
         this.addCell(item, this.items.length - 1);
       }
-      this.cursor = d.next_cursor ?? d.items.length + this.cursor;
+      this.cursor = d.next_cursor;
       this.total = d.total;
       this.shown = this.el.grid.children.length;
-      this.el.more.style.display = d.next_cursor == null ? 'none' : '';
+      // Infinite scroll replaces the Load more button (Gallery-style);
+      // the button stays in the DOM as a fallback but is not shown.
+      this.el.more.style.display = 'none';
       this.el.status.textContent = countLine(this.shown, d.total, this.tag);
     } catch (err) {
+      if (gen !== this.gen) { this.loading = false; return; }
       this.el.status.textContent = 'Library load failed: ' + err.message;
     }
+    this.loading = false;
+    if (gen === this.gen) this.maybeTopUp();
+  }
+
+  // If the grid is not yet scrollable (short listing, tall viewport),
+  // no scroll event will ever fire — top it up until it is, or the
+  // listing is exhausted. Same pattern as the Gallery.
+  maybeTopUp() {
+    const g = this.el.grid;
+    if (this.cursor != null && !this.loading &&
+        g.scrollHeight - g.scrollTop - g.clientHeight < 1500) this.load();
   }
 
   renderTags(tags, total) {
@@ -315,12 +360,50 @@ class LibraryView {
     }
   }
 
+  // Selection must never reload the grid (2026-10-29 flicker fix):
+  // reload() clears grid.innerHTML and rebuilds every cell, so every
+  // thumbnail re-renders — once when Select is clicked, and again
+  // on every single selection. Selection is purely local state, so
+  // it updates the existing cells in place: checkbox text + outline
+  // + selection bar only. No fetch, no re-render, no flicker.
   toggleSelectMode() {
     this.selectMode = !this.selectMode;
     if (!this.selectMode) this.selected.clear();
     this.el.selectBtn.textContent = this.selectMode ? '☑ Select' : '☐ Select';
     this.updateSelectionBar();
-    this.reload();
+    this.syncSelectionUI();
+  }
+
+  toggleCellSelection(cell, path) {
+    if (this.selected.has(path)) this.selected.delete(path);
+    else this.selected.add(path);
+    cell.classList.toggle('selected', this.selected.has(path));
+    const sel = cell.querySelector('.sel');
+    if (sel) sel.textContent = this.selected.has(path) ? '✓' : '';
+    this.updateSelectionBar();
+  }
+
+  syncSelectionUI() {
+    for (const cell of this.el.grid.children) {
+      const path = cell.dataset.path;
+      let sel = cell.querySelector('.sel');
+      if (!this.selectMode) {
+        sel?.remove();
+        cell.classList.remove('selected');
+        continue;
+      }
+      if (!sel) {
+        sel = document.createElement('span');
+        sel.className = 'sel';
+        sel.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.toggleCellSelection(cell, path);
+        });
+        cell.appendChild(sel);
+      }
+      sel.textContent = this.selected.has(path) ? '✓' : '';
+      cell.classList.toggle('selected', this.selected.has(path));
+    }
   }
 
   updateSelectionBar() {
@@ -492,8 +575,18 @@ class LibraryView {
     cell.className = 'lib-cell';
     cell.dataset.path = item.path;
     const img = document.createElement('img');
-    img.src = `/api/library/thumb?path=${encodeURIComponent(item.path)}`;
+    // Gallery-style: src is assigned by the IntersectionObserver when
+    // the cell nears the viewport, not for all 40 thumbnails at once.
+    img.dataset.src = `/api/library/thumb?path=${encodeURIComponent(item.path)}`;
     img.alt = item.name; img.loading = 'lazy'; img.decoding = 'async';
+    cell.classList.add('thumb-loading');
+    const reveal = () => {
+      cell.classList.remove('thumb-loading');
+      cell.classList.add('thumb-loaded');
+      this.io.unobserve(cell);
+    };
+    img.addEventListener('load', () => { if (img.decode) img.decode().then(reveal).catch(reveal); else reveal(); });
+    img.addEventListener('error', reveal);
     const chips = document.createElement('div');
     chips.className = 'lib-chips';
     for (const t of (item.tags || [])) {
@@ -519,10 +612,7 @@ class LibraryView {
       if (this.selected.has(item.path)) cell.classList.add('selected');
       sel.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (this.selected.has(item.path)) this.selected.delete(item.path);
-        else this.selected.add(item.path);
-        this.updateSelectionBar();
-        this.reload();
+        this.toggleCellSelection(cell, item.path);
       });
       cell.appendChild(sel);
     }
@@ -543,15 +633,13 @@ class LibraryView {
     // mode a cell click toggles selection instead of opening the viewer.
     cell.addEventListener('click', () => {
       if (this.selectMode) {
-        if (this.selected.has(item.path)) this.selected.delete(item.path);
-        else this.selected.add(item.path);
-        this.updateSelectionBar();
-        this.reload();
+        this.toggleCellSelection(cell, item.path);
         return;
       }
       this.openViewer(idx);
     });
     this.el.grid.appendChild(cell);
+    this.io.observe(cell);
   }
 
   // ---- lightbox viewer -----------------------------------------------------

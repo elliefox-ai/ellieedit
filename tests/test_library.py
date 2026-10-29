@@ -7,6 +7,7 @@ import io
 import json
 import shutil
 import zipfile
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -456,3 +457,31 @@ def test_sets_frontend_wiring():
                    "lib-meta", "meta/bulk", "sets/", "by_combo",
                    "Human-entered, never auto-generated"):
         assert needle in lib, needle
+
+
+def test_select_no_grid_reload_regression():
+    """2026-10-29 flicker bug: clicking Select, and every thumbnail
+    selection, called reload(), which clears grid.innerHTML and
+    rebuilds every cell — so all thumbnails flickered twice over.
+    Selection must update existing cells in place only."""
+    lib = (Path(__file__).parent.parent /
+           "frontend" / "js" / "modules" / "library.js").read_text()
+    for needle in ("toggleCellSelection", "syncSelectionUI"):
+        assert needle in lib, needle
+    sel = lib[lib.index("toggleSelectMode() {"):lib.index("toggleCellSelection")]
+    assert "this.reload()" not in sel, "toggleSelectMode still reloads the grid"
+    click = lib[lib.index("cell.addEventListener('click'"):lib.index("this.openViewer(idx)")]
+    assert "this.reload()" not in click, "select-mode cell click still reloads the grid"
+
+
+def test_gallery_style_streaming_regression():
+    """2026-10-29 side note: Library should load like the Gallery —
+    lazy thumbnails via IntersectionObserver, skeleton + fade reveal,
+    infinite scroll with a top-up, and a loading guard, instead of
+    40 thumbnails at once plus a Load more button."""
+    lib = (Path(__file__).parent.parent /
+           "frontend" / "js" / "modules" / "library.js").read_text()
+    for needle in ("IntersectionObserver", "thumb-loading", "thumb-loaded",
+                   "maybeTopUp", "dataset.src", "rootMargin"):
+        assert needle in lib, needle
+    assert "this.loading" in lib
