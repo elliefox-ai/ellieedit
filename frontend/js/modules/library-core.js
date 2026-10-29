@@ -1,9 +1,12 @@
 // Pure helpers for the Library module — node-testable, no DOM.
 
 // Query string for /api/library/list from UI state.
-export function buildListParams({ tag = '', cursor = 0 }) {
+export function buildListParams({ tag = '', cursor = 0, subject = '', shot = '', q = '' }) {
   const p = new URLSearchParams({ cursor: String(cursor) });
   if (tag) p.set('tag', tag);
+  if (subject) p.set('subject', subject);
+  if (shot) p.set('shot', shot);
+  if (q) p.set('q', q);
   return p.toString();
 }
 

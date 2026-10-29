@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import shutil
+import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -376,3 +377,82 @@ def test_phase0_server_timing_header(client, env):
     assert "Server-Timing" in r.headers
     assert "walk" in r.headers["Server-Timing"]
     assert "index" in r.headers["Server-Timing"]
+
+
+# ---- subject/shot metadata + sets (2026-10-29) ------------------------------
+
+def test_meta_subject_shot_filters_and_bulk(client, env):
+    """Human metadata: set subject/shot/detail on one image, filter the
+    listing by them, and bulk-tag a selection with keep semantics."""
+    client.post("/api/library/promote", json={"path": "loose.png", "tag": "misc"})
+    client.post("/api/library/promote", json={"path": "ZengoSoft Face/a.png"})
+    loose = "misc/loose.png"
+    a = "zengosoft/a.png"
+    r = client.post("/api/library/meta", json={"path": loose, "subject": "vehicle",
+                                               "shot": "wide", "detail": "car"})
+    assert r.status_code == 200
+    r = client.post("/api/library/meta", json={"path": a, "subject": "person",
+                                               "shot": "medium", "detail": "woman"})
+    assert r.status_code == 200
+    # Filters: subject, shot, and detail search all narrow the listing.
+    assert [i["path"] for i in client.get("/api/library/list", params={"subject": "vehicle"}).json()["items"]] == [loose]
+    assert [i["path"] for i in client.get("/api/library/list", params={"shot": "medium"}).json()["items"]] == [a]
+    assert [i["path"] for i in client.get("/api/library/list", params={"q": "woman"}).json()["items"]] == [a]
+    # Unknown vocab is rejected, never written.
+    assert client.post("/api/library/meta", json={"path": loose, "subject": "spaceship"}).status_code == 400
+    # Bulk: set shot for both, keep subject/detail (None = keep).
+    r = client.post("/api/library/meta/bulk", json={"paths": [loose, a], "shot": "close-up"})
+    assert r.status_code == 200
+    items = {i["path"]: i for i in client.get("/api/library/list").json()["items"]}
+    assert items[loose]["meta"] == {"subject": "vehicle", "shot": "close-up", "figures": "", "detail": "car"}
+    assert items[a]["meta"]["subject"] == "person"  # kept, not clobbered
+    assert items[a]["meta"]["detail"] == "woman"
+    # Retag must not clobber metadata (separate sidecar).
+    client.post("/api/library/retag", json={"path": loose, "tags": ["misc", "hero"]})
+    items = {i["path"]: i for i in client.get("/api/library/list").json()["items"]}
+    assert items[loose]["meta"]["subject"] == "vehicle"
+
+
+def test_sets_lock_and_export(client, env):
+    """Sets: create, add members (dedupe, order kept), distribution,
+    lock blocks member changes, export zip has images + captions +
+    manifest with the balance distribution."""
+    client.post("/api/library/promote", json={"path": "loose.png", "tag": "misc"})
+    client.post("/api/library/promote", json={"path": "ZengoSoft Face/a.png"})
+    loose, a = "misc/loose.png", "zengosoft/a.png"
+    client.post("/api/library/meta", json={"path": loose, "subject": "vehicle", "shot": "wide"})
+    client.post("/api/library/meta", json={"path": a, "subject": "person", "shot": "medium"})
+    r = client.post("/api/library/sets", json={"name": "probe-set",
+                                               "caption_template": "color hold line art"})
+    assert r.status_code == 200
+    sid = r.json()["id"]
+    r = client.post(f"/api/library/sets/{sid}/members", json={"paths": [loose, a, loose]})
+    assert r.status_code == 200
+    d = client.get(f"/api/library/sets/{sid}").json()
+    assert [m["path"] for m in d["members"]] == [loose, a]  # deduped, order kept
+    assert d["distribution"]["by_subject"] == {"vehicle": 1, "person": 1}
+    assert d["distribution"]["by_combo"] == {"vehicle/wide": 1, "person/medium": 1}
+    # Lock blocks member changes, unlock restores them.
+    client.post(f"/api/library/sets/{sid}/lock")
+    assert client.post(f"/api/library/sets/{sid}/members", json={"paths": [loose]}).status_code == 409
+    client.post(f"/api/library/sets/{sid}/unlock")
+    assert client.post(f"/api/library/sets/{sid}/members", json={"paths": [loose]}).status_code == 200
+    # Export: images + .txt captions from the template + manifest.
+    r = client.get(f"/api/library/sets/{sid}/export")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    names = zf.namelist()
+    assert "manifest.json" in names and "loose.txt" in names and "a.txt" in names
+    assert zf.read("loose.txt").decode() == "color hold line art"
+    manifest = json.loads(zf.read("manifest.json"))
+    assert manifest["member_count"] == 2
+    assert manifest["distribution"]["by_subject"] == {"vehicle": 1, "person": 1}
+
+
+def test_sets_frontend_wiring():
+    lib = (REPO := __import__("pathlib").Path(__file__).parent.parent /
+           "frontend" / "js" / "modules" / "library.js").read_text()
+    for needle in ("lib-set", "lib-subject", "lib-shot", "lib-dash",
+                   "lib-meta", "meta/bulk", "sets/", "by_combo",
+                   "Human-entered, never auto-generated"):
+        assert needle in lib, needle

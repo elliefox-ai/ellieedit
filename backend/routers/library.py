@@ -25,16 +25,20 @@ Design decisions (operator, 2026-10-09):
 """
 
 import hashlib
+import io
 import json
 import os
 import shutil
 import time
+import uuid
+import zipfile
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi import Response as FResponse
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from . import dupe as _dupe_mod
@@ -342,22 +346,256 @@ def _index_maps(records: list[dict]) -> tuple[dict, set, dict]:
     return tags, gone, fam
 
 
-def list_library(tag: str = "", cursor: int = 0, kind: str = "") -> dict:
-    """Paged listing of library images with tags. Latest-wins tags joined
-    with what's actually on disk (index entries for vanished files are
-    skipped). Phase 0:
-      - `tags` and `total_all` come from the UNFILTERED set (the old code
-        computed them after the tag filter, so the tag bar collapsed and
-        'all (N)' showed the filtered count);
-      - rows carry family fields (kind, family_id, original, final);
-      - kind filter: '' (default) hides version-original rows (finals +
-        loose images; originals are reached through their family),
-        'originals' shows only originals, 'all' shows everything;
-      - timing_ms reports index/walk/total for the Phase 1 decision.
-    """
-    t0 = time.perf_counter()
+# ---------------------------------------------------------------------------
+# Subject / shot metadata (2026-10-29, library sets)
+# ---------------------------------------------------------------------------
+# Why human metadata, not a vision model: a training set's useful
+# labels are curation decisions — subject type, shot scale, figure
+# count, a short detail ("woman", "horse", "car") — and a weak vision
+# guess written into the index would pollute the set with wrong
+# labels. So metadata is entered by a human (one image, or bulk over
+# a selection), stored in its own sidecar, and never auto-generated.
+# The sidecar follows the same append-only, latest-wins discipline
+# as the index: a retag never clobbers metadata, and vice versa.
+META_SUBJECTS = ["person", "animal", "vehicle", "building",
+                 "landscape", "object", "other"]
+META_SHOTS = ["close-up", "medium", "wide", "full", "other"]
+META_FIGURES = ["none", "1", "2", "3+"]
+
+
+def _meta_path() -> Path:
+    return LIBRARY_ROOT / ".library-meta.jsonl"
+
+
+def _sets_path() -> Path:
+    return LIBRARY_ROOT / ".library-sets.jsonl"
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    out = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _append_jsonl(path: Path, record: dict) -> None:
+    LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
+def latest_meta() -> dict[str, dict]:
+    """path -> merged metadata dict; latest record wins per path."""
+    meta: dict[str, dict] = {}
+    for rec in _read_jsonl(_meta_path()):
+        if rec.get("path"):
+            meta[rec["path"]] = {k: rec.get(k, "") for k in
+                                 ("subject", "shot", "figures", "detail")}
+    return meta
+
+
+def _validate_meta(subject: str, shot: str, figures: str) -> None:
+    if subject and subject not in META_SUBJECTS:
+        raise HTTPException(400, f"unknown subject: {subject}")
+    if shot and shot not in META_SHOTS:
+        raise HTTPException(400, f"unknown shot: {shot}")
+    if figures and figures not in META_FIGURES:
+        raise HTTPException(400, f"unknown figures: {figures}")
+
+
+def set_meta(path: str, subject: str = "", shot: str = "",
+             figures: str = "", detail: str = "") -> dict:
+    p = library_jailed(path)
+    if not p.is_file():
+        raise HTTPException(404, "not in library")
+    _validate_meta(subject, shot, figures)
+    rel = p.relative_to(LIBRARY_ROOT).as_posix()
+    record = {"path": rel, "subject": subject, "shot": shot,
+              "figures": figures, "detail": detail.strip(),
+              "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")}
+    _append_jsonl(_meta_path(), record)
+    return record
+
+
+def bulk_meta(paths: list[str], subject: str | None = None,
+              shot: str | None = None, figures: str | None = None,
+              detail: str | None = None) -> list[dict]:
+    """Bulk metadata: None = keep the existing value, '' = clear it.
+    This is what makes human tagging cheap — select twenty vehicle
+    shots, set subject once, leave shot/detail untouched."""
+    _validate_meta(subject or "", shot or "", figures or "")
+    existing = latest_meta()
+    out = []
+    for path in paths:
+        p = library_jailed(path)
+        if not p.is_file():
+            raise HTTPException(404, f"not in library: {path}")
+        rel = p.relative_to(LIBRARY_ROOT).as_posix()
+        cur = existing.get(rel, {"subject": "", "shot": "",
+                                 "figures": "", "detail": ""})
+        merged = {
+            "subject": cur["subject"] if subject is None else subject,
+            "shot": cur["shot"] if shot is None else shot,
+            "figures": cur["figures"] if figures is None else figures,
+            "detail": cur["detail"] if detail is None else detail.strip(),
+        }
+        out.append(set_meta(rel, **merged))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Sets (2026-10-29)
+# ---------------------------------------------------------------------------
+# A set is a named, ordered collection of library references — not
+# moves, not copies. Files stay in their tag folders; the set only
+# records paths, in order, plus a caption template and per-member
+# caption overrides. Locking freezes members + template, so later
+# library edits cannot silently change a training set; export
+# produces a reproducible zip (images + .txt captions + manifest).
+def _now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def latest_sets() -> dict[str, dict]:
+    """set id -> latest snapshot; deleted sets are dropped."""
+    sets: dict[str, dict] = {}
+    for rec in _read_jsonl(_sets_path()):
+        if not rec.get("id"):
+            continue
+        if rec.get("deleted"):
+            sets.pop(rec["id"], None)
+        else:
+            sets[rec["id"]] = rec
+    return sets
+
+
+def get_set_or_404(set_id: str) -> dict:
+    s = latest_sets().get(set_id)
+    if not s:
+        raise HTTPException(404, "no such set")
+    return s
+
+
+def _save_set(s: dict) -> dict:
+    s = dict(s)
+    s["ts"] = _now()
+    _append_jsonl(_sets_path(), s)
+    return s
+
+
+def create_set(name: str, purpose: str = "", caption_template: str = "",
+               notes: str = "") -> dict:
+    if not name.strip():
+        raise HTTPException(400, "set name required")
+    return _save_set({"id": uuid.uuid4().hex[:12], "name": name.strip(),
+                      "purpose": purpose.strip(),
+                      "caption_template": caption_template.strip(),
+                      "notes": notes.strip(), "status": "draft",
+                      "members": []})
+
+
+def _require_unlocked(s: dict) -> None:
+    if s.get("status") == "locked":
+        raise HTTPException(409, "set is locked — unlock it to change it")
+
+
+def add_set_members(set_id: str, paths: list[str]) -> dict:
+    s = get_set_or_404(set_id)
+    _require_unlocked(s)
+    rows = {r["path"] for r in _all_rows()}
+    have = [m["path"] for m in s.get("members", [])]
+    for path in paths:
+        rel = library_jailed(path).relative_to(LIBRARY_ROOT).as_posix()
+        if rel not in rows:
+            raise HTTPException(404, f"not in library: {path}")
+        if rel not in have:
+            s.setdefault("members", []).append({"path": rel, "caption": ""})
+            have.append(rel)
+    return _save_set(s)
+
+
+def remove_set_members(set_id: str, paths: list[str]) -> dict:
+    s = get_set_or_404(set_id)
+    _require_unlocked(s)
+    drop = set()
+    for path in paths:
+        drop.add(library_jailed(path).relative_to(LIBRARY_ROOT).as_posix())
+    s["members"] = [m for m in s.get("members", []) if m["path"] not in drop]
+    return _save_set(s)
+
+
+def set_distribution(members: list[dict]) -> dict:
+    by_subject = Counter(m.get("meta", {}).get("subject") or "untagged"
+                         for m in members)
+    by_shot = Counter(m.get("meta", {}).get("shot") or "untagged"
+                      for m in members)
+    by_combo = Counter(
+        f"{m.get('meta', {}).get('subject') or 'untagged'}/"
+        f"{m.get('meta', {}).get('shot') or 'untagged'}"
+        for m in members)
+    return {"by_subject": dict(by_subject), "by_shot": dict(by_shot),
+            "by_combo": dict(by_combo)}
+
+
+def set_detail(set_id: str) -> dict:
+    s = get_set_or_404(set_id)
+    rows = {r["path"]: r for r in _all_rows()}
+    members = []
+    for m in s.get("members", []):
+        row = rows.get(m["path"])
+        members.append({"path": m["path"], "caption": m.get("caption", ""),
+                        "missing": row is None,
+                        "name": row["name"] if row else Path(m["path"]).name,
+                        "tags": row["tags"] if row else [],
+                        "meta": row["meta"] if row else {}})
+    out = dict(s)
+    out["members"] = members
+    out["member_count"] = len(members)
+    out["missing_count"] = sum(1 for m in members if m["missing"])
+    present = [m for m in members if not m["missing"]]
+    out["distribution"] = set_distribution(present)
+    return out
+
+
+def export_set_zip(set_id: str) -> tuple[str, bytes]:
+    s = set_detail(set_id)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for m in s["members"]:
+            if m["missing"]:
+                continue
+            p = library_jailed(m["path"])
+            stem = Path(m["path"]).stem
+            zf.write(p, f"{stem}{Path(m['path']).suffix}")
+            caption = (m["caption"] or s.get("caption_template") or "").strip()
+            zf.writestr(f"{stem}.txt", caption)
+        manifest = {"set": s["name"], "purpose": s.get("purpose", ""),
+                    "status": s.get("status"), "caption_template": s.get("caption_template", ""),
+                    "member_count": s["member_count"],
+                    "missing_count": s["missing_count"],
+                    "distribution": s["distribution"],
+                    "members": [{"path": m["path"], "caption": m["caption"],
+                                 "tags": m["tags"], "meta": m["meta"],
+                                 "missing": m["missing"]} for m in s["members"]]}
+        zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+    safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in s["name"]) or "set"
+    return f"{safe}.zip", buf.getvalue()
+
+
+def _all_rows() -> list[dict]:
+    """Every library row on disk, sorted newest-first, with tags,
+    family fields, and subject/shot metadata joined. list_library
+    filters and pages this; set detail resolves members against it."""
     tags_by_path, gone, fam = _index_maps(read_index())
-    t_index = time.perf_counter()
+    meta_by_path = latest_meta()
     rows: list[dict] = []
     for dirpath, dirnames, filenames in os.walk(LIBRARY_ROOT):
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
@@ -372,13 +610,33 @@ def list_library(tag: str = "", cursor: int = 0, kind: str = "") -> dict:
                                          if full.parent != LIBRARY_ROOT else [])
             info = fam.get(rel, {})
             rows.append({"path": rel, "name": fn, "mtime": full.stat().st_mtime,
-                         "tags": file_tags,
+                         "tags": file_tags, "meta": meta_by_path.get(rel, {}),
                          "kind": info.get("kind"),
                          "family_id": info.get("family_id"),
                          "original": info.get("original"),
                          "final": info.get("final")})
-    t_walk = time.perf_counter()
     rows.sort(key=lambda r: r["mtime"], reverse=True)
+    return rows
+
+
+def list_library(tag: str = "", cursor: int = 0, kind: str = "",
+                 subject: str = "", shot: str = "", q: str = "") -> dict:
+    """Paged listing of library images with tags. Latest-wins tags joined
+    with what's actually on disk (index entries for vanished files are
+    skipped). Phase 0:
+      - `tags` and `total_all` come from the UNFILTERED set (the old code
+        computed them after the tag filter, so the tag bar collapsed and
+        'all (N)' showed the filtered count);
+      - rows carry family fields (kind, family_id, original, final);
+      - kind filter: '' (default) hides version-original rows (finals +
+        loose images; originals are reached through their family),
+        'originals' shows only originals, 'all' shows everything;
+      - subject / shot / q filters (2026-10-29) apply after kind and
+        before paging, so the counts stay honest the same way.
+    """
+    t0 = time.perf_counter()
+    rows = _all_rows()
+    t_walk = time.perf_counter()
     # Unfiltered set first: the tag bar and the 'all' count must survive
     # filtering (Phase 0 bug fix).
     all_tags = sorted({t for r in rows for t in r["tags"]})
@@ -392,6 +650,16 @@ def list_library(tag: str = "", cursor: int = 0, kind: str = "") -> dict:
     if tag:
         t = tag.strip().lower()
         rows = [r for r in rows if t in r["tags"]]
+    if subject:
+        rows = [r for r in rows if (r["meta"].get("subject") or "") == subject]
+    if shot:
+        rows = [r for r in rows if (r["meta"].get("shot") or "") == shot]
+    if q:
+        needle = q.strip().lower()
+        rows = [r for r in rows if needle in r["name"].lower()
+                or needle in (r["meta"].get("detail") or "").lower()
+                or needle in " ".join(r["tags"]).lower()
+                or needle in r["path"].lower()]
     total = len(rows)
     page = rows[cursor:cursor + PAGE_SIZE]
     next_cursor = cursor + PAGE_SIZE if cursor + PAGE_SIZE < total else None
@@ -399,8 +667,9 @@ def list_library(tag: str = "", cursor: int = 0, kind: str = "") -> dict:
     return {"items": page, "total": total, "total_all": total_all,
             "shown": len(page), "tag": tag or None, "tags": all_tags,
             "next_cursor": next_cursor, "kind": kind or "finals",
-            "timing_ms": {"index": (t_index - t0) * 1000,
-                          "walk": (t_walk - t_index) * 1000,
+            "meta_vocab": {"subjects": META_SUBJECTS, "shots": META_SHOTS,
+                           "figures": META_FIGURES},
+            "timing_ms": {"index": 0.0, "walk": (t_walk - t0) * 1000,
                           "total": (t_total - t0) * 1000}}
 
 
@@ -422,12 +691,52 @@ class DeleteBody(BaseModel):
     path: str
 
 
+class MetaBody(BaseModel):
+    path: str
+    subject: str = ""
+    shot: str = ""
+    figures: str = ""
+    detail: str = ""
+
+
+class MetaBulkBody(BaseModel):
+    paths: list[str]
+    subject: str | None = None
+    shot: str | None = None
+    figures: str | None = None
+    detail: str | None = None
+
+
+class SetCreateBody(BaseModel):
+    name: str
+    purpose: str = ""
+    caption_template: str = ""
+    notes: str = ""
+
+
+class SetUpdateBody(BaseModel):
+    name: str | None = None
+    purpose: str | None = None
+    caption_template: str | None = None
+    notes: str | None = None
+
+
+class SetMembersBody(BaseModel):
+    paths: list[str]
+
+
 @router.get("/list")
 def list_endpoint(tag: str = "", cursor: int = 0, kind: str = "",
+                  subject: str = "", shot: str = "", q: str = "",
                   response: FResponse = None):
     if kind not in ("", "originals", "all"):
         raise HTTPException(400, "kind must be '' | originals | all")
-    d = list_library(tag=tag, cursor=cursor, kind=kind)
+    if subject and subject not in META_SUBJECTS:
+        raise HTTPException(400, f"unknown subject: {subject}")
+    if shot and shot not in META_SHOTS:
+        raise HTTPException(400, f"unknown shot: {shot}")
+    d = list_library(tag=tag, cursor=cursor, kind=kind,
+                     subject=subject, shot=shot, q=q)
     if response is not None:   # Server-Timing mirrors Gallery (Phase 0)
         tm = d.get("timing_ms", {})
         response.headers["Server-Timing"] = (
@@ -452,6 +761,86 @@ def derive(path: str = Query(...), bank: str | None = None):
 @router.post("/retag")
 def retag_endpoint(body: RetagBody):
     return retag(body.path, body.tags)
+
+
+# ---- subject/shot metadata + sets (2026-10-29) ----------------------------
+
+@router.post("/meta")
+def meta_endpoint(body: MetaBody):
+    return set_meta(body.path, body.subject, body.shot,
+                    body.figures, body.detail)
+
+
+@router.post("/meta/bulk")
+def meta_bulk_endpoint(body: MetaBulkBody):
+    return {"updated": bulk_meta(body.paths, body.subject, body.shot,
+                                 body.figures, body.detail)}
+
+
+@router.get("/sets")
+def sets_list():
+    sets = sorted(latest_sets().values(), key=lambda s: s.get("ts", ""))
+    return {"sets": [{**s, "member_count": len(s.get("members", []))}
+                     for s in sets]}
+
+
+@router.post("/sets")
+def sets_create(body: SetCreateBody):
+    return create_set(body.name, body.purpose, body.caption_template,
+                      body.notes)
+
+
+@router.get("/sets/{set_id}")
+def sets_get(set_id: str):
+    return set_detail(set_id)
+
+
+@router.post("/sets/{set_id}")
+def sets_update(set_id: str, body: SetUpdateBody):
+    s = get_set_or_404(set_id)
+    if body.caption_template is not None and s.get("status") == "locked":
+        raise HTTPException(409, "set is locked — unlock it to change the template")
+    if body.name is not None:
+        s["name"] = body.name.strip() or s["name"]
+    if body.purpose is not None:
+        s["purpose"] = body.purpose.strip()
+    if body.caption_template is not None:
+        s["caption_template"] = body.caption_template.strip()
+    if body.notes is not None:
+        s["notes"] = body.notes.strip()
+    return _save_set(s)
+
+
+@router.post("/sets/{set_id}/members")
+def sets_add_members(set_id: str, body: SetMembersBody):
+    return add_set_members(set_id, body.paths)
+
+
+@router.post("/sets/{set_id}/members/remove")
+def sets_remove_members(set_id: str, body: SetMembersBody):
+    return remove_set_members(set_id, body.paths)
+
+
+@router.post("/sets/{set_id}/lock")
+def sets_lock(set_id: str):
+    s = get_set_or_404(set_id)
+    s["status"] = "locked"
+    return _save_set(s)
+
+
+@router.post("/sets/{set_id}/unlock")
+def sets_unlock(set_id: str):
+    s = get_set_or_404(set_id)
+    s["status"] = "draft"
+    return _save_set(s)
+
+
+@router.get("/sets/{set_id}/export")
+def sets_export(set_id: str):
+    filename, data = export_set_zip(set_id)
+    return StreamingResponse(io.BytesIO(data), media_type="application/zip",
+                             headers={"Content-Disposition":
+                                      f'attachment; filename="{filename}"'})
 
 
 @router.post("/pending-delete")

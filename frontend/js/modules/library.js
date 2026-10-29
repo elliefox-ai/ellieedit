@@ -58,6 +58,36 @@ function panelHTML() {
     .lib-foot { padding: 10px 16px; display: flex; justify-content: center;
       border-top: 1px solid #2a2a44; }
     .lib-foot .ee-btn { min-height: 44px; min-width: 160px; }
+    /* Sets + subject/shot filters (2026-10-29): the set bar and filter
+      row sit under the tag chips; the dashboard is the training-set
+      balance view for the set currently open. */
+    .lib-filters, .lib-setbar { display: flex; gap: 8px; flex-wrap: wrap;
+      padding: 8px 16px; background: #12121f; border-bottom: 1px solid #2a2a44;
+      align-items: center; }
+    .lib-filters select, .lib-setbar select, .lib-filters input {
+      background: #1d1d33; color: #e0e0f0; border: 1px solid #4a4a6c;
+      border-radius: 4px; padding: 7px 8px; font-size: 12px; min-height: 34px; }
+    .lib-filters input { flex: 1; min-width: 160px; }
+    .lib-dash { padding: 10px 16px; background: #1a1a2e; border-bottom: 1px solid #2a2a44;
+      font-size: 12px; color: #b0b0d0; line-height: 1.6; }
+    .lib-dash b { color: #e0e0f0; }
+    .lib-cell.selected { outline: 2px solid #7a7aff; outline-offset: -2px; }
+    .lib-cell .sel { position: absolute; top: 4px; left: 4px; z-index: 2;
+      width: 22px; height: 22px; border-radius: 4px; border: 1px solid #4a4a6c;
+      background: rgba(20,20,40,0.85); color: #fff; font-size: 14px;
+      line-height: 20px; text-align: center; cursor: pointer; }
+    .lib-cell .rm { position: absolute; top: 4px; right: 4px; z-index: 2;
+      width: 22px; height: 22px; border-radius: 4px; border: 1px solid #4a4a6c;
+      background: rgba(20,20,40,0.85); color: #e87a7a; font-size: 13px;
+      line-height: 20px; text-align: center; cursor: pointer; }
+    .lib-meta { display: none; position: absolute; inset: 0; z-index: 60;
+      background: rgba(8,8,16,0.8); align-items: center; justify-content: center; }
+    .lib-meta .box { background: #161628; border: 1px solid #4a4a6c; border-radius: 8px;
+      padding: 16px; display: flex; flex-direction: column; gap: 10px; width: min(340px, 90vw); }
+    .lib-meta .box label { font-size: 12px; color: #8a8aaa; display: flex;
+      flex-direction: column; gap: 4px; }
+    .lib-meta .box select, .lib-meta .box input { background: #1d1d33; color: #e0e0f0;
+      border: 1px solid #4a4a6c; border-radius: 4px; padding: 7px 8px; font-size: 12px; min-height: 34px; }
     /* Lightbox viewer (2026-10-09e): same experience as the Gallery viewer */
     .lib-viewer {
       display: none; position: absolute; inset: 0; background: rgba(8,8,16,0.96);
@@ -95,12 +125,44 @@ function panelHTML() {
       <div class="lib-status" id="lib-status"></div>
     </div>
     <div class="lib-tags" id="lib-tags"></div>
+    <div class="lib-filters" id="lib-filters">
+      <select id="lib-subject"><option value="">all subjects</option></select>
+      <select id="lib-shot"><option value="">all shots</option></select>
+      <input id="lib-search" placeholder="search name, detail, tag…">
+      <button class="ee-btn" id="lib-select">☐ Select</button>
+    </div>
+    <div class="lib-setbar" id="lib-setbar">
+      <select id="lib-set"><option value="">no set</option></select>
+      <button class="ee-btn" id="lib-set-new">＋ New set</button>
+      <button class="ee-btn" id="lib-set-view">View set</button>
+      <button class="ee-btn" id="lib-set-add" disabled>Add selected to set</button>
+      <button class="ee-btn" id="lib-set-meta" disabled>Meta for selected</button>
+      <a class="ee-btn" id="lib-set-export" style="display:none">⬇ Export set</a>
+      <span class="lib-status" id="lib-sel-count"></span>
+    </div>
+    <div class="lib-dash" id="lib-dash" style="display:none"></div>
+    <div class="lib-meta" id="lib-meta">
+      <div class="box">
+        <b>Subject / shot metadata</b>
+        <span style="font-size:11px;color:#6c6c8e">Human-entered, never auto-generated.
+          For a selection, "keep" leaves that field untouched.</span>
+        <label>Subject <select id="libm-subject"></select></label>
+        <label>Shot <select id="libm-shot"></select></label>
+        <label>Figures <select id="libm-figures"></select></label>
+        <label>Detail (e.g. woman, horse, car) <input id="libm-detail"></label>
+        <div style="display:flex;gap:8px">
+          <button class="ee-btn" id="libm-save" style="flex:1">Save</button>
+          <button class="ee-btn" id="libm-cancel" style="flex:1">Cancel</button>
+        </div>
+      </div>
+    </div>
     <div class="lib-grid" id="lib-grid"></div>
     <div class="lib-foot"><button class="ee-btn" id="lib-more">Load more</button></div>
     <div class="lib-viewer" id="lib-viewer">
       <div class="bar">
         <span class="fname" id="libv-name"></span>
         <button class="ee-btn" id="libv-retag" title="Retag">🏷 Retag</button>
+        <button class="ee-btn" id="libv-meta" title="Subject / shot metadata">🎬 Meta</button>
         <button class="ee-btn" id="libv-family" style="display:none" title="Show this final's original (Update version family)">⧉ Original</button>
         <span id="libv-sendwrap"></span>
         <button class="ee-btn danger" id="libv-delete" title="Move to deletion queue pending area — nothing is deleted until you confirm">🗑 Delete</button>
@@ -128,18 +190,60 @@ class LibraryView {
       vImg: panel.querySelector('#libv-img'),
       vNote: panel.querySelector('#libv-note'),
       vRetag: panel.querySelector('#libv-retag'),
+      vMeta: panel.querySelector('#libv-meta'),
       vFamily: panel.querySelector('#libv-family'),
       vSendWrap: panel.querySelector('#libv-sendwrap'),
       vDelete: panel.querySelector('#libv-delete'),
+      subject: panel.querySelector('#lib-subject'),
+      shot: panel.querySelector('#lib-shot'),
+      search: panel.querySelector('#lib-search'),
+      selectBtn: panel.querySelector('#lib-select'),
+      setSel: panel.querySelector('#lib-set'),
+      setNew: panel.querySelector('#lib-set-new'),
+      setView: panel.querySelector('#lib-set-view'),
+      setAdd: panel.querySelector('#lib-set-add'),
+      setMeta: panel.querySelector('#lib-set-meta'),
+      setExport: panel.querySelector('#lib-set-export'),
+      selCount: panel.querySelector('#lib-sel-count'),
+      dash: panel.querySelector('#lib-dash'),
+      metaDlg: panel.querySelector('#lib-meta'),
+      mSubject: panel.querySelector('#libm-subject'),
+      mShot: panel.querySelector('#libm-shot'),
+      mFigures: panel.querySelector('#libm-figures'),
+      mDetail: panel.querySelector('#libm-detail'),
     };
     this.tag = '';
+    this.subject = '';
+    this.shot = '';
+    this.q = '';
     this.cursor = 0;
     this.total = 0;
     this.shown = 0;
     this.items = [];   // flat filtered listing — the lightbox navigates this
     this.viewIdx = -1;
     this.viewingOriginal = false;   // family toggle state in the viewer
+    this.selectMode = false;
+    this.selected = new Set();  // library paths, in selection order
+    this.setId = '';
+    this.setViewMode = false;
+    this.currentSet = null;
+    this.metaPaths = [];
     this.el.more.addEventListener('click', () => this.load());
+    this.el.subject.addEventListener('change', () => { this.subject = this.el.subject.value; this.reload(); });
+    this.el.shot.addEventListener('change', () => { this.shot = this.el.shot.value; this.reload(); });
+    this.el.search.addEventListener('input', () => {
+      clearTimeout(this._searchT);
+      this._searchT = setTimeout(() => { this.q = this.el.search.value.trim(); this.reload(); }, 400);
+    });
+    this.el.selectBtn.addEventListener('click', () => this.toggleSelectMode());
+    this.el.setNew.addEventListener('click', () => this.createSet());
+    this.el.setView.addEventListener('click', () => this.toggleSetView());
+    this.el.setAdd.addEventListener('click', () => this.addSelectedToSet());
+    this.el.setMeta.addEventListener('click', () => this.openMeta([...this.selected], null, true));
+    this.el.setSel.addEventListener('change', () => { this.setId = this.el.setSel.value; this.updateSetBar(); });
+    this.panel.querySelector('#libm-cancel').addEventListener('click', () => this.closeMeta());
+    this.panel.querySelector('#libm-save').addEventListener('click', () => this.saveMeta());
+    this.loadSets();
     window.addEventListener('ellieedit:tab-activated', e => {
       if (e.detail?.name === 'library') this.reload();
     });
@@ -153,16 +257,21 @@ class LibraryView {
     this.cursor = 0;
     this.items = [];
     this.el.grid.innerHTML = '';
+    if (this.setViewMode) { await this.loadSet(); return; }
     await this.load();
   }
 
   async load() {
     try {
-      const qs = buildListParams({ tag: this.tag, cursor: this.cursor });
+      const qs = buildListParams({ tag: this.tag, cursor: this.cursor,
+        subject: this.subject, shot: this.shot, q: this.q });
       const r = await fetch('/api/library/list?' + qs);
       if (!r.ok) throw new Error(r.status);
       const d = await r.json();
-      if (this.cursor === 0) this.renderTags(d.tags, d.total_all ?? d.total);
+      if (this.cursor === 0) {
+        this.renderTags(d.tags, d.total_all ?? d.total);
+        this.renderMetaFilters(d.meta_vocab);
+      }
       for (const item of d.items) {
         this.items.push(item);
         this.addCell(item, this.items.length - 1);
@@ -194,6 +303,190 @@ class LibraryView {
     }
   }
 
+  renderMetaFilters(vocab) {
+    if (!vocab || this._metaFiltersDone) return;
+    this._metaFiltersDone = true;
+    for (const [sel, values] of [[this.el.subject, vocab.subjects], [this.el.shot, vocab.shots]]) {
+      for (const v of values) {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = v;
+        sel.appendChild(o);
+      }
+    }
+  }
+
+  toggleSelectMode() {
+    this.selectMode = !this.selectMode;
+    if (!this.selectMode) this.selected.clear();
+    this.el.selectBtn.textContent = this.selectMode ? '☑ Select' : '☐ Select';
+    this.updateSelectionBar();
+    this.reload();
+  }
+
+  updateSelectionBar() {
+    this.el.selCount.textContent = this.selected.size
+      ? `${this.selected.size} selected` : '';
+    this.el.setAdd.disabled = !this.selected.size;
+    this.el.setMeta.disabled = !this.selected.size;
+  }
+
+  async loadSets() {
+    try {
+      const d = await (await fetch('/api/library/sets')).json();
+      const cur = this.el.setSel.value;
+      this.el.setSel.innerHTML = '<option value="">no set</option>';
+      for (const s of d.sets || []) {
+        const o = document.createElement('option');
+        o.value = s.id; o.textContent = `${s.name} (${s.member_count})${s.status === 'locked' ? ' 🔒' : ''}`;
+        this.el.setSel.appendChild(o);
+      }
+      if ([...this.el.setSel.options].some(o => o.value === cur)) this.el.setSel.value = cur;
+      this.setId = this.el.setSel.value;
+    } catch { /* quiet — sets are optional */ }
+    this.updateSetBar();
+  }
+
+  updateSetBar() {
+    this.el.setView.textContent = this.setViewMode ? 'All library' : 'View set';
+    this.el.setExport.style.display = (this.setViewMode && this.setId) ? '' : 'none';
+    if (this.setId) this.el.setExport.href = `/api/library/sets/${this.setId}/export`;
+    this.el.dash.style.display = (this.setViewMode && this.currentSet) ? '' : 'none';
+  }
+
+  async createSet() {
+    const name = prompt('New set name (e.g. color-hold-v2):');
+    if (!name || !name.trim()) return;
+    const r = await fetch('/api/library/sets', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim(), purpose: 'LoRA training' }) });
+    if (!r.ok) { this.toast('Set creation failed', true); return; }
+    await this.loadSets();
+    const created = await r.json();
+    this.el.setSel.value = created.id;
+    this.setId = created.id;
+    this.toast(`Set "${created.name}" created`);
+  }
+
+  async toggleSetView() {
+    if (this.setViewMode) {
+      this.setViewMode = false;
+      this.currentSet = null;
+      this.updateSetBar();
+      await this.reload();
+      return;
+    }
+    if (!this.setId) { this.toast('Pick a set first', true); return; }
+    this.setViewMode = true;
+    await this.reload();
+  }
+
+  async loadSet() {
+    try {
+      const d = await (await fetch(`/api/library/sets/${this.setId}`)).json();
+      this.currentSet = d;
+      this.items = d.members.filter(m => !m.missing)
+        .map(m => ({ path: m.path, name: m.name, tags: m.tags, meta: m.meta }));
+      this.el.grid.innerHTML = '';
+      this.items.forEach((item, i) => this.addCell(item, i));
+      this.total = d.member_count;
+      this.shown = this.items.length;
+      this.el.more.style.display = 'none';
+      this.el.status.textContent = `set "${d.name}" — ${d.member_count} members` +
+        (d.missing_count ? ` (${d.missing_count} missing from disk)` : '') +
+        (d.status === 'locked' ? ' · 🔒 locked' : '');
+      this.renderDash(d);
+    } catch (err) {
+      this.el.status.textContent = 'Set load failed: ' + err.message;
+    }
+    this.updateSetBar();
+  }
+
+  renderDash(d) {
+    const dist = d.distribution || {};
+    const top = (obj) => Object.entries(obj || {}).sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k} ${v}`).join(', ') || '—';
+    const topCombo = Object.entries(dist.by_combo || {}).sort((a, b) => b[1] - a[1])[0];
+    let note = '';
+    if (topCombo && d.member_count >= 10 && topCombo[1] / d.member_count >= 0.5) {
+      note = `<br>⚠ Top combo is ${topCombo[0]} at ${Math.round(topCombo[1] / d.member_count * 100)}% — ` +
+        'if you want balance, look for other subjects or shots next.';
+    }
+    this.el.dash.innerHTML = `<b>Balance</b> — by subject: ${top(dist.by_subject)}` +
+      `<br>by shot: ${top(dist.by_shot)}` +
+      `<br>by subject/shot: ${top(dist.by_combo)}` + note;
+  }
+
+  async addSelectedToSet() {
+    if (!this.setId) {
+      await this.createSet();
+      if (!this.setId) return;
+    }
+    const r = await fetch(`/api/library/sets/${this.setId}/members`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: [...this.selected] }) });
+    if (!r.ok) { this.toast('Add to set failed: ' + r.status, true); return; }
+    this.toast(`Added ${this.selected.size} to set`);
+    this.selected.clear();
+    this.updateSelectionBar();
+    await this.loadSets();
+  }
+
+  async removeFromSet(path) {
+    const r = await fetch(`/api/library/sets/${this.setId}/members/remove`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: [path] }) });
+    if (!r.ok) { this.toast('Remove failed', true); return; }
+    await this.loadSet();
+  }
+
+  openMeta(paths, initial, bulk) {
+    this.metaPaths = paths;
+    const fill = (sel, values, current) => {
+      sel.innerHTML = '';
+      if (bulk) {
+        const k = document.createElement('option');
+        k.value = '__keep__'; k.textContent = 'keep';
+        sel.appendChild(k);
+      } else {
+        const e = document.createElement('option');
+        e.value = ''; e.textContent = '—';
+        sel.appendChild(e);
+      }
+      for (const v of values) {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = v;
+        if (!bulk && current === v) o.selected = true;
+        sel.appendChild(o);
+      }
+    };
+    fill(this.el.mSubject, ['person', 'animal', 'vehicle', 'building', 'landscape', 'object', 'other'], initial?.subject);
+    fill(this.el.mShot, ['close-up', 'medium', 'wide', 'full', 'other'], initial?.shot);
+    fill(this.el.mFigures, ['none', '1', '2', '3+'], initial?.figures);
+    this.el.mDetail.value = bulk ? '' : (initial?.detail || '');
+    this.el.mDetail.placeholder = bulk ? 'leave blank to keep' : 'e.g. woman, horse, car';
+    this.el.metaDlg.style.display = 'flex';
+  }
+
+  closeMeta() { this.el.metaDlg.style.display = 'none'; }
+
+  async saveMeta() {
+    const pick = (v) => (v === '__keep__' ? null : v);
+    const paths = this.metaPaths;
+    const url = paths.length > 1 ? '/api/library/meta/bulk' : '/api/library/meta';
+    const body = paths.length > 1
+      ? { paths, subject: pick(this.el.mSubject.value), shot: pick(this.el.mShot.value),
+          figures: pick(this.el.mFigures.value),
+          detail: this.el.mDetail.value.trim() ? this.el.mDetail.value.trim() : null }
+      : { path: paths[0], subject: this.el.mSubject.value, shot: this.el.mShot.value,
+          figures: this.el.mFigures.value, detail: this.el.mDetail.value.trim() };
+    const r = await fetch(url, { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) { this.toast('Meta save failed: ' + r.status, true); return; }
+    this.closeMeta();
+    this.toast(paths.length > 1 ? `Meta saved for ${paths.length} images` : 'Meta saved');
+    await this.reload();
+  }
+
   addCell(item, idx) {
     const cell = document.createElement('div');
     cell.className = 'lib-cell';
@@ -208,9 +501,37 @@ class LibraryView {
       c.className = 'chip'; c.textContent = t;
       chips.appendChild(c);
     }
+    // Subject/shot chip, so a set's balance is scannable in the grid.
+    const meta = item.meta || {};
+    if (meta.subject || meta.shot) {
+      const c = document.createElement('span');
+      c.className = 'chip';
+      c.textContent = [meta.subject, meta.shot, meta.detail].filter(Boolean).join(' · ');
+      chips.appendChild(c);
+    }
     const name = document.createElement('div');
     name.className = 'name'; name.textContent = item.name;
     cell.append(img, chips, name);
+    if (this.selectMode) {
+      const sel = document.createElement('span');
+      sel.className = 'sel';
+      sel.textContent = this.selected.has(item.path) ? '✓' : '';
+      if (this.selected.has(item.path)) cell.classList.add('selected');
+      sel.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.selected.has(item.path)) this.selected.delete(item.path);
+        else this.selected.add(item.path);
+        this.updateSelectionBar();
+        this.reload();
+      });
+      cell.appendChild(sel);
+    }
+    if (this.setViewMode && this.currentSet?.status !== 'locked') {
+      const rm = document.createElement('span');
+      rm.className = 'rm'; rm.textContent = '✕'; rm.title = 'Remove from set';
+      rm.addEventListener('click', (e) => { e.stopPropagation(); this.removeFromSet(item.path); });
+      cell.appendChild(rm);
+    }
     // ⧉ badge on finals that carry a version family (Phase 0).
     if (item.kind === 'version-family' && item.original) {
       const b = document.createElement('span');
@@ -218,8 +539,18 @@ class LibraryView {
       b.title = 'Version family — open to see the original';
       cell.appendChild(b);
     }
-    // Lightbox instead of raw-file navigation (2026-10-09e).
-    cell.addEventListener('click', () => this.openViewer(idx));
+    // Lightbox instead of raw-file navigation (2026-10-09e); in select
+    // mode a cell click toggles selection instead of opening the viewer.
+    cell.addEventListener('click', () => {
+      if (this.selectMode) {
+        if (this.selected.has(item.path)) this.selected.delete(item.path);
+        else this.selected.add(item.path);
+        this.updateSelectionBar();
+        this.reload();
+        return;
+      }
+      this.openViewer(idx);
+    });
     this.el.grid.appendChild(cell);
   }
 
@@ -349,6 +680,10 @@ class LibraryView {
     this.panel.querySelector('#libv-prev').addEventListener('click', () => this.nav(-1));
     this.panel.querySelector('#libv-next').addEventListener('click', () => this.nav(1));
     this.el.vRetag.addEventListener('click', () => this.retagFromViewer());
+    this.el.vMeta.addEventListener('click', () => {
+      const item = this.items[this.viewIdx];
+      if (item) this.openMeta([item.path], item.meta || {}, false);
+    });
     this.el.vFamily.addEventListener('click', () => this.toggleFamily());
     // Send to ▸ (Phase 0): replaces the hard-coded ✎ Update dispatch with
     // the v1.4 shell router — Update stays reachable, Puppet / FoxDen /
