@@ -94,6 +94,30 @@ function panelHTML() {
       flex-direction: column; gap: 4px; }
     .lib-meta .box select, .lib-meta .box input { background: #1d1d33; color: #e0e0f0;
       border: 1px solid #4a4a6c; border-radius: 4px; padding: 7px 8px; font-size: 12px; min-height: 34px; }
+    /* Always-there meta side panel (2026-10-29): filters and meta
+      editing live here as clickable chips — tap to add, tap again
+      to remove — instead of dropdowns and a dialog. */
+    .lib-layout { display: flex; height: 100%; min-height: 0; }
+    .lib-side { width: 280px; flex: 0 0 280px; overflow-y: auto; background: #12121f;
+      border-right: 1px solid #2a2a44; padding: 12px; display: flex;
+      flex-direction: column; gap: 18px; }
+    .lib-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; position: relative; }
+    .lib-sec { display: flex; flex-direction: column; gap: 8px; }
+    .lib-sec h4 { margin: 0; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+      color: #8a8aaa; font-weight: 600; }
+    .lib-chiprow { display: flex; gap: 6px; flex-wrap: wrap; }
+    .lib-sidechip { background: #22223a; color: #c8c8e8; border: 1px solid #4a4a6c;
+      border-radius: 12px; padding: 6px 12px; font-size: 12px; cursor: pointer; min-height: 32px; }
+    .lib-sidechip.active { background: #3a3ab0; border-color: #7a7aff; color: #fff; }
+    .lib-sidechip.mixed { border-style: dashed; color: #e8b84d; }
+    .lib-side input { background: #1d1d33; color: #e0e0f0; border: 1px solid #4a4a6c;
+      border-radius: 4px; padding: 7px 8px; font-size: 12px; min-height: 34px; width: 100%; box-sizing: border-box; }
+    .lib-side .note { font-size: 11px; color: #6c6c8e; line-height: 1.4; }
+    @media (max-width: 900px) {
+      .lib-layout { flex-direction: column; }
+      .lib-side { width: auto; flex: 0 0 auto; max-height: 42%; border-right: none;
+        border-bottom: 1px solid #2a2a44; }
+    }
     /* Lightbox viewer (2026-10-09e): same experience as the Gallery viewer */
     .lib-viewer {
       display: none; position: absolute; inset: 0; background: rgba(8,8,16,0.96);
@@ -125,15 +149,42 @@ function panelHTML() {
     .lib-viewer .navzone.left { left: 0; }
     .lib-viewer .navzone.right { right: 0; }
   </style>
-  <div style="display:flex;flex-direction:column;height:100%;position:relative">
+  <div style="height:100%;position:relative">
+  <div class="lib-layout">
+    <aside class="lib-side">
+      <section class="lib-sec">
+        <h4>Filter — tap to add, tap again to remove</h4>
+        <span class="note">Subject</span>
+        <div class="lib-chiprow" id="lib-subject"></div>
+        <span class="note">Shot</span>
+        <div class="lib-chiprow" id="lib-shot"></div>
+        <button class="ee-btn" id="lib-clear-filters">Clear filters</button>
+      </section>
+      <section class="lib-sec">
+        <h4>Meta — selected images</h4>
+        <span class="note" id="lib-side-meta-status">Select images in the grid, then tap a chip below to set it on all of them. Tap an active chip again to remove it. No dropdowns, no dialog.</span>
+        <span class="note">Subject</span>
+        <div class="lib-chiprow" id="lib-side-meta-subject"></div>
+        <span class="note">Shot</span>
+        <div class="lib-chiprow" id="lib-side-meta-shot"></div>
+        <span class="note">Figures</span>
+        <div class="lib-chiprow" id="lib-side-meta-figures"></div>
+        <span class="note">Detail</span>
+        <input id="lib-side-detail" placeholder="e.g. woman, horse, car">
+        <button class="ee-btn" id="lib-side-detail-save">Set detail on selected</button>
+      </section>
+      <section class="lib-sec">
+        <h4>Sets</h4>
+        <span class="note">Sets and the balance dashboard live in the bar above the grid. Add the selection to a set there, then watch its balance.</span>
+      </section>
+    </aside>
+    <div class="lib-main">
     <div class="lib-header">
       <h1>Library <span style="color:#6c6c8e;font-weight:400;font-size:12px">promoted · moved, never copied</span></h1>
       <div class="lib-status" id="lib-status"></div>
     </div>
     <div class="lib-tags" id="lib-tags"></div>
     <div class="lib-filters" id="lib-filters">
-      <select id="lib-subject"><option value="">all subjects</option></select>
-      <select id="lib-shot"><option value="">all shots</option></select>
       <input id="lib-search" placeholder="search name, detail, tag…">
       <button class="ee-btn" id="lib-select">☐ Select</button>
     </div>
@@ -142,7 +193,6 @@ function panelHTML() {
       <button class="ee-btn" id="lib-set-new">＋ New set</button>
       <button class="ee-btn" id="lib-set-view">View set</button>
       <button class="ee-btn" id="lib-set-add" disabled>Add selected to set</button>
-      <button class="ee-btn" id="lib-set-meta" disabled>Meta for selected</button>
       <a class="ee-btn" id="lib-set-export" style="display:none">⬇ Export set</a>
       <span class="lib-status" id="lib-sel-count"></span>
     </div>
@@ -164,6 +214,8 @@ function panelHTML() {
     </div>
     <div class="lib-grid" id="lib-grid"></div>
     <div class="lib-foot"><button class="ee-btn" id="lib-more">Load more</button></div>
+    </div>
+  </div>
     <div class="lib-viewer" id="lib-viewer">
       <div class="bar">
         <span class="fname" id="libv-name"></span>
@@ -208,8 +260,14 @@ class LibraryView {
       setNew: panel.querySelector('#lib-set-new'),
       setView: panel.querySelector('#lib-set-view'),
       setAdd: panel.querySelector('#lib-set-add'),
-      setMeta: panel.querySelector('#lib-set-meta'),
       setExport: panel.querySelector('#lib-set-export'),
+      sideMetaStatus: panel.querySelector('#lib-side-meta-status'),
+      sideMetaSubject: panel.querySelector('#lib-side-meta-subject'),
+      sideMetaShot: panel.querySelector('#lib-side-meta-shot'),
+      sideMetaFigures: panel.querySelector('#lib-side-meta-figures'),
+      sideDetail: panel.querySelector('#lib-side-detail'),
+      sideDetailSave: panel.querySelector('#lib-side-detail-save'),
+      clearFilters: panel.querySelector('#lib-clear-filters'),
       selCount: panel.querySelector('#lib-sel-count'),
       dash: panel.querySelector('#lib-dash'),
       metaDlg: panel.querySelector('#lib-meta'),
@@ -253,8 +311,12 @@ class LibraryView {
       if (g.scrollTop + g.clientHeight >= g.scrollHeight - 1500) this.load();
     });
     this.el.more.addEventListener('click', () => this.load());
-    this.el.subject.addEventListener('change', () => { this.subject = this.el.subject.value; this.reload(); });
-    this.el.shot.addEventListener('change', () => { this.shot = this.el.shot.value; this.reload(); });
+    this.el.clearFilters.addEventListener('click', () => {
+      this.subject = ''; this.shot = ''; this.tag = '';
+      this.renderFilterChips();
+      this.reload();
+    });
+    this.el.sideDetailSave.addEventListener('click', () => this.applySideDetail());
     this.el.search.addEventListener('input', () => {
       clearTimeout(this._searchT);
       this._searchT = setTimeout(() => { this.q = this.el.search.value.trim(); this.reload(); }, 400);
@@ -263,7 +325,6 @@ class LibraryView {
     this.el.setNew.addEventListener('click', () => this.createSet());
     this.el.setView.addEventListener('click', () => this.toggleSetView());
     this.el.setAdd.addEventListener('click', () => this.addSelectedToSet());
-    this.el.setMeta.addEventListener('click', () => this.openMeta([...this.selected], null, true));
     this.el.setSel.addEventListener('change', () => { this.setId = this.el.setSel.value; this.updateSetBar(); });
     this.panel.querySelector('#libm-cancel').addEventListener('click', () => this.closeMeta());
     this.panel.querySelector('#libm-save').addEventListener('click', () => this.saveMeta());
@@ -349,14 +410,105 @@ class LibraryView {
   }
 
   renderMetaFilters(vocab) {
-    if (!vocab || this._metaFiltersDone) return;
-    this._metaFiltersDone = true;
-    for (const [sel, values] of [[this.el.subject, vocab.subjects], [this.el.shot, vocab.shots]]) {
+    if (vocab) this._vocab = vocab;
+    this.renderFilterChips();
+    this.renderSideMetaChips();
+  }
+
+  // Filter chips (side panel): tap to set, tap the active one again
+  // to clear. No dropdown, no separate Apply — a filter change is a
+  // genuine view change, so it reloads (with streaming, cleanly).
+  renderFilterChips() {
+    if (!this._vocab) return;
+    for (const [host, values, current, field] of [
+      [this.el.subject, this._vocab.subjects, this.subject, 'subject'],
+      [this.el.shot, this._vocab.shots, this.shot, 'shot']]) {
+      host.innerHTML = '';
       for (const v of values) {
-        const o = document.createElement('option');
-        o.value = v; o.textContent = v;
-        sel.appendChild(o);
+        const b = document.createElement('button');
+        b.className = 'lib-sidechip' + (current === v ? ' active' : '');
+        b.textContent = v;
+        b.addEventListener('click', () => {
+          this[field] = this[field] === v ? '' : v;
+          this.renderFilterChips();
+          this.reload();
+        });
+        host.appendChild(b);
       }
+    }
+  }
+
+  // Side-panel meta chips: the same tap-to-add / tap-again-to-remove
+  // pattern, applied to the current selection. A chip is active when
+  // every selected image already carries that value, dashed ("mixed")
+  // when only some do. Applying updates items and cells in place —
+  // never a grid reload, or the flicker fix would be undone.
+  renderSideMetaChips() {
+    if (!this._vocab) return;
+    const selItems = this.items.filter(i => this.selected.has(i.path));
+    this.el.sideMetaStatus.textContent = selItems.length
+      ? `${selItems.length} selected — tap a chip to set it on all of them, tap an active chip again to remove it.`
+      : 'Select images in the grid, then tap a chip below to set it on all of them. Tap an active chip again to remove it. No dropdowns, no dialog.';
+    const groups = [
+      [this.el.sideMetaSubject, this._vocab.subjects, 'subject'],
+      [this.el.sideMetaShot, this._vocab.shots, 'shot'],
+      [this.el.sideMetaFigures, this._vocab.figures || ['none', '1', '2', '3+'], 'figures'],
+    ];
+    for (const [host, values, field] of groups) {
+      host.innerHTML = '';
+      const vals = new Set(selItems.map(i => (i.meta || {})[field] || ''));
+      const common = vals.size === 1 ? [...vals][0] : '';
+      for (const v of values) {
+        const b = document.createElement('button');
+        b.className = 'lib-sidechip' +
+          (common === v ? ' active' : (vals.has(v) ? ' mixed' : ''));
+        b.textContent = v;
+        b.addEventListener('click', () => this.applySideMeta(field, common === v ? '' : v));
+        host.appendChild(b);
+      }
+    }
+  }
+
+  async applySideMeta(field, value) {
+    if (!this.selected.size) { this.toast('Select images first', true); return; }
+    const body = { paths: [...this.selected], subject: null, shot: null, figures: null, detail: null };
+    body[field] = value;
+    const r = await fetch('/api/library/meta/bulk', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) { this.toast('Meta save failed: ' + r.status, true); return; }
+    this.updateItemsMetaInPlace([...this.selected], { [field]: value });
+    this.renderSideMetaChips();
+  }
+
+  async applySideDetail() {
+    const detail = this.el.sideDetail.value.trim();
+    if (!this.selected.size) { this.toast('Select images first', true); return; }
+    if (!detail) { this.toast('Type a detail first', true); return; }
+    const r = await fetch('/api/library/meta/bulk', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: [...this.selected], subject: null, shot: null, figures: null, detail }) });
+    if (!r.ok) { this.toast('Meta save failed: ' + r.status, true); return; }
+    this.updateItemsMetaInPlace([...this.selected], { detail });
+    this.renderSideMetaChips();
+  }
+
+  updateItemsMetaInPlace(paths, patch) {
+    const set = new Set(paths);
+    for (const item of this.items) {
+      if (!set.has(item.path)) continue;
+      item.meta = { ...(item.meta || {}), ...patch };
+      const cell = [...this.el.grid.children].find(c => c.dataset.path === item.path);
+      if (!cell) continue;
+      const meta = item.meta;
+      const text = [meta.subject, meta.shot, meta.detail].filter(Boolean).join(' · ');
+      let chip = cell.querySelector('.meta-chip');
+      if (!text) { chip?.remove(); continue; }
+      if (!chip) {
+        chip = document.createElement('span');
+        chip.className = 'chip meta-chip';
+        cell.querySelector('.lib-chips')?.appendChild(chip);
+      }
+      chip.textContent = text;
     }
   }
 
@@ -410,7 +562,7 @@ class LibraryView {
     this.el.selCount.textContent = this.selected.size
       ? `${this.selected.size} selected` : '';
     this.el.setAdd.disabled = !this.selected.size;
-    this.el.setMeta.disabled = !this.selected.size;
+    this.renderSideMetaChips();
   }
 
   async loadSets() {
@@ -478,6 +630,7 @@ class LibraryView {
         (d.missing_count ? ` (${d.missing_count} missing from disk)` : '') +
         (d.status === 'locked' ? ' · 🔒 locked' : '');
       this.renderDash(d);
+      this.renderSideMetaChips();
     } catch (err) {
       this.el.status.textContent = 'Set load failed: ' + err.message;
     }
@@ -598,7 +751,7 @@ class LibraryView {
     const meta = item.meta || {};
     if (meta.subject || meta.shot) {
       const c = document.createElement('span');
-      c.className = 'chip';
+      c.className = 'chip meta-chip';
       c.textContent = [meta.subject, meta.shot, meta.detail].filter(Boolean).join(' · ');
       chips.appendChild(c);
     }

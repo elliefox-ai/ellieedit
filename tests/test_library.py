@@ -485,3 +485,21 @@ def test_gallery_style_streaming_regression():
                    "maybeTopUp", "dataset.src", "rootMargin"):
         assert needle in lib, needle
     assert "this.loading" in lib
+
+
+def test_side_panel_chips_not_dropdowns():
+    """2026-10-29 meta panel: filters and meta editing live in an
+    always-there side panel as tap-to-add / tap-again-to-remove
+    chips — not dropdown selects and not a dialog for the grid.
+    Applying a side-panel chip updates items/cells in place, never
+    a grid reload (flicker regression guard)."""
+    lib = (Path(__file__).parent.parent /
+           "frontend" / "js" / "modules" / "library.js").read_text()
+    for needle in ("lib-side", "lib-sidechip", "renderFilterChips",
+                   "renderSideMetaChips", "applySideMeta",
+                   "updateItemsMetaInPlace", "lib-side-meta-subject"):
+        assert needle in lib, needle
+    assert '<select id="lib-subject"' not in lib
+    assert '<select id="lib-shot"' not in lib
+    seg = lib[lib.index("async applySideMeta"):lib.index("async applySideDetail")]
+    assert "meta/bulk" in seg and "this.reload()" not in seg
