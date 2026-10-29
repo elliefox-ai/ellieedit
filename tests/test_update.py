@@ -453,3 +453,85 @@ def test_update_inpaint_frontend_wiring():
         assert needle in upd, needle
     fx = (REPO / "frontend" / "js" / "modules" / "foxden.js").read_text()
     assert "{ label: '✎ Update', target: 'update' }" in fx
+
+
+# ---------------------------------------------------------------------------
+# Update tab redesign (2026-10-29): comparer opt-in, mask overlay fix,
+# P0 bugs, EXIF orientation, stored-render warning.
+# ---------------------------------------------------------------------------
+
+def _rotated_jpeg_bytes():
+    """20x10 JPEG with EXIF orientation 6 (rotate 90 CW): displayed 10x20."""
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    im = Image.new("RGB", (20, 10), (10, 120, 200))
+    exif = Image.Exif()
+    exif[274] = 6
+    im.save(buf, "JPEG", exif=exif)
+    return buf.getvalue()
+
+
+def test_normalize_mask_exif_orientation():
+    import base64, io
+    from PIL import Image
+    src = _rotated_jpeg_bytes()
+    # Oriented source is 10x20; a mask painted on the displayed image is too.
+    buf = io.BytesIO()
+    Image.new("L", (10, 20), 255).save(buf, "PNG")
+    out = update_mod._normalize_mask(buf.getvalue(), src)
+    with Image.open(io.BytesIO(base64.b64decode(out))) as im:
+        assert im.size == (10, 20), im.size
+    # And the oriented source itself is 10x20, not the stored 20x10.
+    with Image.open(io.BytesIO(update_mod._oriented_png(src))) as im:
+        assert im.size == (10, 20), im.size
+
+
+def test_inpaint_uses_oriented_source(roots, client, monkeypatch):
+    import base64, io
+    from PIL import Image
+    groot, _lroot = roots
+    (groot / "src.jpg").write_bytes(_rotated_jpeg_bytes())
+    seen = []
+    def fake_inpaint(image_b64, mask_b64, prompt, denoise=0.45, seed=0, timeout=600):
+        seen.append(image_b64)
+        return _png_bytes()
+    monkeypatch.setattr(update_mod._comfy, "comfy_inpaint_klein", fake_inpaint)
+    r = client.post("/api/update/inpaint-async", json={
+        "path": "src.jpg", "prompt": "x", "mask_b64": _mask_b64(),
+        "random": False, "seed": 1})
+    assert r.status_code == 200, r.text
+    job = _poll_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    with Image.open(io.BytesIO(base64.b64decode(seen[0]))) as im:
+        assert im.size == (10, 20), im.size
+
+
+def test_store_update_render_failure_returns_none(monkeypatch):
+    # GALLERY_ROOT pointing at a file makes mkdir/write raise OSError.
+    monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", Path("/tmp"))
+    # Use a file path as the root via a tmp file instead: mkdir under a
+    # file raises NotADirectoryError, a subclass of OSError.
+    import tempfile, os
+    fd, fpath = tempfile.mkstemp()
+    os.close(fd)
+    try:
+        monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", Path(fpath))
+        assert update_mod._store_update_render(b"png") is None
+    finally:
+        os.unlink(fpath)
+
+
+def test_update_tab_redesign_frontend_wiring():
+    """Comparer opt-in/closed, luminance mask overlay, P0 fixes, cancel."""
+    upd = (REPO / "frontend" / "js" / "modules" / "update.js").read_text()
+    for needle in ('upd-compare', 'upd-cancel', 'upd-mask-undo',
+                   'upd-mask-opacity', 'upd-mask-show', 'compareOn',
+                   'this.cmpPct = 100', 'dataset.text',
+                   'luminance', 'maskHasWhite', 'jobCancelled',
+                   'job timed out after 15 minutes',
+                   'render could not be stored'):
+        assert needle in upd, needle
+    assert 'updateRunEnabled' not in upd, 'dead updateRunEnabled call remains'
+    assert "globalCompositeOperation = 'destination-in'" not in upd, \
+        'alpha-based mask overlay remains'

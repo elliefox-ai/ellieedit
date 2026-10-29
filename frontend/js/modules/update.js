@@ -61,6 +61,7 @@ function panelHTML() {
     .upd-mask-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
       margin-bottom: 6px; font-size: 11px; color: #8a8aaa; }
     .upd-mask-tools input[type=range] { vertical-align: middle; }
+    .upd-mask-tools .ee-btn.active { background: #3a2a5a; border-color: #b39ae0; color: #fff; }
     .upd-mask canvas { display: block; max-width: 100%; max-height: 240px;
       border: 1px solid #4a4a6c; cursor: crosshair; touch-action: none; }
   </style>
@@ -75,6 +76,7 @@ function panelHTML() {
         <input type="range" id="upd-denoise" min="0.2" max="0.8" step="0.05" value="0.45">
         <span id="upd-denoise-val">0.45</span></label>
       <button class="ee-btn primary" data-act="upd-run" id="upd-run" disabled>▶ Run</button>
+      <button class="ee-btn" data-act="upd-cancel" id="upd-cancel" disabled>✕ Cancel</button>
       <span class="upd-status" id="upd-status">send an image from the Gallery lightbox (✎ Update)</span>
     </div>
     <div class="upd-prompt-wrap">
@@ -91,6 +93,10 @@ function panelHTML() {
         <button class="ee-btn" data-act="upd-mask-erase">🧽 Erase</button>
         <label>Brush <input type="range" id="upd-brush" min="4" max="120" value="40"></label>
         <button class="ee-btn" data-act="upd-mask-clear">Clear</button>
+        <button class="ee-btn" data-act="upd-mask-undo" id="upd-mask-undo" disabled>↩ Undo</button>
+        <label>Overlay <input type="range" id="upd-mask-opacity" min="0" max="100" value="55"></label>
+        <label><input type="checkbox" id="upd-mask-show" checked> Show mask</label>
+        <span id="upd-mask-source"></span>
         <span>White = regenerate. Paint the region to change; everything else stays pixel-exact.</span>
       </div>
       <canvas id="upd-mask-canvas"></canvas>
@@ -110,6 +116,7 @@ function panelHTML() {
       </div>
     </div>
     <div class="upd-actions">
+      <button class="ee-btn" data-act="upd-compare" id="upd-compare" disabled title="Show the before/after divider, starting closed on the new render">⇔ Compare</button>
       <button class="ee-btn" data-act="upd-swap" title="Accept current render as the next edit's source">Swap</button>
       <button class="ee-btn" data-act="upd-revert">Revert</button>
       <button class="ee-btn" data-act="upd-revert-orig">Revert to original</button>
@@ -124,10 +131,11 @@ class UpdateView {
     panel.innerHTML = panelHTML();
     this.panel = panel;
     this.el = {};
-    for (const id of ['preset', 'seed', 'random', 'run', 'status', 'prompt',
+    for (const id of ['preset', 'seed', 'random', 'run', 'cancel', 'status', 'prompt',
       'saved', 'stage', 'empty', 'cmp', 'img-a', 'wrap-b', 'img-b', 'div',
-      'tag-a', 'tag-b', 'pos', 'save', 'denoise', 'denoise-lbl',
-      'denoise-val', 'mask', 'mask-canvas', 'brush']) {
+      'tag-a', 'tag-b', 'pos', 'save', 'compare', 'denoise', 'denoise-lbl',
+      'denoise-val', 'mask', 'mask-canvas', 'mask-undo', 'mask-opacity',
+      'mask-show', 'mask-source', 'brush']) {
       this.el[id.replace(/-(\w)/g, (_, c) => c.toUpperCase())] =
         panel.querySelector(`#upd-${id}`);
     }
@@ -140,7 +148,12 @@ class UpdateView {
     this.maskPainted = false;   // any white stroke laid down yet
     this.maskMode = 'paint';
     this.maskBrush = 40;
-    this.cmpPct = 50;           // comparer divider, percent from left
+    this.maskOpacity = 0.55;
+    this.maskShow = true;
+    this.maskUndoStack = [];    // mask-canvas data URLs, one per stroke start
+    this.jobCancelled = false;
+    this.compareOn = false;    // comparer is opt-in, never shown by default
+    this.cmpPct = 100;          // when opened, start "closed" on the new render
     window.addEventListener('resize', () => this.fitComparer());
 
     this.loadPresets();
@@ -173,7 +186,7 @@ class UpdateView {
       mi.value = '__masked_inpaint'; mi.textContent = '🎭 Masked inpaint (Klein)';
       mi.title = 'Regenerate only the painted region, with a prompt. Unpainted pixels stay pixel-exact.';
       sel.appendChild(mi);
-      this.updateRunEnabled();
+      this.updateButtons();
     } catch (err) {
       this.el.status.textContent = 'preset load failed: ' + err.message;
     }
@@ -189,6 +202,9 @@ class UpdateView {
       for (const p of data.prompts || []) {
         const o = document.createElement('option');
         o.value = p.name; o.textContent = p.name; o.title = p.text.slice(0, 120);
+        // Full text lives in dataset.text: title is only a tooltip, and
+        // copying title into the prompt box truncated prompts at 120 chars.
+        o.dataset.text = p.text;
         sel.appendChild(o);
       }
       if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
@@ -212,6 +228,7 @@ class UpdateView {
     const srcEntry = this.stack && source(this.stack);
     if (!srcEntry) return;
     this.maskPainted = false;
+    this.maskUndoStack = [];
     const img = new Image();
     img.onload = () => {
       this.maskImg = img;
@@ -220,9 +237,65 @@ class UpdateView {
       mc.getContext('2d').fillStyle = '#000';
       mc.getContext('2d').fillRect(0, 0, mc.width, mc.height);
       this.maskCanvas = mc;
+      this.setMaskTool(this.maskMode);
+      this.updateMaskSourceLabel();
       this.drawMaskView();
     };
     img.src = srcEntry.url;
+  }
+
+  // The mask belongs to the source entry, not the viewed entry: say so in
+  // the panel, so painting after a Revert is not mistaken for painting
+  // on the viewed image. Swap to make the viewed image the source.
+  updateMaskSourceLabel() {
+    if (!this.el.maskSource) return;
+    const s = this.stack;
+    this.el.maskSource.textContent = s
+      ? `Mask applies to source entry ${s.sourceIdx + 1} of ${s.entries.length}.`
+      : '';
+  }
+
+  // True only if some mask pixel is actually white. A stroke counter is
+  // not enough: erasing everything must count as an empty mask, or the
+  // backend rejects it after a wasted queue.
+  maskHasWhite() {
+    const mc = this.maskCanvas;
+    if (!mc) return false;
+    const data = mc.getContext('2d').getImageData(0, 0, mc.width, mc.height).data;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] > 0) return true;
+    }
+    return false;
+  }
+
+  setMaskTool(mode) {
+    this.maskMode = mode;
+    for (const act of ['upd-mask-paint', 'upd-mask-erase']) {
+      const btn = this.panel.querySelector(`[data-act="${act}"]`);
+      if (btn) btn.classList.toggle('active', mode === (act.endsWith('paint') ? 'paint' : 'erase'));
+    }
+  }
+
+  pushMaskUndo() {
+    if (!this.maskCanvas) return;
+    this.maskUndoStack.push(this.maskCanvas.toDataURL('image/png'));
+    if (this.maskUndoStack.length > 20) this.maskUndoStack.shift();
+    if (this.el.maskUndo) this.el.maskUndo.disabled = false;
+  }
+
+  restoreMaskUndo() {
+    const url = this.maskUndoStack.pop();
+    if (!url || !this.maskCanvas) return;
+    const img = new Image();
+    img.onload = () => {
+      const ctx = this.maskCanvas.getContext('2d');
+      ctx.clearRect(0, 0, this.maskCanvas.width, this.maskCanvas.height);
+      ctx.drawImage(img, 0, 0);
+      this.maskPainted = this.maskHasWhite();
+      if (this.el.maskUndo) this.el.maskUndo.disabled = this.maskUndoStack.length === 0;
+      this.drawMaskView();
+    };
+    img.src = url;
   }
 
   drawMaskView() {
@@ -233,15 +306,24 @@ class UpdateView {
     vc.width = vw; vc.height = vh;
     const ctx = vc.getContext('2d');
     ctx.drawImage(img, 0, 0, vw, vh);
-    // Red overlay of the painted (white) regions: red canvas, destination-in
-    // with the mask, drawn translucent over the source.
+    if (!this.maskShow) return;
+    // Red overlay of the painted (white) regions, built from luminance:
+    // an alpha-keyed composite, which the old code used, keeps
+    // black pixels too (they are fully opaque), so the whole image
+    // tinted red. Here alpha = mask brightness, so unpainted black
+    // areas stay transparent and only painted regions go red.
     const ov = document.createElement('canvas');
     ov.width = vw; ov.height = vh;
     const octx = ov.getContext('2d');
-    octx.fillStyle = '#ff3b30'; octx.fillRect(0, 0, vw, vh);
-    octx.globalCompositeOperation = 'destination-in';
     octx.drawImage(mc, 0, 0, vw, vh);
-    ctx.globalAlpha = 0.55;
+    const imageData = octx.getImageData(0, 0, vw, vh);
+    const d = imageData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const luminance = d[i];  // mask is grayscale: black keep, white regen
+      d[i] = 255; d[i + 1] = 59; d[i + 2] = 48; d[i + 3] = luminance;
+    }
+    octx.putImageData(imageData, 0, 0);
+    ctx.globalAlpha = this.maskOpacity;
     ctx.drawImage(ov, 0, 0);
     ctx.globalAlpha = 1;
   }
@@ -261,7 +343,8 @@ class UpdateView {
     else { ctx.moveTo(x, y); }
     ctx.lineTo(x, y); ctx.stroke();
     this._lastMaskPt = { x, y };
-    this.maskPainted = true;
+    // Erasing everything must clear the painted flag, not leave it true.
+    this.maskPainted = this.maskMode === 'paint' ? true : this.maskHasWhite();
     this.drawMaskView();
   }
 
@@ -276,6 +359,7 @@ class UpdateView {
       const blob = await r.blob();
       const objUrl = URL.createObjectURL(blob);
       this.stack = createStack({ url: objUrl, name: name || 'image.png', path: path || '' });
+      this.compareOn = false; this.cmpPct = 100;
       this.showCurrent();
       if (this.maskedMode) this.initMaskForSource();
       this.el.status.textContent = `source: ${this.stack.entries[0].name}`;
@@ -299,11 +383,13 @@ class UpdateView {
     if (!useRandom) this.el.seed.value = String(seed);
     const prompt = this.el.prompt.value;
     this.running = true;
+    this.jobCancelled = false;
     this.el.run.disabled = true;
+    this.updateButtons();
     try {
       let url, body;
       if (this.maskedMode) {
-        if (!this.maskPainted || !this.maskCanvas) {
+        if (!this.maskCanvas || !this.maskHasWhite()) {
           throw new Error('paint a region to regenerate first');
         }
         url = '/api/update/inpaint-async';
@@ -331,8 +417,13 @@ class UpdateView {
         path: data.render_path || '',
         recipe: data.recipe || preset, masked: !!data.masked,
       });
+      // A new render starts as a single image, not a split view. The
+      // user opens Compare deliberately, and it starts closed (100%).
+      this.compareOn = false; this.cmpPct = 100;
       this.showCurrent();
-      this.el.status.textContent = `render done (seed ${data.seed})`;
+      this.el.status.textContent = data.render_path
+        ? `render done (seed ${data.seed})`
+        : `render done (seed ${data.seed}) — warning: render could not be stored, Save is unavailable`;
     } catch (err) {
       this.el.status.textContent = 'run failed: ' + err.message;
     }
@@ -342,8 +433,18 @@ class UpdateView {
   }
 
   async pollJob(jobId) {
+    // Cancel stops polling (the server job, if any, may still finish in
+    // the background — there is no server-side cancel). Timeout is 15
+    // minutes, matching the old synchronous run ceiling, instead of
+    // polling forever on a hung Comfy job.
+    const started = Date.now();
     for (;;) {
+      if (this.jobCancelled) throw new Error('job cancelled');
+      if (Date.now() - started > 15 * 60 * 1000) {
+        throw new Error('job timed out after 15 minutes');
+      }
       await new Promise(res => setTimeout(res, 2000));
+      if (this.jobCancelled) throw new Error('job cancelled');
       const r = await fetch(`/api/update/jobs/${jobId}`);
       if (!r.ok) throw new Error((await r.json()).detail || r.status);
       const job = await r.json();
@@ -410,10 +511,14 @@ class UpdateView {
     const s = this.stack;
     if (!s) return;
     const cur = current(s), prev = compareEntry(s);
+    // No distinct previous entry at the original: there is nothing to
+    // compare, so the comparer stays off regardless of its last state.
+    if (s.idx === 0) this.compareOn = false;
     this.el.empty.style.display = 'none';
     this.el.cmp.style.display = 'block';
     this.el.imgA.src = prev.url;
     this.el.imgB.src = cur.url;
+    this.updateMaskSourceLabel();
     // ONE container sized to the source image (2026-10-09f): both layers
     // fill it inset:0 with object-fit:contain, so same-size sources yield
     // pixel-identical layer boxes — the divider only moves the clip.
@@ -439,19 +544,33 @@ class UpdateView {
     // Clip-only divider (2026-10-09f): the top layer keeps its full box and
     // is clipped by inset() from the right — no width resize, so the layers
     // never reflow or squash as the divider moves.
-    this.el.wrapB.style.clipPath = `inset(0 ${100 - this.cmpPct}% 0 0)`;
+    // Single-view mode (compare off): the top layer is unclipped, so the
+    // stage shows only the current image, and the divider/tags hide.
+    const s = this.stack;
+    const compare = !!(this.compareOn && s && s.idx > 0);
+    this.el.wrapB.style.clipPath = compare
+      ? `inset(0 ${100 - this.cmpPct}% 0 0)` : 'inset(0 0 0 0)';
+    this.el.div.style.display = compare ? '' : 'none';
     this.el.div.style.left = this.cmpPct + '%';
     this.el.div.setAttribute('aria-valuenow', String(Math.round(this.cmpPct)));
-    const s = this.stack;
+    this.el.tagA.style.display = compare ? '' : 'none';
+    this.el.tagB.style.display = compare ? '' : 'none';
     this.el.tagA.textContent = s && s.idx > 0 ? 'previous' : 'original';
     this.el.tagB.textContent = s && current(s) ? current(s).name : 'current';
+    if (this.el.compare) {
+      this.el.compare.disabled = !s || s.idx === 0;
+      this.el.compare.textContent = compare ? '✕ Close compare' : '⇔ Compare';
+      this.el.compare.setAttribute('aria-pressed', compare ? 'true' : 'false');
+    }
   }
 
   updateButtons() {
     const s = this.stack;
     this.el.run.disabled = this.running || !s || !this.el.preset.value;
+    if (this.el.cancel) this.el.cancel.disabled = !this.running;
     this.el.save.disabled = !s || !saveable(s);
     this.el.pos.textContent = s ? `entry ${s.idx + 1}/${s.entries.length} · source ${s.sourceIdx + 1}` : 'no stack';
+    this.syncComparer();
   }
 
   // ---- events --------------------------------------------------------------
@@ -465,23 +584,41 @@ class UpdateView {
     this.el.brush.addEventListener('input', () => {
       this.maskBrush = parseInt(this.el.brush.value, 10) || 40;
     });
+    if (this.el.maskOpacity) {
+      this.el.maskOpacity.addEventListener('input', () => {
+        this.maskOpacity = (parseInt(this.el.maskOpacity.value, 10) || 0) / 100;
+        this.drawMaskView();
+      });
+    }
+    if (this.el.maskShow) {
+      this.el.maskShow.addEventListener('change', () => {
+        this.maskShow = this.el.maskShow.checked;
+        this.drawMaskView();
+      });
+    }
     this.panel.querySelector('[data-act="upd-mask-paint"]')
-      .addEventListener('click', () => { this.maskMode = 'paint'; });
+      .addEventListener('click', () => { this.setMaskTool('paint'); });
     this.panel.querySelector('[data-act="upd-mask-erase"]')
-      .addEventListener('click', () => { this.maskMode = 'erase'; });
+      .addEventListener('click', () => { this.setMaskTool('erase'); });
     this.panel.querySelector('[data-act="upd-mask-clear"]')
       .addEventListener('click', () => {
         if (!this.maskCanvas) return;
+        this.pushMaskUndo();
         const ctx = this.maskCanvas.getContext('2d');
         ctx.fillStyle = '#000';
         ctx.fillRect(0, 0, this.maskCanvas.width, this.maskCanvas.height);
         this.maskPainted = false;
         this.drawMaskView();
       });
+    if (this.el.maskUndo) {
+      this.el.maskUndo.addEventListener('click', () => this.restoreMaskUndo());
+    }
     const mvc = this.el.maskCanvas;
     let masking = false;
     mvc.addEventListener('pointerdown', e => {
+      if (!this.maskCanvas) { this.el.status.textContent = 'load an image first'; return; }
       masking = true; this._lastMaskPt = null;
+      this.pushMaskUndo();
       mvc.setPointerCapture(e.pointerId);
       this.maskStroke(e);
     });
@@ -490,12 +627,29 @@ class UpdateView {
     mvc.addEventListener('pointerup', endMask);
     mvc.addEventListener('pointercancel', endMask);
     this.el.run.addEventListener('click', () => this.run());
+    if (this.el.cancel) {
+      this.el.cancel.addEventListener('click', () => { this.jobCancelled = true; });
+    }
+    if (this.el.compare) {
+      this.el.compare.addEventListener('click', () => {
+        if (!this.stack || this.stack.idx === 0) return;
+        this.compareOn = !this.compareOn;
+        if (this.compareOn) this.cmpPct = 100;  // open closed, on the new render
+        this.syncComparer();
+      });
+    }
+    // Seed box is meaningless while "random" is checked: disable it so the
+    // displayed seed is not mistaken for a reusable fixed seed.
+    const syncSeedBox = () => { this.el.seed.disabled = this.el.random.checked; };
+    this.el.random.addEventListener('change', syncSeedBox);
+    syncSeedBox();
     this.el.save.addEventListener('click', () => this.save());
     this.el.saved.addEventListener('change', () => {
       const name = this.el.saved.value;
       if (!name) return;
       const opt = this.el.saved.selectedOptions[0];
-      if (opt && opt.title) this.el.prompt.value = opt.title;
+      if (opt && opt.dataset.text) this.el.prompt.value = opt.dataset.text;
+      else if (opt && opt.title) this.el.prompt.value = opt.title;
     });
     this.panel.querySelector('[data-act="upd-save-prompt"]')
       .addEventListener('click', () => this.savePrompt());
@@ -507,7 +661,7 @@ class UpdateView {
         this.stack = swap(this.stack);
         this.el.status.textContent = `source set to entry ${this.stack.sourceIdx + 1}`;
         if (this.maskedMode) this.initMaskForSource();  // mask belongs to the source
-        this.updateButtons();
+        this.showCurrent();
       });
     this.panel.querySelector('[data-act="upd-revert"]')
       .addEventListener('click', () => {
@@ -533,6 +687,7 @@ class UpdateView {
     };
     let dragging = false;
     stage.addEventListener('pointerdown', e => {
+      if (!this.compareOn) return;  // single view is not draggable
       dragging = true;
       stage.setPointerCapture(e.pointerId);
       drag(e);
@@ -545,6 +700,7 @@ class UpdateView {
     // coarse steps. The divider is a pure overlay — keys change nothing but
     // the clip position.
     this.el.div.addEventListener('keydown', e => {
+      if (!this.compareOn) return;
       const step = e.shiftKey ? 10 : 2;
       if (e.key === 'ArrowLeft') {
         this.cmpPct = Math.max(0, this.cmpPct - step);

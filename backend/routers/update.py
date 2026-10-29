@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel
 
 from .. import comfy as _comfy
@@ -473,12 +473,29 @@ def _decode_mask(mask_b64: str) -> bytes:
     return raw
 
 
+def _oriented_png(src_png: bytes) -> bytes:
+    """Source bytes with EXIF orientation applied, re-encoded as PNG.
+
+    Browsers auto-rotate displayed JPEGs by EXIF; PIL does not. The
+    mask canvas is sized from the displayed (rotated) image, so an
+    unrotated source made _normalize_mask measure the wrong size and
+    the painted region land rotated/offset. Transposing here — before
+    mask sizing, the Comfy upload, and composite_back — keeps all three
+    in the displayed orientation. No-op for images without EXIF.
+    """
+    with Image.open(io.BytesIO(src_png)) as im:
+        oriented = ImageOps.exif_transpose(im)
+        buf = io.BytesIO()
+        oriented.save(buf, "PNG")
+        return buf.getvalue()
+
+
 def _normalize_mask(mask_raw: bytes, src_png: bytes) -> str:
     """Mask to source size (BILINEAR), grayscale, base64. Raises 400 when
     the mask is all black — nothing painted means nothing to regenerate,
     and a no-op Comfy run would burn a generation for nothing."""
     with Image.open(io.BytesIO(src_png)) as im:
-        size = im.size
+        size = ImageOps.exif_transpose(im).size
     with Image.open(io.BytesIO(mask_raw)) as im:
         mask = im.convert("L")
     if mask.size != size:
@@ -502,13 +519,16 @@ def _store_update_render(png: bytes) -> str | None:
         name = f"inpaint-{uuid.uuid4().hex[:10]}.png"
         (d / name).write_bytes(png)
         return f"ellieedit_tmp/update/{name}"
-    except OSError:
+    except OSError as e:
+        log.warning("[update inpaint] render store failed: %s", e)
         return None
 
 
 def _execute_inpaint(body: InpaintBody) -> dict:
     src = resolve_source(body.path)
-    src_png = src.read_bytes()
+    # EXIF orientation applied once, upstream of mask sizing (which
+    # also transposes) and the Comfy upload, so all three agree.
+    src_png = _oriented_png(src.read_bytes())
     mask_b64 = _normalize_mask(_decode_mask(body.mask_b64), src_png)
     seed = random.getrandbits(48) if (body.random or body.seed is None) else int(body.seed)
     denoise = clamp_inpaint_denoise(body.denoise)
