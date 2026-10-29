@@ -12,117 +12,138 @@ import {
 function panelHTML() {
   return `
   <style>
-    .upd-bar { padding: 8px 16px; background: #161628; border-bottom: 1px solid #2a2a44;
-      display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-    .upd-bar label { font-size: 12px; color: #8a8aaa; }
-    .upd-bar select, .upd-bar input[type=number] {
+    .upd-layout { display: flex; height: 100%; min-height: 0; }
+    .upd-side { width: 300px; flex: 0 0 300px; overflow-y: auto; background: #12121f;
+      border-right: 1px solid #2a2a44; padding: 12px; display: flex;
+      flex-direction: column; gap: 18px; }
+    .upd-sec { display: flex; flex-direction: column; gap: 8px; }
+    .upd-sec h4 { margin: 0; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+      color: #8a8aaa; font-weight: 600; }
+    .upd-side label { font-size: 12px; color: #8a8aaa; }
+    .upd-side select, .upd-side input[type=number], .upd-side input[type=text] {
       background: #1d1d33; color: #e0e0f0; border: 1px solid #4a4a6c;
-      border-radius: 4px; padding: 7px 8px; font-size: 12px; min-height: 34px; }
-    #upd-preset { max-width: 280px; }
-    #upd-seed { width: 150px; }
-    .upd-seedbox { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #8a8aaa; }
-    .upd-status { font-size: 11px; color: #6c6c8e; flex: 1; min-width: 120px; }
-    .upd-prompt-wrap { padding: 8px 16px; background: #12121f; border-bottom: 1px solid #2a2a44;
-      display: flex; gap: 8px; align-items: flex-start; }
-    #upd-prompt { flex: 1; min-height: 64px; max-height: 140px; resize: vertical;
-      background: #1d1d33; color: #e0e0f0; border: 1px solid #4a4a6c;
+      border-radius: 4px; padding: 7px 8px; font-size: 12px; min-height: 34px; width: 100%;
+      box-sizing: border-box; }
+    .upd-side input[type=range] { width: 100%; }
+    .upd-row { display: flex; gap: 8px; align-items: center; }
+    .upd-row .ee-btn { flex: 1; }
+    .upd-row .ee-btn.primary { flex: 2; }
+    .upd-seedbox { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #8a8aaa;
+      white-space: nowrap; }
+    .upd-status { font-size: 11px; color: #6c6c8e; }
+    #upd-prompt { min-height: 64px; max-height: 140px; resize: vertical; width: 100%;
+      box-sizing: border-box; background: #1d1d33; color: #e0e0f0; border: 1px solid #4a4a6c;
       border-radius: 4px; padding: 8px; font-size: 12px; font-family: inherit; }
-    .upd-prompt-side { display: flex; flex-direction: column; gap: 6px; }
-    .upd-prompt-side select { background: #1d1d33; color: #e0e0f0; border: 1px solid #4a4a6c;
-      border-radius: 4px; padding: 6px; font-size: 11px; max-width: 180px; min-height: 34px; }
+    .upd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
     .upd-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
       padding: 12px; position: relative; overflow: hidden; }
     .cmp { position: relative; max-width: 100%; max-height: 100%;
       display: none; touch-action: none; user-select: none; -webkit-user-select: none; }
-    /* Single-box geometry (2026-10-09f): ONE container sized by JS to the
-     * source image's aspect ratio; BOTH layers absolute inset:0 with
-     * object-fit:contain — natural sizes never lay the images out
-     * side-by-side, so identical sources produce pixel-identical layer
-     * boxes and the divider drag only ever moves the clip. */
     .cmp img { display: block; position: absolute; inset: 0; width: 100%;
       height: 100%; max-width: none; max-height: none; object-fit: contain; }
     .cmp .cmp-b { position: absolute; inset: 0; overflow: hidden; }
     .cmp .cmp-b img { max-height: none; height: 100%; width: 100%; }
     .cmp .cmp-div { position: absolute; top: 0; bottom: 0; width: 3px; background: #7a6aaa;
-      cursor: ew-resize; outline: none; }
+      cursor: ew-resize; outline: none; z-index: 4; }
     .cmp .cmp-div:focus-visible { background: #b39ae0; }
     .cmp .cmp-div::after { content: '⇔'; position: absolute; top: 50%; left: 50%;
       transform: translate(-50%,-50%); background: #7a6aaa; color: #fff; border-radius: 50%;
       width: 34px; height: 34px; line-height: 34px; text-align: center; font-size: 15px; }
     .cmp .cmp-tag { position: absolute; top: 6px; font-size: 10px; background: rgba(0,0,0,0.6);
-      padding: 2px 8px; border-radius: 8px; color: #b0b0d0; }
+      padding: 2px 8px; border-radius: 8px; color: #b0b0d0; z-index: 3; }
     .cmp .cmp-tag.a { left: 6px; } .cmp .cmp-tag.b { right: 6px; }
     .upd-empty { color: #6c6c8e; font-size: 13px; text-align: center; max-width: 480px; }
-    .upd-actions { padding: 10px 16px; background: #12121f; border-top: 1px solid #2a2a44;
-      display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .upd-actions .ee-btn { min-height: 44px; }
-    .upd-actions .stackpos { font-size: 11px; color: #8a8aaa; flex: 1; text-align: center; }
-    .upd-mask { padding: 8px 16px; background: #12121f; border-bottom: 1px solid #2a2a44; }
-    .upd-mask-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-      margin-bottom: 6px; font-size: 11px; color: #8a8aaa; }
-    .upd-mask-tools input[type=range] { vertical-align: middle; }
+    .upd-stage-mask { position: absolute; z-index: 5; display: none;
+      cursor: crosshair; touch-action: none; border: 1px solid rgba(122,106,170,0.5); }
+    .upd-mask-tools { display: flex; flex-direction: column; gap: 8px;
+      font-size: 11px; color: #8a8aaa; }
     .upd-mask-tools .ee-btn.active { background: #3a2a5a; border-color: #b39ae0; color: #fff; }
-    .upd-mask canvas { display: block; max-width: 100%; max-height: 240px;
-      border: 1px solid #4a4a6c; cursor: crosshair; touch-action: none; }
+    .upd-caption { font-size: 11px; color: #6c6c8e; line-height: 1.4; }
+    .upd-stack-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .upd-stack-grid .ee-btn { min-height: 44px; }
+    .stackpos { font-size: 11px; color: #8a8aaa; text-align: center; }
+    @media (max-width: 900px) {
+      .upd-layout { flex-direction: column; }
+      .upd-side { width: auto; flex: 0 0 auto; max-height: 46%; border-right: none;
+        border-bottom: 1px solid #2a2a44; }
+    }
   </style>
-  <div style="display:flex;flex-direction:column;height:100%">
-    <div class="upd-bar">
-      <label>Preset</label>
-      <select id="upd-preset"><option value="">loading…</option></select>
-      <label>Seed</label>
-      <input type="number" id="upd-seed" value="0">
-      <span class="upd-seedbox"><input type="checkbox" id="upd-random" checked> random</span>
-      <label id="upd-denoise-lbl" style="display:none">Denoise
-        <input type="range" id="upd-denoise" min="0.2" max="0.8" step="0.05" value="0.45">
-        <span id="upd-denoise-val">0.45</span></label>
-      <button class="ee-btn primary" data-act="upd-run" id="upd-run" disabled>▶ Run</button>
-      <button class="ee-btn" data-act="upd-cancel" id="upd-cancel" disabled>✕ Cancel</button>
-      <span class="upd-status" id="upd-status">send an image from the Gallery lightbox (✎ Update)</span>
-    </div>
-    <div class="upd-prompt-wrap">
-      <textarea id="upd-prompt" placeholder="prompt for the transform…"></textarea>
-      <div class="upd-prompt-side">
+  <div class="upd-layout">
+    <aside class="upd-side">
+      <section class="upd-sec">
+        <h4>Run</h4>
+        <label>Preset
+          <select id="upd-preset"><option value="">loading…</option></select></label>
+        <div class="upd-row">
+          <label style="flex:1">Seed
+            <input type="number" id="upd-seed" value="0"></label>
+          <span class="upd-seedbox"><input type="checkbox" id="upd-random" checked> random</span>
+        </div>
+        <label id="upd-denoise-lbl" style="display:none">Denoise
+          <input type="range" id="upd-denoise" min="0.2" max="0.8" step="0.05" value="0.45">
+          <span id="upd-denoise-val">0.45</span></label>
+        <div class="upd-row">
+          <button class="ee-btn primary" data-act="upd-run" id="upd-run" disabled>▶ Run</button>
+          <button class="ee-btn" data-act="upd-cancel" id="upd-cancel" disabled>✕ Cancel</button>
+        </div>
+        <span class="upd-status" id="upd-status">send an image from the Gallery lightbox (✎ Update)</span>
+      </section>
+      <section class="upd-sec">
+        <h4>Prompt</h4>
+        <textarea id="upd-prompt" placeholder="prompt for the transform…"></textarea>
         <select id="upd-saved"><option value="">saved prompts…</option></select>
-        <button class="ee-btn" data-act="upd-save-prompt" title="Save current prompt">💾 Save</button>
-        <button class="ee-btn" data-act="upd-del-prompt" title="Delete selected saved prompt">🗑</button>
+        <div class="upd-row">
+          <button class="ee-btn" data-act="upd-save-prompt" title="Save current prompt">💾 Save</button>
+          <button class="ee-btn" data-act="upd-del-prompt" title="Delete selected saved prompt">🗑</button>
+        </div>
+      </section>
+      <section class="upd-sec upd-mask" id="upd-mask" style="display:none">
+        <h4>Mask — paint on the stage image</h4>
+        <div class="upd-mask-tools">
+          <div class="upd-row">
+            <button class="ee-btn" data-act="upd-mask-paint">🖌 Paint</button>
+            <button class="ee-btn" data-act="upd-mask-erase">🧽 Erase</button>
+          </div>
+          <label>Brush <input type="range" id="upd-brush" min="4" max="120" value="40"></label>
+          <label>Overlay <input type="range" id="upd-mask-opacity" min="0" max="100" value="55"></label>
+          <label><input type="checkbox" id="upd-mask-show" checked> Show mask</label>
+          <div class="upd-row">
+            <button class="ee-btn" data-act="upd-mask-clear">Clear</button>
+            <button class="ee-btn" data-act="upd-mask-undo" id="upd-mask-undo" disabled>↩ Undo</button>
+          </div>
+          <span id="upd-mask-source"></span>
+          <span class="upd-caption" title="White = regenerate. Paint the region to change; everything else stays pixel-exact.">White = regenerate. Paint on the stage image; everything else stays pixel-exact.</span>
+        </div>
+      </section>
+      <section class="upd-sec">
+        <h4>Versions</h4>
+        <div class="upd-stack-grid">
+          <button class="ee-btn" data-act="upd-compare" id="upd-compare" disabled title="Show the before/after divider, starting closed on the new render">⇔ Compare</button>
+          <button class="ee-btn" data-act="upd-swap" title="Accept current render as the next edit's source">Swap</button>
+          <button class="ee-btn" data-act="upd-revert">Revert</button>
+          <button class="ee-btn" data-act="upd-revert-orig">Revert to original</button>
+        </div>
+        <span class="stackpos" id="upd-pos">no stack</span>
+        <button class="ee-btn primary" data-act="upd-save" id="upd-save" disabled>⬆ Save to Library</button>
+      </section>
+    </aside>
+    <main class="upd-main">
+      <div class="upd-stage" id="upd-stage">
+        <div class="upd-empty" id="upd-empty">
+          No image loaded.<br>Open the Gallery, tap an image, then <b>✎ Update</b>
+          to start a version stack here.</div>
+        <div class="cmp" id="upd-cmp">
+          <img id="upd-img-a" alt="previous">
+          <div class="cmp-b" id="upd-wrap-b"><img id="upd-img-b" alt="current"></div>
+          <div class="cmp-div" id="upd-div" tabindex="0" role="slider"
+            aria-label="before/after divider" aria-valuemin="0" aria-valuemax="100"
+            aria-valuenow="50"></div>
+          <span class="cmp-tag a" id="upd-tag-a">before</span>
+          <span class="cmp-tag b" id="upd-tag-b">after</span>
+        </div>
+        <canvas id="upd-mask-canvas" class="upd-stage-mask"></canvas>
       </div>
-    </div>
-    <div class="upd-mask" id="upd-mask" style="display:none">
-      <div class="upd-mask-tools">
-        <button class="ee-btn" data-act="upd-mask-paint">🖌 Paint</button>
-        <button class="ee-btn" data-act="upd-mask-erase">🧽 Erase</button>
-        <label>Brush <input type="range" id="upd-brush" min="4" max="120" value="40"></label>
-        <button class="ee-btn" data-act="upd-mask-clear">Clear</button>
-        <button class="ee-btn" data-act="upd-mask-undo" id="upd-mask-undo" disabled>↩ Undo</button>
-        <label>Overlay <input type="range" id="upd-mask-opacity" min="0" max="100" value="55"></label>
-        <label><input type="checkbox" id="upd-mask-show" checked> Show mask</label>
-        <span id="upd-mask-source"></span>
-        <span>White = regenerate. Paint the region to change; everything else stays pixel-exact.</span>
-      </div>
-      <canvas id="upd-mask-canvas"></canvas>
-    </div>
-    <div class="upd-stage" id="upd-stage">
-      <div class="upd-empty" id="upd-empty">
-        No image loaded.<br>Open the Gallery, tap an image, then <b>✎ Update</b>
-        to start a version stack here.</div>
-      <div class="cmp" id="upd-cmp">
-        <img id="upd-img-a" alt="previous">
-        <div class="cmp-b" id="upd-wrap-b"><img id="upd-img-b" alt="current"></div>
-        <div class="cmp-div" id="upd-div" tabindex="0" role="slider"
-          aria-label="before/after divider" aria-valuemin="0" aria-valuemax="100"
-          aria-valuenow="50"></div>
-        <span class="cmp-tag a" id="upd-tag-a">before</span>
-        <span class="cmp-tag b" id="upd-tag-b">after</span>
-      </div>
-    </div>
-    <div class="upd-actions">
-      <button class="ee-btn" data-act="upd-compare" id="upd-compare" disabled title="Show the before/after divider, starting closed on the new render">⇔ Compare</button>
-      <button class="ee-btn" data-act="upd-swap" title="Accept current render as the next edit's source">Swap</button>
-      <button class="ee-btn" data-act="upd-revert">Revert</button>
-      <button class="ee-btn" data-act="upd-revert-orig">Revert to original</button>
-      <span class="stackpos" id="upd-pos">no stack</span>
-      <button class="ee-btn primary" data-act="upd-save" id="upd-save" disabled>⬆ Save to Library</button>
-    </div>
+    </main>
   </div>`;
 }
 
@@ -217,18 +238,31 @@ class UpdateView {
     this.el.mask.style.display = on ? '' : 'none';
     this.el.denoiseLbl.style.display = on ? '' : 'none';
     if (on && this.stack) this.initMaskForSource();
+    else this.updateStageMaskVisibility();
     this.updateButtons();
   }
 
+  // Stage mask overlay visibility: the overlay canvas lives on the stage,
+  // over the comparer, and only shows in masked mode with a stack. When
+  // Compare is on, painting is suspended (pointer-events off) so the
+  // divider can be dragged; painting resumes when Compare closes.
+  updateStageMaskVisibility() {
+    const vc = this.el.maskCanvas;
+    if (!vc) return;
+    vc.style.display = (this.maskedMode && this.stack) ? 'block' : 'none';
+    vc.style.pointerEvents = this.compareOn ? 'none' : 'auto';
+  }
+
   // (Re)build the mask for the CURRENT source entry: black canvas at the
-  // source's natural size, view = source dimmed + red overlay of painted
-  // regions. Called when the recipe is picked, a source arrives, or Swap
+  // source's natural size, painted on the stage image via the overlay.
+  // Called when the recipe is picked, a source arrives, or Swap
   // moves the source — a mask always belongs to exactly one source.
   initMaskForSource() {
     const srcEntry = this.stack && source(this.stack);
     if (!srcEntry) return;
     this.maskPainted = false;
     this.maskUndoStack = [];
+    this.maskCanvas = null;  // stale mask must not paint over the new source
     const img = new Image();
     img.onload = () => {
       this.maskImg = img;
@@ -299,19 +333,25 @@ class UpdateView {
   }
 
   drawMaskView() {
-    const vc = this.el.maskCanvas, img = this.maskImg, mc = this.maskCanvas;
-    if (!vc || !img || !mc) return;
-    const vw = Math.min(img.naturalWidth, 900);
-    const vh = Math.round(img.naturalHeight * (vw / img.naturalWidth));
+    const vc = this.el.maskCanvas, cmp = this.el.cmp, mc = this.maskCanvas;
+    if (!vc || !cmp || !mc) return;
+    this.updateStageMaskVisibility();
+    if (vc.style.display === 'none') return;
+    // Overlay geometry follows the comparer container, which is sized
+    // by fitComparer() to the source aspect — so the overlay sits
+    // exactly over the stage image, at stage size, not over a thumbnail.
+    const vw = cmp.clientWidth, vh = cmp.clientHeight;
+    if (!vw || !vh) return;
     vc.width = vw; vc.height = vh;
+    vc.style.left = cmp.offsetLeft + 'px';
+    vc.style.top = cmp.offsetTop + 'px';
     const ctx = vc.getContext('2d');
-    ctx.drawImage(img, 0, 0, vw, vh);
+    ctx.clearRect(0, 0, vw, vh);
     if (!this.maskShow) return;
     // Red overlay of the painted (white) regions, built from luminance:
-    // an alpha-keyed composite, which the old code used, keeps
-    // black pixels too (they are fully opaque), so the whole image
-    // tinted red. Here alpha = mask brightness, so unpainted black
-    // areas stay transparent and only painted regions go red.
+    // alpha = mask brightness, so unpainted black areas stay transparent
+    // and only painted regions go red. The stage image itself is already
+    // underneath, so the overlay is red-only, never a source redraw.
     const ov = document.createElement('canvas');
     ov.width = vw; ov.height = vh;
     const octx = ov.getContext('2d');
@@ -538,6 +578,7 @@ class UpdateView {
     cmp.style.width = Math.round(natW * scale) + 'px';
     cmp.style.height = Math.round(natH * scale) + 'px';
     this.syncComparer();
+    this.drawMaskView();
   }
 
   syncComparer() {
@@ -562,6 +603,7 @@ class UpdateView {
       this.el.compare.textContent = compare ? '✕ Close compare' : '⇔ Compare';
       this.el.compare.setAttribute('aria-pressed', compare ? 'true' : 'false');
     }
+    this.updateStageMaskVisibility();
   }
 
   updateButtons() {

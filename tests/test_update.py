@@ -535,3 +535,19 @@ def test_update_tab_redesign_frontend_wiring():
     assert 'updateRunEnabled' not in upd, 'dead updateRunEnabled call remains'
     assert "globalCompositeOperation = 'destination-in'" not in upd, \
         'alpha-based mask overlay remains'
+
+
+def test_update_sidebar_layout_stage_painting():
+    """Sidebar layout (2026-10-29): controls in a 300px sidebar, stage
+    fills the rest, mask painted on a stage overlay canvas — no separate
+    thumbnail canvas, no stacked full-width bars."""
+    upd = (REPO / "frontend" / "js" / "modules" / "update.js").read_text()
+    for needle in ('upd-layout', 'upd-side', 'upd-main', 'upd-stage-mask',
+                   'paint on the stage image', 'updateStageMaskVisibility',
+                   '@media (max-width: 900px)'):
+        assert needle in upd, needle
+    for banned in ('upd-bar', 'upd-prompt-wrap', 'upd-actions', 'max-height: 240px'):
+        assert banned not in upd, banned
+    # The stage mask canvas sits inside the stage, after the comparer.
+    stage = upd[upd.index('upd-stage'):]
+    assert 'upd-mask-canvas' in stage
