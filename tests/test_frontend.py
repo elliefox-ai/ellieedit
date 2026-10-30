@@ -712,3 +712,30 @@ def test_facecycle_status_hud_pill():
     # Both updateStatusBar exits run the fade rule.
     us = src[src.index("updateStatusBar() {"):src.index("fadeStatusPill() {")]
     assert us.count("this.fadeStatusPill();") == 2
+
+
+def test_library_pending_sidebar_restore_no_grid_reload():
+    """2026-10-29 pending-restore: a 'Pending deletions (N)' section
+    in the Library sidebar, per-row Restore with age, and a
+    separately armed Confirm-purge. Restore and purge update the
+    sidebar in place and NEVER call reload() — the flicker guards
+    apply to sidebar actions too. /pending/confirm stays exactly
+    as destructive as it is, gated behind explicit arming."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "library.js").read_text()
+    html = src[src.index("function panelHTML"):src.index("class LibraryView")]
+    assert 'id="lib-pending-title"' in html
+    assert 'id="lib-pending"' in html
+    assert 'id="lib-pending-purge"' in html
+    assert "Pending deletions" in html
+    assert "/api/library/pending" in src
+    assert "pending/restore" in src
+    assert "pending/confirm" in src
+    # Restore handler: in-place sidebar update only, no grid reload.
+    seg = src[src.index("async restorePending"):src.index("async purgePending")]
+    assert "this.reload()" not in seg
+    assert "row.remove()" in seg
+    # Purge handler: armed first click, destructive second, no reload.
+    seg = src[src.index("async purgePending"):src.index("  disarmPurge() {")]
+    assert "this.reload()" not in seg
+    assert "Really purge all?" in seg
+    assert "dataset.armed" in seg

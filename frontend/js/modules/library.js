@@ -14,6 +14,19 @@ import { buildListParams, countLine } from './library-core.js';
 
 const PAGE_SIZE = 40; // must match backend PAGE_SIZE for cursor math
 
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function pendingAge(mtime) {
+  if (!mtime) return 'unknown age';
+  const s = Date.now() / 1000 - mtime;
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
 function panelHTML() {
   return `
   <style>
@@ -113,6 +126,12 @@ function panelHTML() {
     .lib-side input { background: #1d1d33; color: #e0e0f0; border: 1px solid #4a4a6c;
       border-radius: 4px; padding: 7px 8px; font-size: 12px; min-height: 34px; width: 100%; box-sizing: border-box; }
     .lib-side .note { font-size: 11px; color: #6c6c8e; line-height: 1.4; }
+    .lib-pending-row { background: #1a1a2e; border: 1px solid #2a2a44; border-radius: 6px;
+      padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+    .lib-pending-row .pname { font-size: 12px; color: #e0e0f0; word-break: break-all; }
+    .lib-pending-row .pmeta { font-size: 11px; color: #8a8aaa; line-height: 1.4; }
+    .lib-pending-row .ee-btn.danger.confirming { background: #6a2020; color: #ffd0d0;
+      box-shadow: 0 0 8px rgba(220,60,60,0.6); }
     @media (max-width: 900px) {
       .lib-layout { flex-direction: column; }
       .lib-side { width: auto; flex: 0 0 auto; max-height: 42%; border-right: none;
@@ -176,6 +195,12 @@ function panelHTML() {
       <section class="lib-sec">
         <h4>Sets</h4>
         <span class="note">Sets and the balance dashboard live in the bar above the grid. Add the selection to a set there, then watch its balance.</span>
+      </section>
+      <section class="lib-sec">
+        <h4 id="lib-pending-title">Pending deletions (0)</h4>
+        <span class="note">Deleted files are not gone — they sit here until purged. Restore puts one back at its exact original path. Purge deletes everything here permanently.</span>
+        <div id="lib-pending" style="display:flex;flex-direction:column;gap:8px"></div>
+        <button class="ee-btn danger" id="lib-pending-purge" style="display:none">Confirm purge</button>
       </section>
     </aside>
     <div class="lib-main">
@@ -268,6 +293,9 @@ class LibraryView {
       sideDetail: panel.querySelector('#lib-side-detail'),
       sideDetailSave: panel.querySelector('#lib-side-detail-save'),
       clearFilters: panel.querySelector('#lib-clear-filters'),
+      pendingTitle: panel.querySelector('#lib-pending-title'),
+      pendingList: panel.querySelector('#lib-pending'),
+      pendingPurge: panel.querySelector('#lib-pending-purge'),
       selCount: panel.querySelector('#lib-sel-count'),
       dash: panel.querySelector('#lib-dash'),
       metaDlg: panel.querySelector('#lib-meta'),
@@ -317,6 +345,7 @@ class LibraryView {
       this.reload();
     });
     this.el.sideDetailSave.addEventListener('click', () => this.applySideDetail());
+    this.el.pendingPurge.addEventListener('click', () => this.purgePending());
     this.el.search.addEventListener('input', () => {
       clearTimeout(this._searchT);
       this._searchT = setTimeout(() => { this.q = this.el.search.value.trim(); this.reload(); }, 400);
@@ -329,10 +358,11 @@ class LibraryView {
     this.panel.querySelector('#libm-cancel').addEventListener('click', () => this.closeMeta());
     this.panel.querySelector('#libm-save').addEventListener('click', () => this.saveMeta());
     this.loadSets();
+    this.loadPending();
     window.addEventListener('ellieedit:tab-activated', e => {
-      if (e.detail?.name === 'library') this.reload();
+      if (e.detail?.name === 'library') { this.reload(); this.loadPending(); }
     });
-    window.addEventListener('ellieedit:library-changed', () => this.reload());
+    window.addEventListener('ellieedit:library-changed', () => { this.reload(); this.loadPending(); });
     this.bindViewer();
   }
 
@@ -490,6 +520,104 @@ class LibraryView {
     if (!r.ok) { this.toast('Meta save failed: ' + r.status, true); return; }
     this.updateItemsMetaInPlace([...this.selected], { detail });
     this.renderSideMetaChips();
+  }
+
+  // ── Pending deletions + restore (2026-10-29) ──────────────────────
+  // The UI door to recovery that was missing: deleted files sit in
+  // LIBRARY_ROOT/.pending-delete/ until purged, but nothing ever
+  // called GET /pending. This section is the only place that does.
+  // Rendering is in-place in the sidebar only. Restore and purge
+  // NEVER call reload() — the grid must not flicker for a sidebar
+  // action (the flicker guards exist for exactly this). A restored
+  // file reappears in the grid on the next grid refresh (filter
+  // change, tab switch), deliberately, rather than via a reload.
+  async loadPending() {
+    let data;
+    try {
+      const r = await fetch('/api/library/pending');
+      if (!r.ok) return;
+      data = await r.json();
+    } catch { return; }
+    this.pendingItems = data.items || [];
+    this.renderPending();
+  }
+
+  renderPending() {
+    const items = this.pendingItems || [];
+    this.el.pendingTitle.textContent = `Pending deletions (${items.length})`;
+    this.el.pendingPurge.style.display = items.length ? '' : 'none';
+    this.disarmPurge();
+    if (!items.length) {
+      this.el.pendingList.innerHTML = '<span class="note">No pending deletions.</span>';
+      return;
+    }
+    this.el.pendingList.innerHTML = '';
+    for (const it of items) {
+      const row = document.createElement('div');
+      row.className = 'lib-pending-row';
+      const age = pendingAge(it.mtime);
+      const orig = it.path ? it.path : 'unattributed — no deletion record';
+      const tags = (it.tags || []).length ? (it.tags || []).join(', ') : 'no tags';
+      row.innerHTML = `<span class="pname">${esc(it.name)}</span>
+        <span class="pmeta">${esc(orig)} · ${age} · ${esc(tags)}</span>`;
+      const btn = document.createElement('button');
+      btn.className = 'ee-btn';
+      btn.textContent = it.restorable ? 'Restore' : 'Cannot restore';
+      btn.disabled = !it.restorable;
+      if (!it.restorable) btn.title = 'No deletion record, or the original path is already occupied — restoring would guess or overwrite, so it is refused.';
+      btn.addEventListener('click', () => this.restorePending(it.name, row));
+      row.appendChild(btn);
+      this.el.pendingList.appendChild(row);
+    }
+  }
+
+  async restorePending(name, row) {
+    try {
+      const r = await fetch('/api/library/pending/restore', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+      const res = await r.json();
+      row.remove();
+      this.pendingItems = (this.pendingItems || []).filter(i => i.name !== name);
+      this.el.pendingTitle.textContent = `Pending deletions (${this.pendingItems.length})`;
+      if (!this.pendingItems.length) {
+        this.el.pendingList.innerHTML = '<span class="note">No pending deletions.</span>';
+        this.el.pendingPurge.style.display = 'none';
+      }
+      // Deliberately no reload(): the restored file reappears on
+      // the next grid refresh, and the grid must not flicker.
+      this.toast(`Restored ${res.path}`);
+    } catch (err) {
+      this.toast(`Restore failed: ${err.message}`, true);
+    }
+  }
+
+  async purgePending() {
+    if (!this.el.pendingPurge.dataset.armed) {
+      this.el.pendingPurge.dataset.armed = '1';
+      this.el.pendingPurge.classList.add('confirming');
+      this.el.pendingPurge.textContent = 'Really purge all? ✓ Confirm';
+      return;
+    }
+    this.disarmPurge();
+    try {
+      const r = await fetch('/api/library/pending/confirm', { method: 'POST' });
+      if (!r.ok) throw new Error(r.status);
+      const res = await r.json();
+      this.pendingItems = [];
+      this.renderPending();
+      this.toast(`Purged ${res.deleted} file${res.deleted !== 1 ? 's' : ''}`);
+    } catch (err) {
+      this.toast(`Purge failed: ${err.message}`, true);
+    }
+  }
+
+  disarmPurge() {
+    delete this.el.pendingPurge.dataset.armed;
+    this.el.pendingPurge.classList.remove('confirming');
+    this.el.pendingPurge.textContent = 'Confirm purge';
   }
 
   updateItemsMetaInPlace(paths, patch) {
@@ -876,6 +1004,7 @@ class LibraryView {
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
       this.toast(`Queued ${deletingOriginal ? 'the original' : item.name} for deletion — confirm to purge`);
+      this.loadPending();  // sidebar queue only — no grid reload
     } catch (err) {
       this.toast(`Delete failed: ${err.message}`, true);
       return;

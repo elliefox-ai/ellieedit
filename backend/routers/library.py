@@ -870,23 +870,161 @@ def pending_delete(body: DeleteBody):
     return {"ok": True, "path": rel, "queued": dest.name}
 
 
-@router.get("/pending")
-def pending_list():
+# ---------------------------------------------------------------------------
+# Pending deletions + restore (2026-10-29 workorder)
+# ---------------------------------------------------------------------------
+# The incident: a Library viewer delete removed the final, and the
+# deletion queue looked empty in the UI — but the file was in
+# LIBRARY_ROOT/.pending-delete/ the whole time, and GET /pending
+# already listed it. Nothing in the frontend ever called it, so
+# there was no UI door to recovery. This section adds that door.
+# Attribution is exact, not guessed: pending_delete appends a
+# deleted_soon index record that still holds the original
+# library-relative path. A pending file is attributed only when
+# its name matches exactly one deleted_soon path's basename —
+# or, for the _unique_dest collision case, exactly one
+# stripped "-N" basename. Legacy pending files (~10, no
+# deleted_soon record) and ambiguous names are listed with
+# path=None, tags=[], restorable=False — shown, never hidden
+# or crashed on — and restore rejects them with 409.
+def _attribute_pending(name: str) -> dict | None:
+    """Attribution for one pending filename, or None.
+
+    Exact basename match first; then the stripped "-N" collision
+    form, only when it yields exactly one deleted path."""
+    records = read_index()
+    by_base: dict[str, list[str]] = {}
+    tags_by_path: dict[str, list[str]] = {}
+    for rec in records:
+        if rec.get("deleted_soon") and rec.get("path"):
+            by_base.setdefault(Path(rec["path"]).name, []).append(rec["path"])
+            tags_by_path[rec["path"]] = list(rec.get("tags") or [])
+    candidates = by_base.get(name, [])
+    if len(candidates) == 1:
+        p = candidates[0]
+        return {"path": p, "tags": tags_by_path.get(p, [])}
+    if len(candidates) > 1:
+        return None  # ambiguous — never guess
+    stem, suffix = Path(name).stem, Path(name).suffix
+    m = __import__("re").match(r"^(.*)-\d+$", stem)
+    if m:
+        stripped = m.group(1) + suffix
+        candidates = by_base.get(stripped, [])
+        if len(candidates) == 1:
+            p = candidates[0]
+            return {"path": p, "tags": tags_by_path.get(p, [])}
+    return None
+
+
+def pending_items() -> list[dict]:
+    """Enriched pending listing: name, size, mtime (pending file),
+    original path, tags, and restorable. Legacy and ambiguous
+    files are listed unrestorable, never hidden."""
     items = []
-    total = 0
     try:
         entries = sorted(pending_dir().iterdir())
     except FileNotFoundError:
         entries = []
     for f in entries:
+        if not f.is_file():
+            continue
         try:
-            size = f.stat().st_size
+            st = f.stat()
         except OSError:
             continue
-        if f.is_file():
-            items.append({"name": f.name, "size": size})
-            total += size
+        attr = _attribute_pending(f.name)
+        path = attr["path"] if attr else None
+        restorable = False
+        if path:
+            dest = LIBRARY_ROOT / path
+            # Restorable only if attributed, a non-deleted record
+            # exists to re-append, and the destination is free.
+            has_record = any(r.get("path") == path and not r.get("deleted_soon")
+                             for r in read_index())
+            restorable = has_record and not dest.exists()
+        items.append({"name": f.name, "size": st.st_size, "mtime": st.st_mtime,
+                      "path": path, "tags": attr["tags"] if attr else [],
+                      "restorable": restorable})
+    return items
+
+
+def restore_pending(name: str | None = None, path: str | None = None) -> dict:
+    """Move a pending file back to its original library path.
+
+    404 when the pending file is missing; 409 when unattributed
+    (legacy/ambiguous, or no non-deleted record to re-append)
+    or when the destination is occupied — never overwrite.
+    On success, the last non-deleted index record for that
+    path is re-appended verbatim (not a synthetic record), so
+    kind, family_id, original, intermediates, and recipe
+    survive, and the deleted_soon record is no longer latest.
+    The file's own mtime is preserved by the move."""
+    pdir = pending_dir()
+    if path:
+        attr_path = path
+        # Find the pending file for this original path: the
+        # attributed pending item whose path matches.
+        queued = None
+        for item in pending_items():
+            if item["path"] == attr_path:
+                queued = item["name"]
+                break
+        if queued is None:
+            raise HTTPException(404, "no pending file for that path")
+        name = queued
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        raise HTTPException(400, "pending filename required")
+    src = pdir / name
+    if not src.is_file():
+        raise HTTPException(404, "not in pending deletions")
+    attr = _attribute_pending(name)
+    if not attr:
+        raise HTTPException(409, "pending file is unattributed — no deleted_soon record, cannot restore safely")
+    orig = attr["path"]
+    dest = LIBRARY_ROOT / orig
+    if dest.exists():
+        raise HTTPException(409, "destination is occupied — restore would overwrite")
+    records = read_index()
+    prior = [r for r in records if r.get("path") == orig and not r.get("deleted_soon")]
+    if not prior:
+        raise HTTPException(409, "no restorable record for that path")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(src, dest)
+    except OSError as e:
+        if getattr(e, "errno", None) != 18:
+            raise HTTPException(500, f"restore move failed: {e}")
+        shutil.move(str(src), str(dest))
+    # Re-append the last non-deleted record verbatim. Appending
+    # makes it latest, so deleted_soon no longer hides the path,
+    # and _index_maps picks up its tags and family fields again.
+    _append_jsonl(index_path(), dict(prior[-1]))
+    log.info("library pending-restore: %s -> %s", name, orig)
+    rows = {r["path"]: r for r in _all_rows()}
+    row = rows.get(orig)
+    return {"ok": True, "path": orig, "name": dest.name,
+            "tags": attr["tags"],
+            "meta": row["meta"] if row else {},
+            "kind": row["kind"] if row else None,
+            "family_id": row["family_id"] if row else None,
+            "original": row["original"] if row else None}
+
+
+@router.get("/pending")
+def pending_list():
+    items = pending_items()
+    total = sum(i["size"] for i in items)
     return {"items": items, "count": len(items), "bytes": total}
+
+
+class PendingRestoreBody(BaseModel):
+    name: str | None = None
+    path: str | None = None
+
+
+@router.post("/pending/restore")
+def pending_restore_endpoint(body: PendingRestoreBody):
+    return restore_pending(name=body.name, path=body.path)
 
 
 @router.post("/pending/confirm")

@@ -520,3 +520,115 @@ def test_viewer_delete_targets_displayed_variant():
     fn = lib[lib.index("async deleteFromViewer() {"):lib.index("async retagFromViewer")]
     assert "body: JSON.stringify({ path: targetPath })" in fn, "delete still sends the final path"
     assert "path: item.path })" not in fn
+
+
+# ---- pending deletions + restore (2026-10-29 workorder) --------------------
+
+def test_pending_list_enriched_and_legacy(client, env):
+    """GET /pending is enriched: original path, mtime, tags, restorable.
+    Legacy pending files (~10 in production, no deleted_soon record)
+    are LISTED, unrestorable — never hidden, never a crash."""
+    r = client.post("/api/library/promote", json={"path": "loose.png", "tag": "misc"})
+    rel = r.json()["path"]
+    client.post("/api/library/pending-delete", json={"path": rel})
+    # Legacy file: placed in the pending area by hand, no index record.
+    pdir = env["library"] / ".pending-delete"
+    (pdir / "legacy.png").write_bytes(_png((5, 5, 5)))
+    q = client.get("/api/library/pending").json()
+    assert q["count"] == 2
+    by_name = {i["name"]: i for i in q["items"]}
+    queued = by_name["loose.png"]
+    assert queued["path"] == rel
+    assert queued["tags"] == ["misc"]
+    assert queued["restorable"] is True
+    assert queued["mtime"] > 0 and queued["size"] > 0
+    legacy = by_name["legacy.png"]
+    assert legacy["path"] is None
+    assert legacy["tags"] == []
+    assert legacy["restorable"] is False
+
+
+def test_pending_restore_roundtrip_family_survives(client, env):
+    """The incident round-trip: delete the final, restore it, and
+    the family metadata survives — kind, family_id, original,
+    intermediates, recipe — because the last non-deleted index
+    record is re-appended verbatim, not a synthetic one."""
+    lroot = env["library"]
+    (lroot / "proj").mkdir(parents=True, exist_ok=True)
+    (lroot / "proj" / "final.png").write_bytes(_png((1, 1, 1)))
+    (lroot / "proj" / "final-original.png").write_bytes(_png((2, 2, 2)))
+    (lroot / "proj" / "mid.png").write_bytes(_png((3, 3, 3)))
+    recs = [
+        {"path": "proj/final.png", "tags": ["proj"],
+         "promoted_from": "render.png", "ts": "2026-10-24T00:00:00",
+         "sha256": "a" * 64},
+        {"path": "proj/final-original.png", "tags": ["proj"],
+         "promoted_from": "orig.png", "ts": "2026-10-24T00:00:00",
+         "sha256": "b" * 64, "kind": "version-original",
+         "family_id": "fam123456789"},
+        # Family record is LAST non-deleted, carrying intermediates + recipe.
+        {"path": "proj/final.png", "tags": ["proj", "hero"],
+         "promoted_from": "render.png", "ts": "2026-10-24T00:00:01",
+         "sha256": "a" * 64, "kind": "version-family",
+         "family_id": "fam123456789", "original": "proj/final-original.png",
+         "final": "proj/final.png", "intermediates": ["proj/mid.png"],
+         "recipe": "masked-inpaint"},
+    ]
+    (lroot / ".library-index.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in recs) + "\n")
+    # Delete the final (the incident), then restore by original path.
+    r = client.post("/api/library/pending-delete", json={"path": "proj/final.png"})
+    assert r.status_code == 200
+    assert not (lroot / "proj" / "final.png").exists()
+    q = client.get("/api/library/pending").json()
+    assert q["count"] == 1 and q["items"][0]["restorable"] is True
+    r = client.post("/api/library/pending/restore", json={"path": "proj/final.png"})
+    assert r.status_code == 200, r.text
+    assert r.json()["path"] == "proj/final.png"
+    assert (lroot / "proj" / "final.png").is_file()
+    assert client.get("/api/library/pending").json()["count"] == 0
+    # Listing: family survives.
+    final = next(i for i in client.get("/api/library/list").json()["items"]
+                 if i["path"] == "proj/final.png")
+    assert final["kind"] == "version-family"
+    assert final["family_id"] == "fam123456789"
+    assert final["original"] == "proj/final-original.png"
+    assert sorted(final["tags"]) == ["hero", "proj"]
+    # Index: the re-appended record IS the family record, verbatim.
+    all_recs = [json.loads(l) for l in (lroot / ".library-index.jsonl").read_text().splitlines() if l.strip()]
+    last = [x for x in all_recs if x["path"] == "proj/final.png"][-1]
+    assert last["intermediates"] == ["proj/mid.png"]
+    assert last["recipe"] == "masked-inpaint"
+    assert last.get("deleted_soon") is not True
+
+
+def test_pending_restore_errors(client, env):
+    """404 on a missing pending file; 409 when unattributed
+    (legacy) or when the destination is occupied — never overwrite."""
+    # 404: nothing pending at all.
+    r = client.post("/api/library/pending/restore", json={"name": "nope.png"})
+    assert r.status_code == 404
+    # 409 unattributed: legacy file with no deleted_soon record.
+    pdir = env["library"] / ".pending-delete"
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "legacy.png").write_bytes(_png((5, 5, 5)))
+    r = client.post("/api/library/pending/restore", json={"name": "legacy.png"})
+    assert r.status_code == 409
+    assert (pdir / "legacy.png").is_file()  # untouched
+    # 409 occupied: delete, then promote a NEW file to the same path.
+    r = client.post("/api/library/promote", json={"path": "loose.png", "tag": "misc"})
+    rel = r.json()["path"]
+    client.post("/api/library/pending-delete", json={"path": rel})
+    (env["gallery"] / "loose.png").write_bytes(_png((9, 9, 9)))
+    r = client.post("/api/library/promote", json={"path": "loose.png", "tag": "misc"})
+    assert r.status_code == 200 and r.json()["path"] == rel
+    r = client.post("/api/library/pending/restore", json={"name": "loose.png"})
+    assert r.status_code == 409
+    # The new occupant survives, the queued original stays queued.
+    dest = env["library"] / rel
+    assert dest.read_bytes() == _png((9, 9, 9))
+    assert (pdir / "loose.png").is_file()
+    # /pending/confirm is unchanged: it purges what is left.
+    confirm = client.post("/api/library/pending/confirm").json()
+    assert confirm["deleted"] == 2  # legacy + the queued original
+    assert client.get("/api/library/pending").json()["count"] == 0
