@@ -696,3 +696,19 @@ def test_foxden_reorg_order():
     css = (HERE.parent / "frontend" / "js" / "modules" / "foxden.css").read_text()
     assert 'position:sticky' in css
     assert 'fx-seedrow .fx-go' not in css  # compact-row override died with the row
+
+
+def test_facecycle_status_hud_pill():
+    """2026-10-29 HUD pill: the status band takes no row — it is
+    absolutely positioned over the canvas bottom, never blocks
+    canvas clicks, and fades when nothing actionable changed,
+    while preview/generating/fallback/mask/failure stay loud."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "facecycle.js").read_text()
+    css = src[src.index("function panelHTML"):src.index("export class FaceCycle")]
+    assert "position: absolute" in css and "pointer-events: none" in css
+    assert ".fc-status.fc-dim" in css
+    assert "fadeStatusPill" in src
+    assert "Preview:" in src[src.index("fadeStatusPill() {"):]
+    # Both updateStatusBar exits run the fade rule.
+    us = src[src.index("updateStatusBar() {"):src.index("fadeStatusPill() {")]
+    assert us.count("this.fadeStatusPill();") == 2

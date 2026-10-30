@@ -50,10 +50,24 @@ function panelHTML() {
     .fc-drop .icon { font-size: 40px; opacity: 0.4; }
     .fc-drop p { color: #8a8aaa; font-size: 15px; }
     .fc-drop p.hint { font-size: 12px; color: #4a4a6c; }
-    .fc-main { display: none; flex: 1; flex-direction: column; padding: 12px 20px 16px; gap: 10px; min-height: 0; }
-    /* 2026-10-16d — compact band: one short line, long guidance lives in the
-       hover tooltip, not inline. */
-    .fc-status { font-size: 12px; color: #6c6c8e; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; white-space: nowrap; }
+    .fc-main { display: none; flex: 1; flex-direction: column; padding: 12px 20px 16px; gap: 10px; min-height: 0; position: relative; }
+    /* 2026-10-29 — HUD pill: the status band no longer takes a row.
+       It floats over the bottom of the canvas, inside .fc-main, so
+       the canvas gains the band's height. pointer-events: none, so
+       it can never block a canvas click, drag, or region cycle.
+       It sits just above the Media button row (bottom ~64px), so
+       it overlaps canvas margin, not the Media/thumbs rows below.
+       .fc-dim fades it to 30% when nothing actionable changed;
+       any updateStatusBar call brings it back to full opacity,
+       and actionable states (preview, generating, fallback
+       target, masking, failure) never fade at all. */
+    .fc-status { position: absolute; left: 50%; bottom: 64px; transform: translateX(-50%);
+      z-index: 30; pointer-events: none; font-size: 12px; color: #b0b0d0;
+      display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap;
+      background: rgba(18,18,31,0.85); border: 1px solid #2a2a44; border-radius: 16px;
+      padding: 6px 14px; max-width: calc(100% - 64px); text-align: center;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.4); transition: opacity 0.5s ease; }
+    .fc-status.fc-dim { opacity: 0.3; }
     .fc-status .badge { background: #2a2a44; padding: 1px 7px; border-radius: 10px; font-size: 11px; color: #b0b0d0; }
     .fc-status .help { color: #6c6c8e; }
     .fc-canvas-wrap { flex: 1; display: flex; overflow: auto; min-height: 0; }
@@ -735,6 +749,7 @@ export class FaceCycle {
 
     if (n === 0) {
       this.el.statusBar.innerHTML = '<span class="badge">' + (this.state.images.length < 2 ? 'Editor ready — draw a box (B) or click a region' : 'No changes detected') + '</span> <span class="help">' + (this.state.images.length < 2 ? 'Type a prompt (or leave empty), select a box, Generate to repaint.' : 'Try lowering sensitivity or min region size.') + '</span>' + statusBadge + maskHint + runBadge + gensBadge + receipt;
+      this.fadeStatusPill();
       return;
     }
 
@@ -749,6 +764,28 @@ export class FaceCycle {
     if (this.drawBoxMode) modeIndicator = ' <span class="badge" style="color:#e8b84d">✏️ box</span>';
     if (this.drawMaskMode) modeIndicator = ' <span class="badge" style="color:#e8b84d" title="Draw Mask — click a region to edit its mask · paint adds (box auto-grows) · Enter=apply · Esc=reset · E=erase · ,/. = brush size">🖌 mask</span>';
     this.el.statusBar.innerHTML = parts.join(' ') + modeIndicator + statusBadge + maskHint + layerBadge + targetBadge + runBadge + gensBadge + receipt;
+    this.fadeStatusPill();
+  }
+
+  // HUD pill fade rule (2026-10-29): every status update brings the
+  // pill back to full opacity. If the new status is actionable —
+  // a preview awaiting Keep/Discard, a generation running, a
+  // fallback repaint target, an active mask edit, or a failure —
+  // it stays loud. Otherwise it fades to 30% after 4 seconds, so
+  // the pill is hardly there when there is nothing to act on,
+  // but still readable if the user looks for it. Direct
+  // statusBar writes outside updateStatusBar (handoff receipt,
+  // Analyzing…, failure, Replace-sources receipt) intentionally
+  // skip this and stay loud until the next update.
+  fadeStatusPill() {
+    const bar = this.el.statusBar;
+    if (!bar) return;
+    clearTimeout(this._statusFadeT);
+    bar.classList.remove('fc-dim');
+    const html = bar.innerHTML;
+    const actionable = /Preview:|generating|nothing selected|masking|failed|⚠️/.test(html);
+    if (actionable) return;
+    this._statusFadeT = setTimeout(() => bar.classList.add('fc-dim'), 4000);
   }
 
   // ── Drawers (2026-10-16c): toggling flips `hidden` on a wrapper div only —
