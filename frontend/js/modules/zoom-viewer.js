@@ -25,14 +25,27 @@
 //     − / ＋ / Fit buttons step/reset. Reset is also what
 //     happens when a new image opens (the caller calls
 //     reset() from openViewer) and when a pinch returns to
-//     ~1×. Double-tap reset is deliberately NOT offered:
-//     the viewers close on a tap on the image, so the first
-//     tap of a double-tap would close the viewer before
-//     the second could reset it. Fit + pinch-back-to-1 are
-//     the reset paths.
-//   - touch-action: none on the stage, so the browser never
-//     page-zooms or scrolls under a pinch; the module does
-//     the whole gesture itself via Pointer Events.
+//     ~1×.
+//   - Double-tap reset, WHILE ZOOMED ONLY (2026-10-29 stuck-
+//     zoom fix): at fit, the viewers close on an image tap,
+//     so double-tap there would close on the first tap —
+//     correctly not offered. While zoomed, tap-to-close is
+//     already disabled, so a double-tap is safe, and it is
+//     the escape hatch when the bar (with Fit) is unreachable
+//     for any reason. The click that follows the second tap
+//     is suppressed (suppressClickUntil), so a double-tap
+//     reset does not reset and then close.
+//   - touch-action: none on the WHOLE VIEWER (2026-10-29
+//     stuck-zoom fix), not just the stage. The original code
+//     set it only on stage + image, but the nav zones cover
+//     30% each side of the stage and the bar covers the top,
+//     so a pinch starting on either let the browser page-zoom
+//     at the same time as the image zoomed — and once the
+//     page is zoomed, the bar holding Fit/close can be panned
+//     off-screen, leaving refresh as the only escape. With
+//     none on the viewer root, any gesture starting inside
+//     the viewer is the app's, never the browser's. Taps
+//     still work; only gestures are blocked.
 //
 // Pure helpers (dist, pinchScale, swipeDir, clampPan,
 // wheelScale) are exported for node unit tests; the DOM
@@ -106,6 +119,10 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
   function reset() {
     scale = 1; tx = 0; ty = 0;
     pointers.clear(); pinch = null; swipe = null;
+    // A tap on the previous image must not pair with a tap on
+    // the next one as a double-tap. (reset() is only called
+    // after binding completes, so these are initialized.)
+    lastTap = null; tapStart = null;
     apply();
   }
 
@@ -117,8 +134,15 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
     apply();
   }
 
+  // Viewer-root touch-action (stuck-zoom fix): the CSS in both
+  // viewers also sets this, but the binder sets it too, so the
+  // guarantee does not depend on a stylesheet landing.
+  viewer.style.touchAction = 'none';
   stage.style.touchAction = 'none';
   if (img) img.style.touchAction = 'none';
+
+  // Double-tap reset state (while zoomed only, see header).
+  let lastTap = null, tapStart = null, suppressClickUntil = 0;
 
   stage.addEventListener('pointerdown', e => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
@@ -126,12 +150,13 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
     try { stage.setPointerCapture(e.pointerId); } catch (_) {}
     if (pointers.size === 2) {
       // Pinch wins: discard any pending swipe, enter pinch mode.
-      swipe = null;
+      swipe = null; tapStart = null;
       const [a, b] = [...pointers.values()];
       pinch = { d0: dist(a, b), mid0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
                 scale0: scale, tx0: tx, ty0: ty };
     } else if (pointers.size === 1 && e.pointerType !== 'mouse') {
       swipe = { x: e.clientX, y: e.clientY };
+      tapStart = { x: e.clientX, y: e.clientY };
     }
   });
 
@@ -140,6 +165,9 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
     if (!p) return;
     const dx = e.clientX - p.x, dy = e.clientY - p.y;
     p.x = e.clientX; p.y = e.clientY;
+    if (tapStart && Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y) > 25) {
+      tapStart = null;  // moved too far to be a tap
+    }
     if (pointers.size >= 2 && pinch) {
       const [a, b] = [...pointers.values()];
       const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
@@ -158,7 +186,7 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
     const wasPinch = pointers.size >= 2;
     pointers.delete(e.pointerId);
     if (wasPinch) {
-      pinch = null; swipe = null;
+      pinch = null; swipe = null; tapStart = null;
       if (pointers.size < 2) {
         if (scale <= 1.05) { scale = 1; tx = 0; ty = 0; }
         else clamp();
@@ -166,6 +194,25 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
       }
       return;
     }
+    // Double-tap reset, while zoomed only: a tap here cannot
+    // close the viewer (click-to-close is disabled while
+    // zoomed), so two quick taps in place reset to fit. At fit
+    // this branch never runs (scale is 1), so the first tap's
+    // close behaviour at fit is untouched.
+    if (tapStart && scale > 1 && pointers.size === 0) {
+      const now = Date.now();
+      if (lastTap && now - lastTap.t < 350 &&
+          Math.hypot(tapStart.x - lastTap.x, tapStart.y - lastTap.y) < 25) {
+        lastTap = null; tapStart = null; swipe = null;
+        reset();
+        // The click following this second tap would otherwise
+        // close the viewer now that zoomed is gone — suppress it.
+        suppressClickUntil = now + 600;
+        return;
+      }
+      lastTap = { t: now, x: tapStart.x, y: tapStart.y };
+    }
+    tapStart = null;
     if (swipe && pointers.size === 0) {
       const dir = swipeDir(e.clientX - swipe.x, e.clientY - swipe.y, scale);
       swipe = null;
@@ -175,15 +222,19 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
   stage.addEventListener('pointerup', onUp);
   stage.addEventListener('pointercancel', e => {
     pointers.delete(e.pointerId);
-    pinch = null; swipe = null;
+    pinch = null; swipe = null; tapStart = null;
     if (pointers.size === 0 && scale <= 1) { scale = 1; tx = 0; ty = 0; apply(); }
   });
 
   // While zoomed, a click on the image must not close the viewer
   // (that is fit-only behaviour) and a pan must not end as a click.
   // Capture on the stage runs before the image's click handler.
+  // Also suppress the click after a double-tap reset, which
+  // arrives after zoomed has already been removed.
   stage.addEventListener('click', e => {
-    if (viewer.classList.contains('zoomed')) e.stopPropagation();
+    if (viewer.classList.contains('zoomed') || Date.now() < suppressClickUntil) {
+      e.stopPropagation();
+    }
   }, true);
 
   // Mouse wheel: zoom around the cursor, plain wheel (the viewer

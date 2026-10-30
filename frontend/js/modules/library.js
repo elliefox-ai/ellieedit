@@ -141,7 +141,7 @@ function panelHTML() {
     /* Lightbox viewer (2026-10-09e): same experience as the Gallery viewer */
     .lib-viewer {
       display: none; position: absolute; inset: 0; background: rgba(8,8,16,0.96);
-      z-index: 50; flex-direction: column;
+      z-index: 50; flex-direction: column; touch-action: none;
     }
     .lib-viewer .bar {
       display: flex; align-items: center; gap: 10px; padding: 10px 16px;
@@ -165,7 +165,8 @@ function panelHTML() {
     }
     .lib-viewer .navzone { position: absolute; top: 60px; bottom: 0; width: 30%;
       display: flex; align-items: center; justify-content: center; font-size: 34px;
-      color: rgba(255,255,255,0.25); cursor: pointer; user-select: none; -webkit-user-select: none; }
+      color: rgba(255,255,255,0.25); cursor: pointer; user-select: none; -webkit-user-select: none;
+      touch-action: none; }
     .lib-viewer .navzone:hover { color: rgba(255,255,255,0.6); }
     .lib-viewer .navzone.left { left: 0; }
     .lib-viewer .navzone.right { right: 0; }

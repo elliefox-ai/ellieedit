@@ -809,3 +809,31 @@ def test_update_zoom_stage():
     assert "wheel" in src and "zoomAroundCursor" in src
     assert "resetZoom()" in src
     assert "this.resetZoom();  // a new stack starts at fit" in src
+
+
+def test_viewer_stuck_zoom_fix():
+    """2026-10-29 stuck-zoom fix: page zoom must never happen
+    inside a viewer, and a zoomed viewer must have a bar-free
+    escape. touch-action:none on the viewer root (not just
+    stage/img — navzones cover 30% each side and the bar
+    covers the top, and both let the browser page-zoom),
+    plus double-tap reset while zoomed only (tap-to-close
+    is disabled while zoomed, so it is safe there; at fit
+    the first tap still closes, as before). The click after
+    a double-tap reset is suppressed so it does not reset
+    and then close."""
+    zv = (HERE.parent / "frontend" / "js" / "modules" / "zoom-viewer.js").read_text()
+    assert "viewer.style.touchAction = 'none'" in zv
+    assert "lastTap" in zv and "suppressClickUntil" in zv
+    assert "scale > 1" in zv
+    assert "Date.now() < suppressClickUntil" in zv
+    for mod, root in (("gallery", "gal-viewer"), ("library", "lib-viewer")):
+        src = (HERE.parent / "frontend" / "js" / "modules" / f"{mod}.js").read_text()
+        css = src[src.index("function panelHTML"):src.index("class " + ("Gallery" if mod == "gallery" else "LibraryView"))]
+        # Viewer root: touch-action none on its own rule.
+        assert f".{root} {{" in css
+        root_rule = css[css.index(f".{root} {{"):css.index(f".{root} {{") + 300]
+        assert "touch-action: none" in root_rule, mod
+        assert f".{root} .navzone" in css
+        nav_rule = css[css.index(f".{root} .navzone"):css.index(f".{root} .navzone") + 400]
+        assert "touch-action: none" in nav_rule, mod

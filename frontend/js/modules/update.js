@@ -40,7 +40,7 @@ function panelHTML() {
     #upd-prompt { min-height: 64px; max-height: 140px; resize: vertical; width: 100%;
       box-sizing: border-box; background: #1d1d33; color: #e0e0f0; border: 1px solid #4a4a6c;
       border-radius: 4px; padding: 8px; font-size: 12px; font-family: inherit; }
-    .upd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+    .upd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; touch-action: none; }
     .upd-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
       padding: 12px; position: relative; overflow: hidden; touch-action: none; }
     .cmp { position: relative; max-width: 100%; max-height: 100%;
