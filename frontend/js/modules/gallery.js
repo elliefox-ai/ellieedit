@@ -918,6 +918,7 @@ export class Gallery {
         }
         throw new Error(err.detail || r.status);
       }
+      const j = await r.json().catch(() => ({}));
       // Move succeeded: the file is gone from its bank — remove the
       // card, don't show a ghost.
       cell?.remove();
@@ -927,7 +928,10 @@ export class Gallery {
       this.updateMarkCount();
       if (tagOverride === undefined) this.recordTag(tag);
       this.toast(`Promoted ${item.name} → ${tag}`);
-      window.dispatchEvent(new CustomEvent('ellieedit:library-changed'));
+      // The destination path lets the Library slide the new item
+      // in at its list position instead of reloading the grid.
+      window.dispatchEvent(new CustomEvent('ellieedit:library-changed',
+        { detail: { path: j.path } }));
       return 'moved';
     } catch (err) {
       this.toast(`Promote failed: ${err.message}`, true);

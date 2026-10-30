@@ -215,6 +215,7 @@ function panelHTML() {
     <div class="lib-filters" id="lib-filters">
       <input id="lib-search" placeholder="search name, detail, tag…">
       <button class="ee-btn" id="lib-select">☐ Select</button>
+      <button class="ee-btn" id="lib-refresh" title="Check the current listing for new/removed files — cheap: does nothing when nothing changed, in-place update otherwise">⟳ Refresh</button>
     </div>
     <div class="lib-setbar" id="lib-setbar">
       <select id="lib-set"><option value="">no set</option></select>
@@ -287,6 +288,7 @@ class LibraryView {
       shot: panel.querySelector('#lib-shot'),
       search: panel.querySelector('#lib-search'),
       selectBtn: panel.querySelector('#lib-select'),
+      refresh: panel.querySelector('#lib-refresh'),
       setSel: panel.querySelector('#lib-set'),
       setNew: panel.querySelector('#lib-set-new'),
       setView: panel.querySelector('#lib-set-view'),
@@ -342,6 +344,7 @@ class LibraryView {
     }, { rootMargin: '900px' });
     this.el.grid.addEventListener('scroll', () => {
       const g = this.el.grid;
+      this.noteScroll();
       if (g.scrollTop + g.clientHeight >= g.scrollHeight - 1500) this.load();
     });
     this.el.more.addEventListener('click', () => this.load());
@@ -365,23 +368,176 @@ class LibraryView {
     this.panel.querySelector('#libm-save').addEventListener('click', () => this.saveMeta());
     this.loadSets();
     this.loadPending();
+    this.el.refresh.addEventListener('click', () => this.cheapRefresh());
+    // Keep-alive (2026-10-30, Gallery parity): switching tabs must
+    // NOT reload the Library. Inactive panels are display:none,
+    // which resets the grid's scroll to 0, so the anchor captured
+    // on scroll is restored synchronously on activation, before
+    // anything async — and the thumbnails, already in the DOM,
+    // simply stay loaded. Only a never-loaded (or empty, hence
+    // retryable) grid loads on activation. The pending sidebar
+    // still refreshes in place, since it never touches the grid.
     window.addEventListener('ellieedit:tab-activated', e => {
-      if (e.detail?.name === 'library') { this.reload(); this.loadPending(); }
+      if (e.detail?.name === 'library') {
+        if (!this.items.length && !this.loading) this.reload();
+        else { this.restoreAnchor(this._anchor); this.maybeTopUp(); }
+        this.loadPending();
+      }
     });
-    window.addEventListener('ellieedit:library-changed', () => { this.reload(); this.loadPending(); });
+    // A Gallery promote no longer reloads the Library either: the
+    // new item is slid in at its list position (or ignored if it
+    // is filtered out / beyond the first page), in place.
+    window.addEventListener('ellieedit:library-changed', e => {
+      this.loadPending();
+      if (e.detail?.path) this.insertLibraryItem(e.detail.path);
+    });
     this.bindViewer();
   }
 
   fileUrl(path) { return `/api/library/file?path=${encodeURIComponent(path)}`; }
 
-  async reload() {
+  async reload(opts = {}) {
+    // keepPosition (cheapRefresh's changed path, Gallery parity):
+    // capture the anchor BEFORE wiping, then page back to the
+    // previous item count and restore it — no wipe-and-jump.
+    // A plain reload() (tag/filter/search/set view) is a genuine
+    // view change and starts at the top, as before.
+    const keep = opts.keepPosition
+      ? { n: this.items.length, a: this.captureAnchor() } : null;
     this.gen++;  // drop any in-flight page from the old view
     this.loading = false;
     this.cursor = 0;
     this.items = [];
     this.el.grid.innerHTML = '';
-    if (this.setViewMode) { await this.loadSet(); return; }
+    if (this.setViewMode) { await this.loadSet(); if (keep) this.restoreAnchor(keep.a); return; }
     await this.load();
+    if (keep) {
+      while (this.cursor != null && this.items.length < keep.n) {
+        const before = this.items.length;
+        await this.load();
+        if (this.items.length === before) break;
+      }
+      this.restoreAnchor(keep.a);
+    }
+  }
+
+  // ---- scroll anchor (Gallery parity) ---------------------------------
+  // display:none on an inactive panel resets scrollTop to 0, so
+  // the anchor — the top visible cell's path + offset — is kept
+  // on scroll and restored synchronously on activation.
+  isVisible() {
+    return this.panel.classList.contains('active') && this.el.grid.clientHeight > 0;
+  }
+
+  captureAnchor() {
+    const g = this.el.grid, gr = g.getBoundingClientRect();
+    for (const dy of [12, 48, 96]) {
+      for (const fx of [0.5, 0.2, 0.8]) {
+        const hit = document.elementFromPoint(gr.left + gr.width * fx, gr.top + dy);
+        const cell = hit && hit.closest ? hit.closest('.lib-cell') : null;
+        if (cell && cell.dataset.path && g.contains(cell)) {
+          return { path: cell.dataset.path, off: cell.getBoundingClientRect().top - gr.top, top: g.scrollTop };
+        }
+      }
+    }
+    return { path: null, off: 0, top: g.scrollTop };
+  }
+
+  noteScroll() {
+    if (this._anchorRaf || !this.isVisible()) return;
+    this._anchorRaf = requestAnimationFrame(() => {
+      this._anchorRaf = 0;
+      if (this.isVisible()) this._anchor = this.captureAnchor();
+    });
+  }
+
+  restoreAnchor(a) {
+    if (!a || !this.isVisible()) return;
+    const g = this.el.grid;
+    const cell = a.path ? [...g.children].find(c => c.dataset.path === a.path) : null;
+    if (cell) {
+      g.scrollTop += cell.getBoundingClientRect().top - g.getBoundingClientRect().top - a.off;
+    } else {
+      g.scrollTop = a.top;
+    }
+  }
+
+  // Cheap refresh (Gallery parity): fetch ONE page of the current
+  // listing and compare paths. Unchanged → "up to date" in the
+  // status line, zero grid churn. First page changed → reload
+  // keeping position. Total changed but first page unchanged
+  // (a new item landed beyond the first page, e.g. by old
+  // mtime) → totals/tags updated in place, no reload: the item
+  // is reachable by scrolling, and reloading to chase it
+  // would cost the very delay this work removes.
+  async cheapRefresh() {
+    if (this.loading) return;
+    const el0 = this.el.status.textContent;
+    this.el.status.textContent = 'Checking…';
+    try {
+      const qs = buildListParams({ tag: this.tag, cursor: 0,
+        subject: this.subject, shot: this.shot, q: this.q });
+      const d = await fetch('/api/library/list?' + qs).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+      const fresh = (d.items || []).map(i => i.path);
+      const known = this.items.slice(0, fresh.length).map(i => i.path);
+      const same = fresh.length === known.length && fresh.every((v, k) => v === known[k]);
+      if (same) {
+        if (d.total !== this.total || d.total_all !== this._totalAll) {
+          this.total = d.total; this._totalAll = d.total_all;
+          this.renderTags(d.tags, d.total_all ?? d.total);
+          this.el.status.textContent = countLine(this.shown, d.total, this.tag);
+        } else {
+          this.el.status.textContent = 'Up to date · ' + el0;
+          setTimeout(() => { if (this.el.status.textContent.startsWith('Up to date · ')) this.el.status.textContent = el0; }, 2500);
+        }
+      } else {
+        await this.reload({ keepPosition: true });
+      }
+    } catch (err) {
+      this.el.status.textContent = 'Refresh failed: ' + err.message;
+    }
+  }
+
+  // Slide one newly promoted item in at its list position, in
+  // place — no reload, no scroll move, no thumbnail burst (the
+  // cell's thumb is assigned by the IntersectionObserver when
+  // it nears the viewport, as with every other cell). Skipped
+  // when the grid is not loaded, when in set view (the item is
+  // not in that set), when already present, or when the item
+  // is not on the first page of the current filtered listing
+  // (filtered out, or beyond page one — it appears on scroll
+  // or Refresh, and totals/tags are still updated in place).
+  async insertLibraryItem(path) {
+    if (this.setViewMode || !this.items.length) return;
+    if (this.items.some(i => i.path === path)) return;
+    let d;
+    try {
+      const qs = buildListParams({ tag: this.tag, cursor: 0,
+        subject: this.subject, shot: this.shot, q: this.q });
+      d = await fetch('/api/library/list?' + qs).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
+    } catch { return; }
+    this.total = d.total;
+    this.renderTags(d.tags, d.total_all ?? d.total);
+    const fresh = d.items || [];
+    const idx = fresh.findIndex(i => i.path === path);
+    if (idx === -1) {
+      this.el.status.textContent = countLine(this.shown, d.total, this.tag);
+      return;
+    }
+    const item = fresh[idx];
+    // Insertion point: the first current cell that sits after
+    // the new item in list order (fresh index > idx, or not on
+    // the fresh first page at all, hence after it).
+    let insertAt = this.items.length;
+    for (let i = 0; i < this.items.length; i++) {
+      const fi = fresh.findIndex(f => f.path === this.items[i].path);
+      if (fi === -1 || fi > idx) { insertAt = i; break; }
+    }
+    this.items.splice(insertAt, 0, item);
+    const cell = this.addCell(item, insertAt);
+    if (cell) this.el.grid.insertBefore(cell, this.el.grid.children[insertAt] || null);
+    this.shown = this.el.grid.children.length;
+    this.el.status.textContent = countLine(this.shown, d.total, this.tag);
   }
 
   async load() {
@@ -397,6 +553,7 @@ class LibraryView {
       const d = await r.json();
       if (gen !== this.gen) { this.loading = false; return; }  // view changed while paging
       if (this.cursor === 0) {
+        this._totalAll = d.total_all ?? d.total;
         this.renderTags(d.tags, d.total_all ?? d.total);
         this.renderMetaFilters(d.meta_vocab);
       }
@@ -918,15 +1075,20 @@ class LibraryView {
     }
     // Lightbox instead of raw-file navigation (2026-10-09e); in select
     // mode a cell click toggles selection instead of opening the viewer.
+    // The viewer index is resolved by path at click time, not from
+    // the creation-time idx: insertLibraryItem splices items in
+    // front of existing cells, which would otherwise shift every
+    // later cell's index by one and open the wrong image.
     cell.addEventListener('click', () => {
       if (this.selectMode) {
         this.toggleCellSelection(cell, item.path);
         return;
       }
-      this.openViewer(idx);
+      this.openViewer(this.items.findIndex(i => i.path === item.path));
     });
     this.el.grid.appendChild(cell);
     this.io.observe(cell);
+    return cell;
   }
 
   // ---- lightbox viewer -----------------------------------------------------

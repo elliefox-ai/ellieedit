@@ -837,3 +837,28 @@ def test_viewer_stuck_zoom_fix():
         assert f".{root} .navzone" in css
         nav_rule = css[css.index(f".{root} .navzone"):css.index(f".{root} .navzone") + 400]
         assert "touch-action: none" in nav_rule, mod
+
+
+def test_library_keep_alive_no_reload_on_tab_activation():
+    """2026-10-30 Library keep-alive (Gallery parity): switching
+    tabs must NOT reload the Library grid. The tab-activated
+    handler loads only a never-loaded/empty grid, otherwise
+    restoring the scroll anchor captured on scroll; the
+    pending sidebar still refreshes in place. A promote no
+    longer reloads either — it inserts in place."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "library.js").read_text()
+    tab = src[src.index("ellieedit:tab-activated"):src.index("ellieedit:library-changed")]
+    assert "if (!this.items.length && !this.loading) this.reload();" in tab
+    assert "this.restoreAnchor(this._anchor)" in tab
+    assert tab.count("this.reload()") == 1  # the empty-grid first load only
+    assert "this.loadPending();" in tab
+    assert "async cheapRefresh()" in src and "async insertLibraryItem(path)" in src
+    assert "lib-refresh" in src and "this.el.refresh.addEventListener('click', () => this.cheapRefresh())" in src
+    assert "async reload(opts = {})" in src and "opts.keepPosition" in src
+    # Insert must not break viewer navigation: cell clicks resolve
+    # the index by path at click time, not from creation-time idx.
+    assert "this.openViewer(this.items.findIndex(i => i.path === item.path))" in src
+    assert "return cell;" in src
+    gal = (HERE.parent / "frontend" / "js" / "modules" / "gallery.js").read_text()
+    assert "detail: { path: j.path }" in gal
+    assert "const j = await r.json().catch(() => ({}));" in gal
