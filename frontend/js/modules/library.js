@@ -848,9 +848,11 @@ class LibraryView {
 
   armDelete() {
     if (!this.el.vDelete.dataset.armed) {
+      const it = this.items[this.viewIdx];
+      const which = (this.viewingOriginal && it && it.original) ? 'the ORIGINAL' : 'this image';
       this.el.vDelete.dataset.armed = '1';
       this.el.vDelete.classList.add('confirming');
-      this.el.vDelete.textContent = 'Really delete? ✓ Confirm';
+      this.el.vDelete.textContent = `Really delete ${which}? ✓ Confirm`;
       return;
     }
     this.disarmDelete();
@@ -861,15 +863,30 @@ class LibraryView {
     const idx = this.viewIdx;
     const item = this.items[idx];
     if (!item) return;
+    // Delete what the viewer is SHOWING (2026-10-29): the ⧉ toggle switches the
+    // image between the final and its version original, but delete used to send
+    // item.path unconditionally — so "cycle to original, delete" removed the
+    // final. Target the displayed variant and never the other one.
+    const deletingOriginal = !!(this.viewingOriginal && item.original);
+    const targetPath = deletingOriginal ? item.original : item.path;
     try {
       const r = await fetch('/api/library/pending-delete', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: item.path }),
+        body: JSON.stringify({ path: targetPath }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
-      this.toast(`Queued ${item.name} for deletion — confirm to purge`);
+      this.toast(`Queued ${deletingOriginal ? 'the original' : item.name} for deletion — confirm to purge`);
     } catch (err) {
       this.toast(`Delete failed: ${err.message}`, true);
+      return;
+    }
+    if (deletingOriginal) {
+      // The final survives; only its family reference is now dangling. Detach it
+      // locally and return to the final so the viewer cannot keep showing a file
+      // that is already in the pending area.
+      item.original = null;
+      this.viewingOriginal = false;
+      this.openViewer(idx);
       return;
     }
     // Remove from listing + advance like promote (close-at-end). The file

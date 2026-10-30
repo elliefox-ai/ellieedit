@@ -503,3 +503,20 @@ def test_side_panel_chips_not_dropdowns():
     assert '<select id="lib-shot"' not in lib
     seg = lib[lib.index("async applySideMeta"):lib.index("async applySideDetail")]
     assert "meta/bulk" in seg and "this.reload()" not in seg
+
+
+def test_viewer_delete_targets_displayed_variant():
+    """2026-10-29 data-loss bug: the ⧉ toggle switches the viewer between a
+    final and its version original, but deleteFromViewer() sent item.path
+    unconditionally — so cycling to the original and pressing Delete moved
+    the FINAL to the pending area (and the original was never touched).
+    Delete must target what the viewer is SHOWING, and the confirm label
+    must name which one so the operator can see it."""
+    lib = (Path(__file__).parent.parent /
+           "frontend" / "js" / "modules" / "library.js").read_text()
+    assert "deletingOriginal" in lib, "delete no longer distinguishes the displayed variant"
+    assert "const targetPath = deletingOriginal ? item.original : item.path" in lib
+    assert "Really delete ${which}?" in lib, "confirm label must name the target"
+    fn = lib[lib.index("async deleteFromViewer() {"):lib.index("async retagFromViewer")]
+    assert "body: JSON.stringify({ path: targetPath })" in fn, "delete still sends the final path"
+    assert "path: item.path })" not in fn
