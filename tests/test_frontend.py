@@ -27,8 +27,8 @@ def test_js_operator_sequence():
 
 
 def test_js_viewer_zoom_math():
-    """2026-10-29 viewer zoom: pinch ratio, swipe gating, pan
-    clamp, and wheel scale — pure helpers, node."""
+    """2026-10-29 viewer zoom math, reused by Update: pinch
+    ratio, swipe gating, pan clamp, wheel scale — pure, node."""
     r = subprocess.run(
         ["node", str(HERE / "js" / "zoom-viewer.test.mjs")],
         capture_output=True, text=True, timeout=60,
@@ -776,3 +776,36 @@ def test_viewer_zoom_stage_gallery_and_library():
         assert "addEventListener('touchend'" not in src, mod
         # Click-to-close is fit-only when zoomed.
         assert "classList.contains('zoomed')" in src
+
+
+def test_update_zoom_stage():
+    """2026-10-29 Update zoom: the transform applies to the
+    comparer box + mask overlay only, never the sidebar; two
+    fingers pinch/pan and cancel any stroke/divider drag in
+    progress; sidebar View controls + wheel zoom; a new stack
+    starts at fit. The mask/divider coordinate code needs no
+    new mapping because it already uses getBoundingClientRect,
+    which includes the transform."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "update.js").read_text()
+    assert "from './zoom-viewer.js'" in src
+    assert "pinchScale" in src and "clampPan" in src and "wheelScale" in src
+    # Transform targets: comparer + mask overlay only.
+    seg = src[src.index("applyZoom() {"):src.index("clampZoomPan() {")]
+    assert "el.cmp.style.transform" in seg
+    assert "el.maskCanvas.style.transform" in seg
+    assert "upd-side" not in seg and "upd-main" not in seg
+    # Sidebar View controls.
+    assert 'data-act="upd-zoom-out"' in src
+    assert 'data-act="upd-zoom-in"' in src
+    assert 'data-act="upd-zoom-fit"' in src
+    assert 'id="upd-zoom-val"' in src
+    # Gesture gate: capture handler cancels stroke/divider on
+    # the second finger, and target handlers refuse to start.
+    assert "_zoomPinching" in src
+    assert "restoreMaskUndo()" in src[src.index("zPointers"):]
+    assert "_dragStartPct" in src
+    assert "if (this._zoomPinching) return;" in src
+    # Wheel zoom + Fit reset + new-stack reset.
+    assert "wheel" in src and "zoomAroundCursor" in src
+    assert "resetZoom()" in src
+    assert "this.resetZoom();  // a new stack starts at fit" in src

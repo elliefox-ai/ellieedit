@@ -8,6 +8,12 @@ import {
   createStack, current, source, isOriginal, canRevert, compareEntry,
   pushRender, swap, revert, revertToOriginal, saveable,
 } from './update-stack.js';
+// Zoom gesture math is shared with the viewers (2026-10-29):
+// pinchScale, clampPan, wheelScale, dist. The binding is NOT
+// shared — the viewers bind one image + swipe + click-to-close,
+// while Update binds a comparer + mask + divider, so only the
+// pure math is reused here.
+import { dist, pinchScale, clampPan, wheelScale } from './zoom-viewer.js';
 
 function panelHTML() {
   return `
@@ -36,9 +42,11 @@ function panelHTML() {
       border-radius: 4px; padding: 8px; font-size: 12px; font-family: inherit; }
     .upd-main { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
     .upd-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
-      padding: 12px; position: relative; overflow: hidden; }
+      padding: 12px; position: relative; overflow: hidden; touch-action: none; }
     .cmp { position: relative; max-width: 100%; max-height: 100%;
-      display: none; touch-action: none; user-select: none; -webkit-user-select: none; }
+      display: none; touch-action: none; user-select: none; -webkit-user-select: none;
+      transform-origin: center; }
+    .upd-stage-mask { transform-origin: center; }
     .cmp img { display: block; position: absolute; inset: 0; width: 100%;
       height: 100%; max-width: none; max-height: none; object-fit: contain; }
     .cmp .cmp-b { position: absolute; inset: 0; overflow: hidden; }
@@ -96,6 +104,16 @@ function panelHTML() {
           <button class="ee-btn" data-act="upd-save-prompt" title="Save current prompt">💾 Save</button>
           <button class="ee-btn" data-act="upd-del-prompt" title="Delete selected saved prompt">🗑</button>
         </div>
+      </section>
+      <section class="upd-sec">
+        <h4>View — zoom the stage image only</h4>
+        <div class="upd-row">
+          <button class="ee-btn" data-act="upd-zoom-out" title="Zoom out">−</button>
+          <button class="ee-btn" data-act="upd-zoom-in" title="Zoom in">＋</button>
+          <button class="ee-btn" data-act="upd-zoom-fit" title="Reset zoom to fit">Fit</button>
+          <span id="upd-zoom-val" style="font-size:12px;color:#8a8aaa;min-width:44px;text-align:center">100%</span>
+        </div>
+        <span class="upd-caption">Pinch over the stage image to zoom; two fingers pan. The sidebar is never zoomed — only the image box. 1× = fit.</span>
       </section>
       <section class="upd-sec upd-mask" id="upd-mask" style="display:none">
         <h4>Mask — paint on the stage image</h4>
@@ -156,7 +174,7 @@ class UpdateView {
       'saved', 'stage', 'empty', 'cmp', 'img-a', 'wrap-b', 'img-b', 'div',
       'tag-a', 'tag-b', 'pos', 'save', 'compare', 'denoise', 'denoise-lbl',
       'denoise-val', 'mask', 'mask-canvas', 'mask-undo', 'mask-opacity',
-      'mask-show', 'mask-source', 'brush']) {
+      'mask-show', 'mask-source', 'brush', 'zoom-val']) {
       this.el[id.replace(/-(\w)/g, (_, c) => c.toUpperCase())] =
         panel.querySelector(`#upd-${id}`);
     }
@@ -173,6 +191,14 @@ class UpdateView {
     this.maskShow = true;
     this.maskUndoStack = [];    // mask-canvas data URLs, one per stroke start
     this.jobCancelled = false;
+    // Zoom (2026-10-29): relative to fit — 1 = the fit size
+    // fitComparer() computes, up to 4. The transform applies to
+    // the comparer box AND the mask overlay only; the sidebar
+    // (.upd-side) is a sibling of the stage and is never
+    // transformed, so the tool panel stays in place.
+    this.zoomScale = 1;
+    this.zoomTx = 0; this.zoomTy = 0;
+    this._zoomPinching = false;  // two fingers down: pinch/pan, never paint/drag
     this.compareOn = false;    // comparer is opt-in, never shown by default
     this.cmpPct = 100;          // when opened, start "closed" on the new render
     window.addEventListener('resize', () => this.fitComparer());
@@ -400,6 +426,7 @@ class UpdateView {
       const objUrl = URL.createObjectURL(blob);
       this.stack = createStack({ url: objUrl, name: name || 'image.png', path: path || '' });
       this.compareOn = false; this.cmpPct = 100;
+      this.resetZoom();  // a new stack starts at fit; version changes do not
       this.showCurrent();
       if (this.maskedMode) this.initMaskForSource();
       this.el.status.textContent = `source: ${this.stack.entries[0].name}`;
@@ -579,6 +606,64 @@ class UpdateView {
     cmp.style.height = Math.round(natH * scale) + 'px';
     this.syncComparer();
     this.drawMaskView();
+    this.clampZoomPan();
+    this.applyZoom();
+  }
+
+  // ---- zoom (2026-10-29) -------------------------------------------------
+  // The transform goes on the comparer box and the mask overlay
+  // together — same size, same position, same transform, so they
+  // stay aligned. The overlay's getBoundingClientRect() then
+  // already includes the scale, which is why maskStroke needs
+  // no new mapping: its pointer → rect → natural-size ratio
+  // accounts for zoom for free. Same for the divider drag,
+  // which maps through imgA's bounding rect. The sidebar is
+  // never touched by this transform.
+  applyZoom() {
+    const t = this.zoomScale === 1 ? '' :
+      `translate(${this.zoomTx}px, ${this.zoomTy}px) scale(${this.zoomScale})`;
+    this.el.cmp.style.transform = t;
+    if (this.el.maskCanvas) this.el.maskCanvas.style.transform = t;
+    if (this.el.zoomVal) this.el.zoomVal.textContent = Math.round(this.zoomScale * 100) + '%';
+  }
+
+  clampZoomPan() {
+    const st = this.el.stage, cmp = this.el.cmp;
+    if (!st || !cmp) return;
+    const c = clampPan(this.zoomTx, this.zoomTy, st.clientWidth, st.clientHeight,
+      cmp.clientWidth, cmp.clientHeight, this.zoomScale);
+    this.zoomTx = c.tx; this.zoomTy = c.ty;
+  }
+
+  resetZoom() {
+    this.zoomScale = 1; this.zoomTx = 0; this.zoomTy = 0;
+    this.applyZoom();
+  }
+
+  stepZoom(factor) {
+    const old = this.zoomScale;
+    this.zoomScale = Math.min(4, Math.max(1, this.zoomScale * factor));
+    if (this.zoomScale === 1) { this.zoomTx = 0; this.zoomTy = 0; }
+    else if (this.zoomScale !== old) this.clampZoomPan();
+    this.applyZoom();
+  }
+
+  zoomAroundCursor(clientX, clientY, newScale) {
+    const old = this.zoomScale;
+    if (newScale === old) return;
+    // Transform origin is the box centre: to keep the point under
+    // the cursor fixed, the translate moves by (1 - k) * (cursor
+    // - centre), where k = new/old.
+    const r = this.el.cmp.getBoundingClientRect();
+    const cx = clientX - (r.left + r.width / 2);
+    const cy = clientY - (r.top + r.height / 2);
+    const k = newScale / old;
+    this.zoomTx += cx * (1 - k);
+    this.zoomTy += cy * (1 - k);
+    this.zoomScale = newScale;
+    if (this.zoomScale <= 1) { this.zoomScale = 1; this.zoomTx = 0; this.zoomTy = 0; }
+    else this.clampZoomPan();
+    this.applyZoom();
   }
 
   syncComparer() {
@@ -658,6 +743,12 @@ class UpdateView {
     const mvc = this.el.maskCanvas;
     let masking = false;
     mvc.addEventListener('pointerdown', e => {
+      // Second finger: this is a pinch, never a stroke. The stage's
+      // capture handler (below) has already set _zoomPinching and
+      // cancelled any stroke in progress, so this must not start
+      // a new one — otherwise the second finger would paint a dot
+      // and push a bogus undo snapshot.
+      if (this._zoomPinching) return;
       if (!this.maskCanvas) { this.el.status.textContent = 'load an image first'; return; }
       masking = true; this._lastMaskPt = null;
       this.pushMaskUndo();
@@ -730,7 +821,9 @@ class UpdateView {
     let dragging = false;
     stage.addEventListener('pointerdown', e => {
       if (!this.compareOn) return;  // single view is not draggable
+      if (this._zoomPinching) return;  // second finger: pinch, not a drag
       dragging = true;
+      this._dragStartPct = this.cmpPct;  // restored if a pinch cancels the drag
       stage.setPointerCapture(e.pointerId);
       drag(e);
     });
@@ -752,6 +845,79 @@ class UpdateView {
       e.preventDefault();
       this.syncComparer();
     });
+
+    // ---- zoom gestures (2026-10-29) ------------------------------------
+    // One shared pointer map on the stage, in CAPTURE phase so it
+    // runs before the mask/divider target handlers above. That
+    // ordering is the whole gate: when the second finger lands,
+    // _zoomPinching is already true before the mask/divider
+    // handlers see the event, so they refuse to start, and any
+    // stroke/drag already in progress is cancelled here —
+    // restoreMaskUndo() on the snapshot pushed at stroke start
+    // (no jump line, no half-stroke), divider percentage
+    // restored from drag start. While two fingers are down,
+    // pinch distance scales and two-finger drag pans; with one
+    // finger, zoomed, and neither painting nor dragging, drag
+    // pans. One finger at fit with no tool active does nothing,
+    // as before. The sidebar buttons and wheel are the mouse
+    // paths: the stage has nothing to scroll, so plain wheel
+    // zooms around the cursor.
+    const zs = this.el.stage;
+    const zPointers = new Map();
+    let zPinch = null;
+    zs.addEventListener('pointerdown', e => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      if (!this.stack) return;
+      zPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (zPointers.size >= 2) {
+        this._zoomPinching = true;
+        if (masking) { masking = false; this._lastMaskPt = null; this.restoreMaskUndo(); }
+        if (dragging) {
+          dragging = false;
+          if (this._dragStartPct != null) { this.cmpPct = this._dragStartPct; this.syncComparer(); }
+        }
+        const [a, b] = [...zPointers.values()];
+        zPinch = { d0: dist(a, b), mid0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+                   scale0: this.zoomScale, tx0: this.zoomTx, ty0: this.zoomTy };
+      }
+    }, true);
+    zs.addEventListener('pointermove', e => {
+      const p = zPointers.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX; p.y = e.clientY;
+      if (zPointers.size >= 2 && zPinch) {
+        const [a, b] = [...zPointers.values()];
+        const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        this.zoomScale = pinchScale(zPinch.scale0, zPinch.d0, dist(a, b));
+        this.zoomTx = zPinch.tx0 + (m.x - zPinch.mid0.x);
+        this.zoomTy = zPinch.ty0 + (m.y - zPinch.mid0.y);
+        this.clampZoomPan(); this.applyZoom();
+      } else if (zPointers.size === 1 && this.zoomScale > 1 && !masking && !dragging) {
+        this.zoomTx += dx; this.zoomTy += dy;
+        this.clampZoomPan(); this.applyZoom();
+      }
+    });
+    const zUp = e => {
+      zPointers.delete(e.pointerId);
+      if (zPointers.size < 2) {
+        this._zoomPinching = false; zPinch = null;
+        if (this.zoomScale <= 1.05) this.resetZoom();
+      }
+    };
+    zs.addEventListener('pointerup', zUp);
+    zs.addEventListener('pointercancel', zUp);
+    zs.addEventListener('wheel', e => {
+      if (!this.stack) return;
+      e.preventDefault();
+      this.zoomAroundCursor(e.clientX, e.clientY, wheelScale(this.zoomScale, e.deltaY));
+    }, { passive: false });
+    this.panel.querySelector('[data-act="upd-zoom-out"]')
+      .addEventListener('click', () => this.stepZoom(1 / 1.25));
+    this.panel.querySelector('[data-act="upd-zoom-in"]')
+      .addEventListener('click', () => this.stepZoom(1.25));
+    this.panel.querySelector('[data-act="upd-zoom-fit"]')
+      .addEventListener('click', () => this.resetZoom());
   }
 }
 
