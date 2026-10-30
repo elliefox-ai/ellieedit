@@ -26,6 +26,17 @@ def test_js_operator_sequence():
     assert "PASS" in r.stdout
 
 
+def test_js_viewer_zoom_math():
+    """2026-10-29 viewer zoom: pinch ratio, swipe gating, pan
+    clamp, and wheel scale — pure helpers, node."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "zoom-viewer.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+    assert "OK" in r.stdout
+
+
 def test_js_layer_model():
     """F1 (2026-10-21): pure layer/ring/mask-ownership logic (node)."""
     r = subprocess.run(
@@ -739,3 +750,29 @@ def test_library_pending_sidebar_restore_no_grid_reload():
     assert "this.reload()" not in seg
     assert "Really purge all?" in seg
     assert "dataset.armed" in seg
+
+
+def test_viewer_zoom_stage_gallery_and_library():
+    """2026-10-29 viewers-first zoom: Gallery + Library share
+    zoom-viewer.js (pinch, pan while zoomed, swipe only at fit).
+    The old touchstart/touchend swipe code — which could not tell
+    a pinch from a swipe — is gone from both viewers, and every
+    new image starts at fit."""
+    for mod in ("gallery", "library"):
+        src = (HERE.parent / "frontend" / "js" / "modules" / f"{mod}.js").read_text()
+        assert "from './zoom-viewer.js'" in src
+        assert "bindViewerZoom({" in src
+        assert "viewerZoom?.reset()" in src
+        assert 'data-act="viewer-zoom-in"' in src
+        assert 'data-act="viewer-zoom-out"' in src
+        assert 'data-act="viewer-zoom-fit"' in src
+        assert ".zoomed .navzone { display: none; }" in src
+        assert "touch-action: none" in src
+        # Old swipe detector gone: no touchstart/touchend listeners
+        # in either viewer module (touch-action:none + Pointer
+        # Events in zoom-viewer.js replace it; comments may still
+        # name the old events, listeners may not).
+        assert "addEventListener('touchstart'" not in src, mod
+        assert "addEventListener('touchend'" not in src, mod
+        # Click-to-close is fit-only when zoomed.
+        assert "classList.contains('zoomed')" in src

@@ -11,6 +11,7 @@
 import { registerModule } from '../shell.js';
 import { createSendMenu } from '../components/send-menu.js';
 import { buildListParams, countLine } from './library-core.js';
+import { bindViewerZoom } from './zoom-viewer.js';
 
 const PAGE_SIZE = 40; // must match backend PAGE_SIZE for cursor math
 
@@ -153,8 +154,9 @@ function panelHTML() {
     .lib-viewer .bar .ee-btn.danger.confirming {
       background: #6a2020; color: #ffd0d0; box-shadow: 0 0 8px rgba(220,60,60,0.6); }
     .lib-viewer .stage { flex: 1; display: flex; align-items: center; justify-content: center;
-      overflow: hidden; min-height: 0; }
-    .lib-viewer .stage img { max-width: 100%; max-height: 100%; object-fit: contain; }
+      overflow: hidden; min-height: 0; touch-action: none; }
+    .lib-viewer .stage img { max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none; }
+    .lib-viewer.zoomed .navzone { display: none; }
     .lib-viewer .gone-note {
       display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
       background: rgba(20,20,40,0.85); color: #b0b0d0; font-size: 14px;
@@ -249,6 +251,9 @@ function panelHTML() {
         <button class="ee-btn" id="libv-family" style="display:none" title="Show this final's original (Update version family)">⧉ Original</button>
         <span id="libv-sendwrap"></span>
         <button class="ee-btn danger" id="libv-delete" title="Move to deletion queue pending area — nothing is deleted until you confirm">🗑 Delete</button>
+        <button class="ee-btn" data-act="viewer-zoom-out" title="Zoom out">−</button>
+        <button class="ee-btn" data-act="viewer-zoom-in" title="Zoom in">＋</button>
+        <button class="ee-btn" data-act="viewer-zoom-fit" title="Reset zoom to fit">Fit</button>
         <button class="ee-btn" id="libv-close">✕</button>
       </div>
       <div class="stage"><img id="libv-img" alt=""></div>
@@ -928,6 +933,7 @@ class LibraryView {
     this.viewIdx = idx;
     const it = this.items[idx];
     if (!it) return;
+    this.viewerZoom?.reset();  // every new image starts at fit
     this.disarmDelete();
     this.viewingOriginal = false;
     this.el.vNote.style.display = 'none';
@@ -948,6 +954,7 @@ class LibraryView {
   toggleFamily() {
     const it = this.items[this.viewIdx];
     if (!it || !it.original) return;
+    this.viewerZoom?.reset();  // a different image starts at fit
     this.viewingOriginal = !this.viewingOriginal;
     this.el.vImg.src = this.fileUrl(this.viewingOriginal ? it.original : it.path);
     this.el.vFamily.textContent = this.viewingOriginal ? '⧉ Final' : '⧉ Original';
@@ -1095,7 +1102,9 @@ class LibraryView {
     this.el.vSendWrap.appendChild(sendMenu.el);
     this.sendMenu = sendMenu;
     this.el.vDelete.addEventListener('click', () => this.armDelete());
-    this.el.vImg.addEventListener('click', e => { if (e.target === this.el.vImg) this.closeViewer(); });
+    this.el.vImg.addEventListener('click', e => {
+      if (e.target === this.el.vImg && !this.el.viewer.classList.contains('zoomed')) this.closeViewer();
+    });
     this.onKey = e => {
       if (this.el.viewer.style.display !== 'flex') return;
       if (e.key === 'Escape') this.closeViewer();
@@ -1103,14 +1112,15 @@ class LibraryView {
       else if (e.key === 'ArrowRight') this.nav(1);
     };
     document.addEventListener('keydown', this.onKey);
-    let sx = null;
-    this.el.viewer.addEventListener('touchstart', e => { sx = e.touches[0].clientX; }, { passive: true });
-    this.el.viewer.addEventListener('touchend', e => {
-      if (sx === null) return;
-      const dx = e.changedTouches[0].clientX - sx;
-      if (Math.abs(dx) > 50) this.nav(dx < 0 ? 1 : -1);
-      sx = null;
-    }, { passive: true });
+    // Zoom stage (2026-10-29): same shared module as Gallery —
+    // pinch to zoom, pan while zoomed, swipe only at fit. The
+    // old touchstart/touchend swipe code is gone for the same
+    // reason: it could not tell a pinch from a swipe.
+    this.viewerZoom = bindViewerZoom({
+      stage: this.el.viewer.querySelector('.stage'),
+      img: this.el.vImg, viewer: this.el.viewer,
+      onSwipe: dir => this.nav(dir),
+    });
   }
 
   toast(msg, isErr) {

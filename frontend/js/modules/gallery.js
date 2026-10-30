@@ -15,6 +15,7 @@ import { planFaceCycleHandoff } from '../handoff.js';
 import { createSendMenu } from '../components/send-menu.js';
 import { planMarkBatch } from './marking-batch.js';
 import { crumbsFor, joinDir, isBrowsableDir } from './gallery-path.js';
+import { bindViewerZoom } from './zoom-viewer.js';
 import { diffManifest, planManifestChange, pickSurvivor, scrollDeltaFor } from './gallery-scroll.js';
 
 function panelHTML() {
@@ -145,8 +146,9 @@ function panelHTML() {
     .gal-viewer .bar .fname { color: #b0b0d0; font-size: 12px; flex: 1;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .gal-viewer .stage { flex: 1; display: flex; align-items: center; justify-content: center;
-      overflow: hidden; min-height: 0; }
-    .gal-viewer .stage img { max-width: 100%; max-height: 100%; object-fit: contain; }
+      overflow: hidden; min-height: 0; touch-action: none; }
+    .gal-viewer .stage img { max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none; }
+    .gal-viewer.zoomed .navzone { display: none; }
     .gal-viewer .bar .ee-btn { min-height: 44px; }
     .gal-viewer .moved-note {
       display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
@@ -202,6 +204,9 @@ function panelHTML() {
       <button class="ee-btn primary" data-act="viewer-promote" title="Promote to Library (P)">⬆ Promote</button>
       <button class="ee-btn" data-act="to-update" title="Open in Update tab (version stack)">✎ Update</button>
       <button class="ee-btn danger" data-act="viewer-delete" title="Mark for deletion (Delete key) — nothing is deleted until you confirm in the Deletion view">🗑 Delete</button>
+      <button class="ee-btn" data-act="viewer-zoom-out" title="Zoom out">−</button>
+      <button class="ee-btn" data-act="viewer-zoom-in" title="Zoom in">＋</button>
+      <button class="ee-btn" data-act="viewer-zoom-fit" title="Reset zoom to fit">Fit</button>
       <button class="ee-btn" data-act="close">✕</button>
     </div>
     <div class="stage"><img data-id="viewer-img" alt=""></div>
@@ -1307,6 +1312,7 @@ export class Gallery {
   openViewer(idx) {
     this.viewIdx = idx;
     const it = this.items[idx];
+    this.viewerZoom?.reset();  // every new image starts at fit
     this.disarmViewerDelete();
     this.el.viewerNote.style.display = 'none';
     this.el.viewerImg.onload = () => { this.el.viewerNote.style.display = 'none'; };
@@ -1372,7 +1378,12 @@ export class Gallery {
       window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'update' } }));
       this.closeViewer();
     });
-    this.el.viewerImg.addEventListener('click', e => { if (e.target === this.el.viewerImg) this.closeViewer(); });
+    this.el.viewerImg.addEventListener('click', e => {
+      // Click-to-close is fit-only: while zoomed, a tap is part of
+      // examining, not closing (the zoom module also stops the
+      // click from reaching here, but keep the guard explicit).
+      if (e.target === this.el.viewerImg && !this.el.viewer.classList.contains('zoomed')) this.closeViewer();
+    });
     this.onKey = e => {
       if (this.el.viewer.style.display !== 'flex') return;
       if (isTypingTarget(e)) return;   // shared guard (key-guards.js)
@@ -1383,15 +1394,15 @@ export class Gallery {
       else if (e.key === 'ArrowRight') this.nav(1);
     };
     document.addEventListener('keydown', this.onKey);
-    // Swipe on the stage.
-    let sx = null;
-    this.el.viewer.addEventListener('touchstart', e => { sx = e.touches[0].clientX; }, { passive: true });
-    this.el.viewer.addEventListener('touchend', e => {
-      if (sx === null) return;
-      const dx = e.changedTouches[0].clientX - sx;
-      if (Math.abs(dx) > 50) this.nav(dx < 0 ? 1 : -1);
-      sx = null;
-    }, { passive: true });
+    // Zoom stage (2026-10-29): pinch to zoom, pan while zoomed,
+    // swipe only at fit. The old touchstart/touchend swipe code
+    // is gone — it could not tell a pinch from a swipe, which
+    // is exactly the bug this replaces.
+    this.viewerZoom = bindViewerZoom({
+      stage: this.el.viewer.querySelector('.stage'),
+      img: this.el.viewerImg, viewer: this.el.viewer,
+      onSwipe: dir => this.nav(dir),
+    });
   }
 }
 
