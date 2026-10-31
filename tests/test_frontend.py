@@ -117,6 +117,17 @@ def test_js_deploy_gate_covers_foxden():
     assert "ok js/modules/foxden-recent.js" in r.stdout
 
 
+def test_js_deploy_gate_covers_filters():
+    """The Safari-syntax deploy gate must parse the Filters modules too."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "syntax-check.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"syntax gate failed:\n{r.stdout}\n{r.stderr}"
+    assert "ok js/modules/filters.js" in r.stdout
+    assert "ok js/modules/filters-tunes.js" in r.stdout
+
+
 def test_kept_gens_share_the_layers_row():
     """Task 10, revised 2026-10-16f: the tools drawer is ONE row now; the gen
     strip still lives in it, right-aligned; data-id unchanged."""
