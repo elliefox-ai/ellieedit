@@ -1365,6 +1365,7 @@ export class Gallery {
         { label: '🎭 Puppet Theater — as background', target: 'puppet', as: 'background' },
         { label: '🦊 FoxDen — input image', target: 'foxden' },
         { label: '→ FaceCycle', target: 'facecycle' },
+        { label: '🎛 Filters', target: 'filters' },
       ],
       getPayload: () => {
         const item = this.items[this.viewIdx];

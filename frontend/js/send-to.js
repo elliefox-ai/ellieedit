@@ -12,7 +12,7 @@
 // Back-compat: facecycle and update keep their original events (and
 // payload shapes); this module only maps onto them.
 
-export const SEND_TARGETS = ['facecycle', 'update', 'puppet', 'foxden'];
+export const SEND_TARGETS = ['facecycle', 'update', 'puppet', 'foxden', 'filters'];
 
 // Puppet accepts a new puppet layer or the stage background.
 export const PUPPET_AS = ['layer', 'background'];
@@ -66,6 +66,12 @@ export function routeSend(detail) {
     const d = { urls, names, source: source || 'Gallery' };
     if (provenance) d.provenance = provenance;
     return { target, label, events: [{ type: 'ellieedit:facecycle-handoff', detail: d }] };
+  }
+  if (target === 'filters') {
+    // Filters holds one source image: first url wins (same as Update).
+    const d = { url: urls[0], name: names[0] };
+    if (provenance && Array.isArray(provenance.paths) && provenance.paths[0]) d.path = provenance.paths[0];
+    return { target, label, events: [{ type: 'ellieedit:filters-receive', detail: { urls, names, path: d.path, source: source || 'Gallery' } }] };
   }
   if (target === 'update') {
     // Update holds one source image: first url wins (same as its own handoff).

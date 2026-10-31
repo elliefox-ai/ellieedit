@@ -110,6 +110,7 @@ Promise.all([
   import(`./modules/puppet.js?v=${BUILD}`),
   import(`./modules/library.js?v=${BUILD}`),
   import(`./modules/update.js?v=${BUILD}`),
+  import(`./modules/filters.js?v=${BUILD}`),
 ]).then(() => {
   buildTabs();
   mountAll();

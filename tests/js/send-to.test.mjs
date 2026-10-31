@@ -8,8 +8,8 @@ import { planFaceCycleHandoff } from '../../frontend/js/handoff.js';
 
 const G = '/api/gallery/file?path=out%2Fa.png';
 
-test('targets: the four tabs the matrix touches', () => {
-  assert.deepEqual([...SEND_TARGETS].sort(), ['facecycle', 'foxden', 'puppet', 'update']);
+test('targets: the five tabs the matrix touches (Filters joined 2026-10-31)', () => {
+  assert.deepEqual([...SEND_TARGETS].sort(), ['facecycle', 'filters', 'foxden', 'puppet', 'update']);
 });
 
 test('refuses unknown targets and empty / junk payloads', () => {
@@ -75,6 +75,16 @@ test('BACK-COMPAT update: single {url,name,path} on open-in-update', () => {
   assert.deepEqual(r.events[0].detail, { url: G, name: 'a.png', path: 'out/a.png' });
   assert.deepEqual(routeSend({ target: 'update', urls: [G], names: ['a.png'] }).events[0].detail,
     { url: G, name: 'a.png' });
+});
+
+test('filters: first url wins, on its own receive event, with the gallery path', () => {
+  const r = routeSend({ target: 'filters', urls: [G, '/api/x'], names: ['a.png', 'b.png'],
+    provenance: { kind: 'gallery', paths: ['out/a.png'] }, source: 'Gallery' });
+  assert.equal(r.events[0].type, 'ellieedit:filters-receive');
+  assert.equal(r.events[0].detail.urls[0], G);
+  assert.equal(r.events[0].detail.names[0], 'a.png');
+  assert.equal(r.events[0].detail.path, 'out/a.png');
+  assert.equal(r.events[0].detail.source, 'Gallery');
 });
 
 test('names fall back to the url (filename= query, path= query, last segment)', () => {
