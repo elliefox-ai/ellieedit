@@ -234,6 +234,13 @@ def fill_engine() -> str:
 
 
 def _fill_field_cv2(rgb: np.ndarray, v: np.ndarray, dark_t: float) -> np.ndarray:
+    """Reference-exact v5 semantics: pass `clean` as the distance-transform
+    source so labels enumerate LINE pixels; a line pixel's LUT entry holds
+    the color of the nearest clean pixel to it. Interior pixels of wide
+    black masses can be nobody's nearest line pixel -> LUT entry stays 0
+    -> those interiors stay black. That IS the eye-adopted reference look
+    (masses keep their black); do not 'fix' it here — the gate exists for
+    mass treatment, and the smoke test pins reference exactness."""
     cv2 = _cv2()
     clean = (v >= dark_t).astype(np.uint8)
     ys, xs = np.where(clean == 1)
