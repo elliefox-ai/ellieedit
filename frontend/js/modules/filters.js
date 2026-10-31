@@ -76,7 +76,7 @@ function panelHTML() {
           <label>Dark threshold <input type="range" data-id="ch-dark" min="0.1" max="0.9" step="0.01" value="0.45"> <span data-id="ch-dark-val">0.45</span></label>
           <label>Line saturation <input type="range" data-id="ch-sat" min="0.5" max="2" step="0.05" value="1.45"> <span data-id="ch-sat-val">1.45</span></label>
           <label>Line darkness <input type="range" data-id="ch-val" min="0.3" max="1" step="0.01" value="0.72"> <span data-id="ch-val-val">0.72</span></label>
-          <label>Fill smoothing <input type="range" data-id="ch-smooth" min="0" max="11" step="2" value="7"> <span data-id="ch-smooth-val">7</span> <span class="flt-caption">(0 = off, odd only)</span></label>
+          <label>Fill smoothing <input type="range" data-id="ch-smooth" min="0" max="5" step="1" value="3"> <span data-id="ch-smooth-val">7</span> <span class="flt-caption">(0 = off, then 3–11)</span></label>
           <label>Line smoothing <input type="range" data-id="ch-sigma" min="0" max="2" step="0.1" value="0"> <span data-id="ch-sigma-val">0</span> <span class="flt-caption">(secondary — softens source-lineart jaggies)</span></label>
           <label><input type="checkbox" data-id="ch-gate"> Protect black masses (thin-stroke gate, opt-in)</label>
           <label>Max stroke width <input type="range" data-id="gate-maxw" min="1" max="12" step="1" value="6"> <span data-id="gate-maxw-val">6</span> <span class="flt-caption">(px at a 1280×848 reference — scaled to the working image, so preview and full-res gate the same relative width)</span></label>
@@ -139,7 +139,7 @@ function panelHTML() {
 // the canvas from the last colorhold result — instant, no backend call.
 const SLIDERS = [
   ['ch-dark', 'dark_t', parseFloat, 'backend'], ['ch-sat', 'sat_mul', parseFloat, 'backend'],
-  ['ch-val', 'val_mul', parseFloat, 'backend'], ['ch-smooth', 'smooth', v => parseInt(v, 10), 'backend'],
+  ['ch-val', 'val_mul', parseFloat, 'backend'], ['ch-smooth', 'smooth', v => { const n = parseInt(v, 10); return n === 0 ? 0 : n * 2 + 1; }, 'backend'],
   ['ch-sigma', 'line_sigma', parseFloat, 'backend'],
   ['gate-maxw', 'gate_maxw', v => parseInt(v, 10), 'backend'],
   ['gate-bh', 'gate_bh_full', parseFloat, 'backend'],
@@ -175,7 +175,8 @@ class Filters {
       const el = q(id);
       el.addEventListener('input', () => {
         const valEl = q(id + '-val');
-        if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength') ? `${el.value}%` : el.value;
+        if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength') ? `${el.value}%`
+          : (id === 'ch-smooth') ? (el.value === '0' ? '0' : el.value * 2 + 1) : el.value;
         // Canvas sliders (tunes + universal strength) re-draw instantly
         // from the last colorhold result — no backend round-trip, so
         // they feel live. Backend sliders go through the debounced

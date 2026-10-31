@@ -148,6 +148,7 @@ def defaults():
 
 @router.post("/apply")
 def apply(body: ApplyBody):
+    import logging
     try:
         raw = _load_source(body.path, body.image_b64)
         rgb = _ch.png_bytes_to_rgb(raw, max_side=body.preview_max_side)
@@ -160,6 +161,10 @@ def apply(body: ApplyBody):
     except HTTPException:
         raise
     except ValueError as e:
+        logging.getLogger("uvicorn.error").warning(
+            "filters/apply 400: %r | body=%s",
+            e, {k: (f"<{len(str(v))} chars>" if k == "image_b64" else v)
+                for k, v in body.dict().items()})
         raise HTTPException(400, str(e))
     png = _ch.array_to_png_bytes(out)
     return {

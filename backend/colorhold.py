@@ -302,8 +302,11 @@ def _median_smooth(fill: np.ndarray, smooth: int) -> np.ndarray:
     Pillow path matches it on interiors (edges differ slightly)."""
     if not smooth:
         return fill
-    if smooth < 3 or smooth % 2 == 0:
-        raise ValueError("smooth must be 0 or an odd integer >= 3")
+    # Snap to the nearest valid kernel instead of rejecting: sliders and
+    # API clients can legitimately send even values (2026-10-31 live bug —
+    # the tab's own slider only produced evens, so every nonzero position
+    # 400'd). 0 = off; anything < 3 snaps up to 3; even snaps up one.
+    smooth = max(3, int(smooth) | 1)
     cv2 = _cv2()
     if cv2 is not None:
         return cv2.medianBlur((fill * 255).astype(np.uint8), smooth).astype(np.float32) / 255
