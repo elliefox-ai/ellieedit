@@ -260,17 +260,25 @@ class Filters {
     this.setStatus('Loading source…');
     try {
       let dataUrl = null;
-      if (url) {
+      let img;
+      if (path) {
+        // Server-rooted source: load the image directly from its own URL.
+        // The backend applies from `path`, so no data URL is ever needed —
+        // and the fetch→Blob→FileReader detour that broke gallery sends
+        // (readAsDataURL: not a Blob, 2026-10-31) disappears entirely.
+        img = await this.loadImage(url);
+      } else {
         const r = await fetch(url);
         if (!r.ok) throw new Error(`fetch failed: ${r.status}`);
+        const blob = await r.blob();
         dataUrl = await new Promise((res, rej) => {
           const fr = new FileReader();
           fr.onload = () => res(fr.result);
           fr.onerror = rej;
-          fr.readAsDataURL(r.blob());
+          fr.readAsDataURL(blob);
         });
+        img = await this.loadImage(dataUrl);
       }
-      const img = await this.loadImage(dataUrl);
       this.source = { name, path, dataUrl, img };
       this.colorholdUrl = null;
       this.baseImg = null;
