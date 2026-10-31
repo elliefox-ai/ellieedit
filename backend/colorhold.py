@@ -42,6 +42,35 @@ and dark_t. The router caches it keyed by (image bytes hash, dark_t)
 and recomputes only the cheap stage (median, darken, composite,
 strength) when sat/val/smoothing/strength change — the workorder's
 preferred preview flow (b).
+
+Black-mass gate (Claude's proposal, 2026-10-31, added as an OPT-IN
+in the Filters tab — v5 defaults are ungated, so this never changes
+a plain v5 run):
+  alpha *= thin, where thin comes from a black-hat on V: closing
+  with a kernel of 2*maxw+1 erases dark features narrower than the
+  kernel and leaves wider ones, so thin strokes get thin ~ 1 and
+  solid masses get thin ~ 0. Two changes from Claude's sketch, both
+  flagged:
+  - Scale: maxw is quoted at a 1280x848 reference (the v7 scale
+    convention) and scaled by sqrt(H*W / (1280*848)) for the working
+    image, so a preview at 1024px and a full-res commit gate the
+    same relative stroke width. Without this, preview and commit
+    would disagree on what counts as "thin".
+  - Strength: alpha *= (1 - s + s*thin), s = gate_strength / 100.
+    At 0 the gate is a no-op (exact v5); at 100 it is Claude's gate.
+    This also keeps the gate live-tweakable: strength changes blend
+    the cached thin mask, they do not recompute it.
+  The thin mask is cached like the fill field, keyed by (V hash,
+  effective maxw, bh_full). Its cv2 path uses the ellipse kernel
+  from Claude's sketch; the numpy/Pillow fallback uses MaxFilter
+  then MinFilter (a square closing, not an ellipse — close, not
+  identical). Honest limit, measured on the ship: textured mass
+  interiors still get a mean thin of ~0.33, not 0, because internal
+  detail narrower than the kernel (grilles, panel lines) legitimately
+  fires the black-hat — those are thin features inside a mass, and
+  tinting them is arguably correct; only the solid core is fully
+  protected. Thick bold outlines wider than the kernel also keep
+  their black, which is a style tradeoff, not just a mass fix.
 """
 
 import hashlib
@@ -57,6 +86,12 @@ DEFAULT_VAL_MUL = 0.72
 DEFAULT_SMOOTH = 7
 DEFAULT_LINE_SIGMA = 0.0
 DEFAULT_STRENGTH = 100.0
+# Gate defaults (opt-in; see module docstring). maxw is quoted at the
+# 1280x848 reference and scaled per working image (below).
+DEFAULT_GATE_MAXW = 6
+DEFAULT_GATE_BH_FULL = 0.06
+DEFAULT_GATE_STRENGTH = 100.0
+GATE_REFERENCE_AREA = 1280 * 848
 
 # Explicitly rejected by eye-testing 2026-10-31 (workorder) — do NOT add:
 # line-sat boost beyond ~1.75 (indistinguishable), charcoal/parabolic
@@ -64,6 +99,64 @@ DEFAULT_STRENGTH = 100.0
 
 _FILL_CACHE_MAX = 4
 _fill_cache: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+_THIN_CACHE_MAX = 4
+_thin_cache: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+
+
+def effective_gate_maxw(height: int, width: int, gate_maxw: int) -> int:
+    """Scale a reference-quoted maxw to the working image size, so
+    preview and full-res runs gate the same relative stroke width."""
+    if gate_maxw < 1:
+        raise ValueError("gate_maxw must be >= 1")
+    scale = (height * width / GATE_REFERENCE_AREA) ** 0.5
+    return max(1, int(round(gate_maxw * scale)))
+
+
+def _thin_mask_cv2(v: np.ndarray, maxw: int, bh_full: float) -> np.ndarray:
+    cv2 = _cv2()
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * maxw + 1, 2 * maxw + 1))
+    bh = cv2.morphologyEx(v, cv2.MORPH_CLOSE, k) - v
+    thin = np.clip(bh / bh_full, 0, 1)
+    return cv2.dilate(thin, np.ones((3, 3), np.uint8))
+
+
+def _thin_mask_pil(v: np.ndarray, maxw: int, bh_full: float) -> np.ndarray:
+    """Fallback closing: MaxFilter then MinFilter (square kernel).
+    Same black-hat idea as the cv2 ellipse path, not identical."""
+    size = 2 * maxw + 1
+    img = Image.fromarray((np.clip(v, 0, 1) * 255).astype(np.uint8))
+    closed = img.filter(ImageFilter.MaxFilter(size=size)).filter(ImageFilter.MinFilter(size=size))
+    close = np.asarray(closed, dtype=np.float32) / 255
+    thin = np.clip((close - v) / bh_full, 0, 1)
+    return np.asarray(Image.fromarray((thin * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(size=3)),
+                      dtype=np.float32) / 255
+
+
+def thin_mask(v: np.ndarray, gate_maxw: int = DEFAULT_GATE_MAXW,
+              bh_full: float = DEFAULT_GATE_BH_FULL) -> np.ndarray:
+    """Black-hat thin-stroke mask for a V channel. Pure (no cache)."""
+    if bh_full <= 0:
+        raise ValueError("gate_bh_full must be > 0")
+    maxw = effective_gate_maxw(v.shape[0], v.shape[1], gate_maxw)
+    if _cv2() is not None:
+        return _thin_mask_cv2(v, maxw, bh_full)
+    return _thin_mask_pil(v, maxw, bh_full)
+
+
+def cached_thin_mask(v: np.ndarray, gate_maxw: int = DEFAULT_GATE_MAXW,
+                     bh_full: float = DEFAULT_GATE_BH_FULL):
+    """Thin mask with the same LRU discipline as the fill cache.
+    Returns (mask, was_cached, effective_maxw)."""
+    maxw = effective_gate_maxw(v.shape[0], v.shape[1], gate_maxw)
+    key = (hashlib.sha256(v.tobytes()).hexdigest(), maxw, float(bh_full))
+    if key in _thin_cache:
+        _thin_cache.move_to_end(key)
+        return _thin_cache[key], True, maxw
+    mask = thin_mask(v, gate_maxw, bh_full)
+    _thin_cache[key] = mask
+    while len(_thin_cache) > _THIN_CACHE_MAX:
+        _thin_cache.popitem(last=False)
+    return mask, False, maxw
 
 
 def rgb_to_hsv(rgb: np.ndarray):
@@ -244,23 +337,39 @@ def colorhold_lineart(rgb: np.ndarray, dark_t: float = DEFAULT_DARK_T,
                       val_mul: float = DEFAULT_VAL_MUL,
                       smooth: int = DEFAULT_SMOOTH,
                       line_sigma: float = DEFAULT_LINE_SIGMA,
-                      strength: float = DEFAULT_STRENGTH):
+                      strength: float = DEFAULT_STRENGTH,
+                      gate: bool = False,
+                      gate_maxw: int = DEFAULT_GATE_MAXW,
+                      gate_bh_full: float = DEFAULT_GATE_BH_FULL,
+                      gate_strength: float = DEFAULT_GATE_STRENGTH):
     """Full v5 pipeline on a float [0, 1] RGB array. Returns
     (output_array, info) where info carries the fill engine and whether
-    the fill field came from cache (for the preview UI / tests)."""
+    the fill field came from cache (for the preview UI / tests).
+    With gate=False (the default) this is exact v5; the gate is an
+    opt-in that only ever multiplies alpha down, never up."""
     if rgb.ndim != 3 or rgb.shape[2] != 3:
         raise ValueError("rgb must be an HxWx3 array")
     if sat_mul < 0 or val_mul < 0:
         raise ValueError("sat_mul and val_mul must be >= 0")
     _, _, v = rgb_to_hsv(rgb)
     alpha = alpha_curve(v, dark_t)
+    gate_info = {"gate": bool(gate), "gate_effective_maxw": None, "cached_thin": False}
+    if gate:
+        s = min(1.0, max(0.0, float(gate_strength) / 100.0))
+        if s > 0:
+            thin, cached_thin, eff_maxw = cached_thin_mask(v, gate_maxw, gate_bh_full)
+            alpha = alpha * (1 - s + s * thin)
+            gate_info["gate_effective_maxw"] = eff_maxw
+            gate_info["cached_thin"] = cached_thin
     fill, cached = cached_fill_field(rgb, v, dark_t)
     fill = _median_smooth(fill, smooth)
     dark = darken_fill(fill, sat_mul, val_mul)
     alpha = _gaussian_alpha(alpha, line_sigma)
     out = rgb * (1 - alpha[..., None]) + dark * alpha[..., None]
     out = apply_strength(rgb, out, strength)
-    return np.clip(out, 0, 1), {"engine": fill_engine(), "cached_fill": cached}
+    info = {"engine": fill_engine(), "cached_fill": cached}
+    info.update(gate_info)
+    return np.clip(out, 0, 1), info
 
 
 def array_to_png_bytes(rgb: np.ndarray) -> bytes:

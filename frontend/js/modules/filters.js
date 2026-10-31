@@ -78,6 +78,11 @@ function panelHTML() {
           <label>Line darkness <input type="range" data-id="ch-val" min="0.3" max="1" step="0.01" value="0.72"> <span data-id="ch-val-val">0.72</span></label>
           <label>Fill smoothing <input type="range" data-id="ch-smooth" min="0" max="11" step="2" value="7"> <span data-id="ch-smooth-val">7</span> <span class="flt-caption">(0 = off, odd only)</span></label>
           <label>Line smoothing <input type="range" data-id="ch-sigma" min="0" max="2" step="0.1" value="0"> <span data-id="ch-sigma-val">0</span> <span class="flt-caption">(secondary — softens source-lineart jaggies)</span></label>
+          <label><input type="checkbox" data-id="ch-gate"> Protect black masses (thin-stroke gate, opt-in)</label>
+          <label>Max stroke width <input type="range" data-id="gate-maxw" min="1" max="12" step="1" value="6"> <span data-id="gate-maxw-val">6</span> <span class="flt-caption">(px at a 1280×848 reference — scaled to the working image, so preview and full-res gate the same relative width)</span></label>
+          <label>Gate sensitivity <input type="range" data-id="gate-bh" min="0.02" max="0.2" step="0.01" value="0.06"> <span data-id="gate-bh-val">0.06</span></label>
+          <label>Gate strength <input type="range" data-id="gate-strength" min="0" max="100" step="1" value="100"> <span data-id="gate-strength-val">100%</span></label>
+          <span class="flt-caption">Gate = black-hat on value: strokes narrower than the width get tinted, solid masses keep their black. Textured masses (grilles, panel lines) still tint their internal thin detail — only the solid core is fully protected. Off by default: plain v5 is unchanged.</span>
           <span class="flt-caption">Defaults are the eye-validated v5 finals. Rejected by eye-testing, not offered: line-sat beyond ~1.75, charcoal/parabolic black attenuation.</span>
         </div>
       </section>
@@ -129,13 +134,19 @@ function panelHTML() {
   </div>`;
 }
 
+// kind: 'backend' sliders re-run the colorhold preview (debounced,
+// fill + thin-mask cached server-side); 'canvas' sliders only re-draw
+// the canvas from the last colorhold result — instant, no backend call.
 const SLIDERS = [
-  ['ch-dark', 'dark_t', parseFloat], ['ch-sat', 'sat_mul', parseFloat],
-  ['ch-val', 'val_mul', parseFloat], ['ch-smooth', 'smooth', v => parseInt(v, 10)],
-  ['ch-sigma', 'line_sigma', parseFloat],
-  ['tn-sat', 'satMul', parseFloat], ['tn-bri', 'brightness', parseFloat],
-  ['tn-con', 'contrast', parseFloat], ['tn-lift', 'lift', parseFloat],
-  ['tn-edge', 'edge', parseFloat], ['strength', 'strength', parseFloat],
+  ['ch-dark', 'dark_t', parseFloat, 'backend'], ['ch-sat', 'sat_mul', parseFloat, 'backend'],
+  ['ch-val', 'val_mul', parseFloat, 'backend'], ['ch-smooth', 'smooth', v => parseInt(v, 10), 'backend'],
+  ['ch-sigma', 'line_sigma', parseFloat, 'backend'],
+  ['gate-maxw', 'gate_maxw', v => parseInt(v, 10), 'backend'],
+  ['gate-bh', 'gate_bh_full', parseFloat, 'backend'],
+  ['gate-strength', 'gate_strength', parseFloat, 'backend'],
+  ['tn-sat', 'satMul', parseFloat, 'canvas'], ['tn-bri', 'brightness', parseFloat, 'canvas'],
+  ['tn-con', 'contrast', parseFloat, 'canvas'], ['tn-lift', 'lift', parseFloat, 'canvas'],
+  ['tn-edge', 'edge', parseFloat, 'canvas'], ['strength', 'strength', parseFloat, 'canvas'],
 ];
 
 class Filters {
@@ -148,6 +159,7 @@ class Filters {
     this.source = null; // { name, path?, dataUrl?, img }
     this.colorholdUrl = null;
     this.colorholdKey = null;
+    this.baseImg = null;
     this.committedPath = null;
     this.viewing = 'filtered';
     this.debounce = null;
@@ -159,16 +171,21 @@ class Filters {
       const f = e.target.files && e.target.files[0];
       if (f) this.loadUpload(f);
     });
-    for (const [id, , parse] of SLIDERS) {
+    for (const [id, , , kind] of SLIDERS) {
       const el = q(id);
       el.addEventListener('input', () => {
         const valEl = q(id + '-val');
-        if (valEl) valEl.textContent = id === 'strength' ? `${el.value}%` : el.value;
-        this.scheduleRender();
+        if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength') ? `${el.value}%` : el.value;
+        // Canvas sliders (tunes + universal strength) re-draw instantly
+        // from the last colorhold result — no backend round-trip, so
+        // they feel live. Backend sliders go through the debounced
+        // preview fetch, where the fill + thin masks are cached.
+        if (kind === 'canvas' && this.baseImg) { this.renderCanvas(); this.rememberLast(); }
+        else this.scheduleRender();
       });
-      void parse;
     }
     q('ch-enabled').addEventListener('change', () => this.scheduleRender());
+    q('ch-gate').addEventListener('change', () => this.scheduleRender());
     act('commit').addEventListener('click', () => this.commitFullRes());
     act('reset').addEventListener('click', () => this.resetDefaults());
     act('save').addEventListener('click', () => this.saveToLibrary());
@@ -192,26 +209,39 @@ class Filters {
 
   state() {
     const q = this.el.q;
-    const s = { chEnabled: q('ch-enabled').checked };
+    const s = { chEnabled: q('ch-enabled').checked, gate: q('ch-gate').checked };
     for (const [id, key, parse] of SLIDERS) s[key] = parse(q(id).value);
     return s;
+  }
+
+  // Only the parameters the backend colorhold step consumes. Tunes and
+  // universal strength are canvas-side and must NOT bust this key —
+  // otherwise dragging them would re-fetch the backend for no reason.
+  colorholdParams() {
+    const s = this.state();
+    return { chEnabled: s.chEnabled, dark_t: s.dark_t, sat_mul: s.sat_mul,
+      val_mul: s.val_mul, smooth: s.smooth, line_sigma: s.line_sigma,
+      gate: s.gate, gate_maxw: s.gate_maxw, gate_bh_full: s.gate_bh_full,
+      gate_strength: s.gate_strength };
   }
 
   applyState(s) {
     const q = this.el.q;
     if (s.chEnabled !== undefined) q('ch-enabled').checked = !!s.chEnabled;
+    if (s.gate !== undefined) q('ch-gate').checked = !!s.gate;
     for (const [id, key, parse] of SLIDERS) {
       if (s[key] === undefined) continue;
       q(id).value = s[key];
       const valEl = q(id + '-val');
-      if (valEl) valEl.textContent = id === 'strength' ? `${s[key]}%` : String(s[key]);
+      if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength') ? `${s[key]}%` : String(s[key]);
       void parse;
     }
   }
 
   resetDefaults() {
     this.applyState({ chEnabled: true, dark_t: 0.45, sat_mul: 1.45, val_mul: 0.72,
-      smooth: 7, line_sigma: 0, satMul: 1, brightness: 0, contrast: 1,
+      smooth: 7, line_sigma: 0, gate: false, gate_maxw: 6, gate_bh_full: 0.06,
+      gate_strength: 100, satMul: 1, brightness: 0, contrast: 1,
       lift: 0, edge: 0, strength: 100 });
     this.scheduleRender();
   }
@@ -242,6 +272,7 @@ class Filters {
       const img = await this.loadImage(dataUrl);
       this.source = { name, path, dataUrl, img };
       this.colorholdUrl = null;
+      this.baseImg = null;
       this.colorholdKey = null;
       this.committedPath = null;
       this.el.act('save').disabled = true;
@@ -263,6 +294,7 @@ class Filters {
     this.source = { name: file.name, path: null, dataUrl, img };
     this.colorholdUrl = null;
     this.colorholdKey = null;
+    this.baseImg = null;
     this.committedPath = null;
     this.el.act('save').disabled = true;
     this.el.q('src-name').textContent = file.name + ' (upload)';
@@ -294,11 +326,13 @@ class Filters {
   }
 
   async fetchColorhold(preview) {
-    const s = this.state();
+    const s = this.colorholdParams();
     const key = JSON.stringify({ ...s, src: this.source.path || 'upload', preview });
     if (key === this.colorholdKey && this.colorholdUrl) return this.colorholdUrl;
     const body = { dark_t: s.dark_t, sat_mul: s.sat_mul, val_mul: s.val_mul,
-      smooth: s.smooth, line_sigma: s.line_sigma, strength: 100 };
+      smooth: s.smooth, line_sigma: s.line_sigma, strength: 100,
+      gate: s.gate, gate_maxw: s.gate_maxw, gate_bh_full: s.gate_bh_full,
+      gate_strength: s.gate_strength };
     if (preview) body.preview_max_side = PREVIEW_MAX_SIDE;
     if (this.source.path) body.path = this.source.path;
     else body.image_b64 = this.source.dataUrl;
@@ -308,6 +342,9 @@ class Filters {
     const data = await r.json();
     this.colorholdUrl = data.image;
     this.colorholdKey = key;
+    if (data.gate_effective_maxw) {
+      this.setStatus(`Gate on: effective max width ${data.gate_effective_maxw}px at this preview size (engine ${data.engine}).`);
+    }
     return data.image;
   }
 
@@ -315,15 +352,29 @@ class Filters {
     if (!this.source) return;
     try {
       const s = this.state();
-      let baseImg = this.source.img;
+      // Live-preview split, answering the operator's question directly:
+      // the expensive stages run ONCE per colorhold parameter set and
+      // are cached (fill field by image+threshold, thin mask by
+      // image+width+sensitivity). After that, tunes and strength are
+      // pure canvas work — no backend call, no re-computation of the
+      // edge/fill stages — so those sliders are instant. A colorhold
+      // or gate slider change re-runs only the backend step for the
+      // new parameter set, on the downscaled preview; full res is
+      // re-run once, on commit.
       if (s.chEnabled) {
-        const url = await this.fetchColorhold(preview);
-        baseImg = await this.loadImage(url);
+        const key = JSON.stringify({ ...this.colorholdParams(), src: this.source.path || 'upload', preview });
+        if (key !== this.colorholdKey || !this.baseImg) {
+          const url = await this.fetchColorhold(preview);
+          this.baseImg = await this.loadImage(url);
+        }
+      } else {
+        this.baseImg = this.source.img;
       }
-      this.baseImg = baseImg;
       this.renderCanvas();
-      this.setStatus(preview ? 'Preview (downscaled for sliders — Apply at full res to commit).'
-        : 'Full-res render ready. Save to Library to keep it.');
+      if (!this.el.q('status').textContent.startsWith('Gate on:')) {
+        this.setStatus(preview ? 'Preview (downscaled for sliders — Apply at full res to commit).'
+          : 'Full-res render ready. Save to Library to keep it.');
+      }
     } catch (e) {
       this.setStatus(e.message, true);
     }

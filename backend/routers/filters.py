@@ -115,6 +115,11 @@ class ApplyBody(BaseModel):
     smooth: int = _ch.DEFAULT_SMOOTH
     line_sigma: float = _ch.DEFAULT_LINE_SIGMA
     strength: float = _ch.DEFAULT_STRENGTH
+    # Black-mass gate (opt-in; off = exact v5). See colorhold.py.
+    gate: bool = False
+    gate_maxw: int = _ch.DEFAULT_GATE_MAXW
+    gate_bh_full: float = _ch.DEFAULT_GATE_BH_FULL
+    gate_strength: float = _ch.DEFAULT_GATE_STRENGTH
     preview_max_side: int | None = None
 
 
@@ -129,6 +134,10 @@ def defaults():
         "smooth": _ch.DEFAULT_SMOOTH,
         "line_sigma": _ch.DEFAULT_LINE_SIGMA,
         "strength": _ch.DEFAULT_STRENGTH,
+        "gate": False,
+        "gate_maxw": _ch.DEFAULT_GATE_MAXW,
+        "gate_bh_full": _ch.DEFAULT_GATE_BH_FULL,
+        "gate_strength": _ch.DEFAULT_GATE_STRENGTH,
         "engine": _ch.fill_engine(),
         "rejected": [
             "line_sat beyond ~1.75 (indistinguishable, 2026-10-31)",
@@ -145,7 +154,9 @@ def apply(body: ApplyBody):
         out, info = _ch.colorhold_lineart(
             rgb, dark_t=body.dark_t, sat_mul=body.sat_mul,
             val_mul=body.val_mul, smooth=body.smooth,
-            line_sigma=body.line_sigma, strength=body.strength)
+            line_sigma=body.line_sigma, strength=body.strength,
+            gate=body.gate, gate_maxw=body.gate_maxw,
+            gate_bh_full=body.gate_bh_full, gate_strength=body.gate_strength)
     except HTTPException:
         raise
     except ValueError as e:
@@ -156,6 +167,8 @@ def apply(body: ApplyBody):
         "image": "data:image/png;base64," + base64.b64encode(png).decode(),
         "width": int(out.shape[1]), "height": int(out.shape[0]),
         "engine": info["engine"], "cached_fill": info["cached_fill"],
+        "gate": info["gate"], "gate_effective_maxw": info["gate_effective_maxw"],
+        "cached_thin": info["cached_thin"],
     }
 
 

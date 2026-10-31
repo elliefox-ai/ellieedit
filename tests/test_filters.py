@@ -96,7 +96,51 @@ def test_v5_defaults_smoke_within_tolerance():
         assert pct <= 0.06, f"numpy pct>10/255 {pct}"
 
 
-def test_smooth_validation():
+def test_gate_off_is_exact_v5_and_strength_zero_is_too():
+    rgb = _ref("lineart-test.png")
+    plain, _ = ch.colorhold_lineart(rgb)
+    gated_off, _ = ch.colorhold_lineart(rgb, gate=False)
+    gated_zero, _ = ch.colorhold_lineart(rgb, gate=True, gate_strength=0)
+    assert np.array_equal(plain, gated_off)
+    assert np.array_equal(plain, gated_zero)
+
+
+def test_gate_protects_wide_bars_keeps_thin_ones():
+    # Synthetic: white canvas, black bars 2/6/12/20/40px. Gate at
+    # reference maxw 6 must keep the thin bars tinted and the wide
+    # bars' centres black. (Runs the PIL path in this venv; the cv2
+    # path was measured separately on the ship.)
+    img = np.ones((200, 400, 3), np.float32)
+    x = 10
+    bars = []
+    for w in [2, 6, 12, 20, 40]:
+        img[:, x:x + w] = 0.0
+        bars.append((w, x + w // 2))
+        x += w + 30
+    # Reference maxw 22 on this small canvas scales to effective 6
+    # (22 * sqrt(80000 / 1085440) = 5.97 -> 6), the kernel the earlier
+    # unscaled synthetic run used. This also pins the scaling itself.
+    gated, info = ch.colorhold_lineart(img, gate=True, gate_maxw=22)
+    # Thin bars: centre pixel must move away from black (tinted fill).
+    for w, cx in bars[:3]:
+        assert gated[100, cx].max() > 0.1, f"thin bar w={w} lost its tint"
+    # Wide bars: centre pixel must stay (near) black.
+    for w, cx in bars[3:]:
+        assert gated[100, cx].max() < 0.05, f"wide bar w={w} not protected"
+    assert info["gate"] is True
+    assert info["gate_effective_maxw"] == 6
+
+
+def test_gate_maxw_scales_with_image_size():
+    # Same reference maxw quotes a larger effective width on a larger
+    # image (v7 scale convention) — preview and full-res must agree
+    # on relative width, not absolute pixels.
+    small = ch.effective_gate_maxw(640, 640, 6)
+    large = ch.effective_gate_maxw(1280, 1040, 6)
+    assert small < large
+    assert ch.effective_gate_maxw(1280, 848, 6) == 6
+    with pytest.raises(ValueError):
+        ch.effective_gate_maxw(100, 100, 0)
     rgb = np.zeros((4, 4, 3), np.float32) + 0.8
     with pytest.raises(ValueError):
         ch.colorhold_lineart(rgb, smooth=4)  # even kernel: v5 would error too
@@ -128,6 +172,12 @@ def test_filters_defaults_and_apply_b64(client):
     # Second identical call hits the fill cache (cheap-stage-only recompute).
     r2 = client.post("/api/filters/apply", json={"image_b64": b64, "sat_mul": 1.0})
     assert r2.json()["cached_fill"] is True
+    # Gate is opt-in and reported back; off by default (exact v5).
+    rg = client.post("/api/filters/apply", json={"image_b64": b64, "gate": True})
+    assert rg.status_code == 200
+    assert rg.json()["gate"] is True
+    assert rg.json()["gate_effective_maxw"] >= 1
+    assert client.get("/api/filters/defaults").json()["gate"] is False
     # Bad params are a 400, not a 500.
     r3 = client.post("/api/filters/apply", json={"image_b64": b64, "smooth": 4})
     assert r3.status_code == 400
