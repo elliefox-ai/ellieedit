@@ -158,8 +158,11 @@ def test_gate_maxw_scales_with_image_size():
     with pytest.raises(ValueError):
         ch.effective_gate_maxw(100, 100, 0)
     rgb = np.zeros((4, 4, 3), np.float32) + 0.8
-    with pytest.raises(ValueError):
-        ch.colorhold_lineart(rgb, smooth=4)  # even kernel: v5 would error too
+    # Even smooth kernels are SNAPPED to a valid odd one (2026-10-31:
+    # the tab's own slider only produced evens, so rejecting them meant
+    # every nonzero slider position 400'd). smooth=4 must now succeed.
+    out4, _ = ch.colorhold_lineart(rgb, smooth=4)
+    assert out4.shape == (4, 4, 3)
     with pytest.raises(ValueError):
         ch.colorhold_lineart(rgb, line_sigma=3)  # sigma slider caps at 2
 
@@ -196,7 +199,9 @@ def test_filters_defaults_and_apply_b64(client):
     assert client.get("/api/filters/defaults").json()["gate"] is False
     # Bad params are a 400, not a 500.
     r3 = client.post("/api/filters/apply", json={"image_b64": b64, "smooth": 4})
-    assert r3.status_code == 400
+    # Even smooth is snapped to a valid odd kernel, not rejected (the
+    # tab's own slider produced only evens — 2026-10-31 live bug).
+    assert r3.status_code == 200
     r4 = client.post("/api/filters/apply", json={})
     assert r4.status_code == 400
 
