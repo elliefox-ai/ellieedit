@@ -7,10 +7,9 @@ import { createSendMenu } from '../components/send-menu.js';
 import { nameFromUrl, receiptText } from '../send-to.js';
 import { readCollapsed, writeCollapsed, recentLabel } from './foxden-recent.js';
 import { createPins } from './foxden-loras.js';
-import { normalizeState, presetState, debounce, cleanName, nextSeed } from './foxden-state.js';
+import { normalizeState, presetState, debounce, cleanName, nextSeed, sizeFor } from './foxden-state.js';
 
 const API = '/api/foxden';
-const PRESETS = { landscape: [1024, 576], portrait: [576, 1024] };
 const esc = s => String(s).replace(/[&<>"]/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -44,8 +43,12 @@ registerModule({
             <input type="range" data-id="denoise" min="0.1" max="1" step="0.05" value="1" aria-label="Denoise">
           </div>
           <div class="fx-row" data-id="aspects">
-            <button class="ee-btn fx-btn on" data-a="landscape">▭ 1024×576</button>
-            <button class="ee-btn fx-btn" data-a="portrait">▯ 576×1024</button>
+            <button class="ee-btn fx-btn on" data-a="landscape">▭ Landscape</button>
+            <button class="ee-btn fx-btn" data-a="portrait">▯ Portrait</button>
+            <button class="ee-btn fx-btn" data-a="square">■ Square</button>
+          </div>
+          <div class="fx-size"><label>Size <span data-id="fx-sizeval">1024×576</span></label>
+            <input type="range" data-id="fx-size" min="0" max="3" step="1" value="1" aria-label="Output size step">
           </div>
           <div class="fx-inputs">
             <label>Input image (img2img) <span data-id="icount"></span> <span data-id="ireceipt" class="fx-receipt" style="color:#8ad08a"></span></label>
@@ -86,13 +89,14 @@ registerModule({
       </div>
     </div>`;
     const $ = id => panel.querySelector(`[data-id="${id}"]`);
-    const el = Object.fromEntries(['conn', 'wf', 'prompt', 'aspects', 'seed', 'dice',
+    const el = Object.fromEntries(['conn', 'wf', 'prompt', 'aspects', 'fx-size', 'fx-sizeval', 'seed', 'dice',
       'lcount', 'lfilter', 'loras', 'pins', 'susp',
       'preset-pick', 'preset-lock', 'preset-save', 'preset-del',
       'icount', 'ireceipt', 'ichips', 'iup', 'iclear', 'ifile', 'denoise', 'dval', 'go', 'status', 'out', 'recent', 'recentwrap',
       'refresh', 'rtoggle', 'rcount', 'big', 'bigmeta', 'reuse', 'bigclose', 'bigimg'].map(k => [k, $(k)]));
 
     let aspect = 'landscape';
+    let sizeIdx = 1;  // step 1 = pre-existing default size for every aspect
     let allLoras = [];
     const pins = createPins();      // active pins + suspended tray (foxden-loras.js)
     let suspOpen = false;
@@ -184,12 +188,22 @@ registerModule({
     }
     el.lfilter.addEventListener('input', renderLoras);
 
-    // ── aspect / seed ──
+    // ── aspect / size / seed ──
+    function paintSize() {
+      const [w, h] = sizeFor(aspect, sizeIdx);
+      if (el['fx-size']) el['fx-size'].value = String(sizeIdx);
+      if (el['fx-sizeval']) el['fx-sizeval'].textContent = `${w}×${h}`;
+    }
     el.aspects.addEventListener('click', e => {
       const b = e.target.closest('[data-a]');
       if (!b) return;
       aspect = b.dataset.a;
       el.aspects.querySelectorAll('[data-a]').forEach(x => x.classList.toggle('on', x === b));
+      paintSize();
+    });
+    if (el['fx-size']) el['fx-size'].addEventListener('input', () => {
+      sizeIdx = Math.min(3, Math.max(0, parseInt(el['fx-size'].value, 10) || 0));
+      paintSize();
     });
     el.dice.addEventListener('click', () => { el.seed.value = Math.floor(Math.random() * 2 ** 31); });
 
@@ -212,6 +226,9 @@ registerModule({
     function paintInput() {
       el.aspects.classList.toggle('dim', !!inputImage);
       el.aspects.querySelectorAll('[data-a]').forEach(b => { b.disabled = !!inputImage; });
+      // Size is also a txt2img-only control: an input image supplies its own
+      // resolution, so the size slider is disabled alongside the aspects.
+      if (el['fx-size']) el['fx-size'].disabled = !!inputImage;
       el.icount.textContent = inputImage ? '(selected)' : '';
       el.ichips.innerHTML = '';
       const names = inputItems.includes(inputImage) || !inputImage ? inputItems : [inputImage, ...inputItems];
@@ -261,7 +278,7 @@ registerModule({
     // form emits them — img2img will add them here.)
     function collectState() {
       return normalizeState({
-        workflow: el.wf.value, prompt: el.prompt.value, aspect,
+        workflow: el.wf.value, prompt: el.prompt.value, aspect, size_idx: sizeIdx,
         seed: el.seed.value === '' ? null : parseInt(el.seed.value),
         loras: pins.payload(), suspended_loras: pins.suspendedPayload(),
         denoise: parseFloat(el.denoise.value), input_image: inputImage,
@@ -273,6 +290,8 @@ registerModule({
       el.prompt.value = st.prompt;
       aspect = st.aspect;
       el.aspects.querySelectorAll('[data-a]').forEach(x => x.classList.toggle('on', x.dataset.a === aspect));
+      sizeIdx = st.size_idx ?? 1;  // old states have no size_idx: keep 1024 step
+      paintSize();
       el.seed.value = st.seed === null ? '' : st.seed;
       pins.restoreFrom(st.loras, st.suspended_loras);
       renderLoras();
@@ -339,7 +358,7 @@ registerModule({
       const prompt = el.prompt.value.trim();
       if (!prompt) { say('Type a prompt first.', 'err'); return; }
       busy = true; el.go.disabled = true;
-      let [width, height] = PRESETS[aspect];
+      let [width, height] = sizeFor(aspect, sizeIdx);
       if (inputImage && inputDims) [width, height] = inputDims;     // image is the size source
       const body = {
         workflow: el.wf.value, prompt, width, height,
