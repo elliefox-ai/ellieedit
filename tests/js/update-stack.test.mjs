@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 
 import {
   createStack, current, source, isOriginal, canRevert, compareEntry,
-  pushRender, swap, revert, revertToOriginal, saveable,
+  pushRender, swap, setViewedAsBase, selectEntry, revert, revertToOriginal, saveable,
 } from '../../frontend/js/modules/update-stack.js';
 
 const orig = { url: 'blob:orig', name: 'original.png', path: 'folder/original.png' };
@@ -42,6 +42,28 @@ test('swap: accepted render becomes the next source', () => {
   assert.equal(s.entries.length, 3);
   assert.equal(source(s), r1);
   assert.equal(current(s), r2);
+});
+
+test('setViewedAsBase: same as swap, viewed entry becomes the base', () => {
+  let s = createStack(orig);
+  s = pushRender(s, r1);
+  s = setViewedAsBase(s);
+  assert.equal(source(s), r1);
+  assert.equal(current(s), r1);
+});
+
+test('selectEntry: forward cycling is viewed selection, clamped, no new entries', () => {
+  let s = createStack(orig);
+  s = pushRender(s, r1);
+  s = pushRender(s, r2);
+  s = selectEntry(s, 0);
+  assert.equal(current(s), orig);
+  s = selectEntry(s, 1);
+  assert.equal(current(s), r1);
+  s = selectEntry(s, 99);
+  assert.equal(current(s), r2);
+  assert.equal(s.entries.length, 3);
+  assert.equal(source(s), orig); // viewed selection never moves the base
 });
 
 test('revert steps back one entry and stops at the original', () => {

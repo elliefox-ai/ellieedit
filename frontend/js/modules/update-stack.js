@@ -9,7 +9,11 @@
 //
 // Interactions:
 //   pushRender        — a finished render is appended and becomes the view
-//   swap              — accept the viewed entry as the next run's source
+//   setViewedAsBase   — accept the viewed entry as the next run's source
+//                       (replaces the old "Swap" action; swap() is kept
+//                       as a deprecated alias for existing callers/tests)
+//   selectEntry       — view jumps to an existing generation (forward
+//                       cycling is just viewed selection, no new mode)
 //   revert            — step the view back one stack entry
 //   revertToOriginal  — view jumps to the original (index 0)
 // All functions are pure: they return a NEW state, never mutate.
@@ -35,8 +39,20 @@ export function pushRender(s, renderEntry) {
   return { ...s, entries: [...s.entries, renderEntry], idx: s.entries.length };
 }
 
-export function swap(s) {
+export function setViewedAsBase(s) {
   return { ...s, sourceIdx: s.idx };
+}
+
+// Deprecated alias: the old Swap action. New code uses setViewedAsBase.
+export function swap(s) {
+  return setViewedAsBase(s);
+}
+
+// Viewed selection through existing generations only. Out-of-range
+// indices clamp to the stack; no new entries are created here.
+export function selectEntry(s, idx) {
+  const clamped = Math.max(0, Math.min(s.entries.length - 1, idx));
+  return { ...s, idx: clamped };
 }
 
 export function revert(s) {
