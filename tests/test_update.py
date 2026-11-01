@@ -443,6 +443,100 @@ def test_save_family_recipe_noted(roots, client):
     assert fam["recipe"] == "masked-inpaint" and fam["masked"] is True
 
 
+def test_save_back_overwrites_source_in_place(roots, client):
+    groot, lroot = roots
+    make_png(groot / "ellieedit_tmp" / "update_00001_.png")
+    src = groot / "original.png"
+    make_png(src)
+    before = src.read_bytes()
+    r = client.post("/api/update/save-back", json={
+        "render_path": "ellieedit_tmp/update_00001_.png",
+        "source_path": "original.png"})
+    assert r.status_code == 200, r.text
+    assert r.json()["overwritten"] == "original.png"
+    # Same bytes in this fixture (both 16x16 red), but the file count
+    # must not grow: save-back creates no new file.
+    assert sorted(p.name for p in groot.iterdir() if p.is_file()) == ["original.png"]
+    assert not list(lroot.iterdir())
+
+
+def test_save_back_rejects_escape_and_library_finals(roots, client):
+    groot, lroot = roots
+    make_png(groot / "ellieedit_tmp" / "update_00001_.png")
+    r = client.post("/api/update/save-back", json={
+        "render_path": "../../../etc/passwd", "source_path": "original.png"})
+    assert r.status_code in (400, 404)
+    make_png(lroot / "final.png")
+    r = client.post("/api/update/save-back", json={
+        "render_path": "ellieedit_tmp/update_00001_.png",
+        "source_path": "final.png"})
+    # resolve_source finds the gallery file first only if it exists;
+    # here the only final.png is under library, so the library guard fires.
+    assert r.status_code in (404, 409), r.text
+
+
+def test_save_new_creates_unique_version(roots, client):
+    groot, lroot = roots
+    make_png(groot / "ellieedit_tmp" / "update_00001_.png")
+    make_png(groot / "original.png")
+    r = client.post("/api/update/save-new", json={
+        "render_path": "ellieedit_tmp/update_00001_.png",
+        "source_path": "original.png"})
+    assert r.status_code == 200, r.text
+    new_path = r.json()["new_path"]
+    assert new_path != "original.png"
+    assert (groot / new_path).is_file()
+
+
+def test_save_new_dupe_member_root_returns_resolvable_path(tmp_path, monkeypatch):
+    """PR #12 review fix: a dupe save next to a source under an
+    allowlisted member root outside DUPE_ROOT must not return a bare
+    filename — that would resolve under DUPE_ROOT, to a different file
+    or none. It returns the absolute path, which the dupe jail accepts
+    for member-root files, so the returned value re-resolves to the
+    file that was actually written."""
+    import backend.routers.dupe as dupe_mod
+    groot = tmp_path / "gallery"
+    droot = tmp_path / "dupes"
+    gather = tmp_path / "gather"
+    for d in (groot, droot, gather):
+        d.mkdir()
+    monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", groot)
+    monkeypatch.setattr(dupe_mod, "DUPE_ROOT", droot)
+    monkeypatch.setattr(dupe_mod, "DUPE_MEMBER_ROOTS", [droot, gather])
+    make_png(groot / "ellieedit_tmp" / "update_00001_.png")
+    src = gather / "staging" / "original.png"
+    make_png(src)
+    data = update_mod.save_new(
+        "ellieedit_tmp/update_00001_.png", str(src))
+    assert data["root"] == "dupe"
+    assert data["new_path"] != src.name
+    assert Path(data["new_path"]).is_file()
+    assert Path(data["new_path"]).parent == src.parent
+    # The returned value re-resolves through the dupe jail itself.
+    assert dupe_mod.jailed(data["new_path"]) == Path(data["new_path"]).resolve()
+
+
+def test_update_save_base_mask_send_frontend_wiring():
+    """Update save/base/mask/Send To (issues #7/#8/#9): three-way save
+    dialog, Set viewed as base + permanent indicator, travelling mask
+    with size check, and the existing shared Send To menu — and the
+    old Swap button is gone."""
+    upd = (REPO / "frontend" / "js" / "modules" / "update.js").read_text()
+    for needle in ('upd-set-base', 'Set viewed as base', 'upd-base-ind',
+                   'Viewing entry', 'upd-save-overwrite', 'upd-save-new',
+                   'upd-save-promote', '/api/update/save-back',
+                   '/api/update/save-new', 'upd-mask-reapply',
+                   'Re-apply last mask', 'createSendMenu',
+                   "target: 'facecycle'", "target: 'filters'",
+                   "target: 'foxden'", 'upd-forward', 'No base set yet'):
+        assert needle in upd, needle
+    assert 'data-act="upd-swap"' not in upd
+    assert 'no base yet' not in upd
+    stack = (REPO / "frontend" / "js" / "modules" / "update-stack.js").read_text()
+    assert 'setViewedAsBase' in stack and 'selectEntry' in stack
+
+
 def test_update_inpaint_frontend_wiring():
     """Update masked inpaint (2026-10-24): mask editor, masked recipe,
     async submit/poll, denoise slider; FoxDen viewer exposes Update."""

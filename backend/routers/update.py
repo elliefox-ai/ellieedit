@@ -253,6 +253,93 @@ def resolve_source(rel: str) -> Path:
     raise HTTPException(404, "source not found under gallery/dupe/library roots")
 
 
+def _root_of(rel: str) -> tuple[str, Path]:
+    """First root (gallery, then dupe, then library) holding rel.
+
+    resolve_source() already jails each root, so a path outside all
+    three raises 404 here instead of ever reaching a write.
+    """
+    for root_name, jail in (
+            ("gallery", _gallery_mod.jailed),
+            ("dupe", None),
+            ("library", None)):
+        try:
+            if root_name == "dupe":
+                from .dupe import jailed as _dupe_jailed
+                p = _dupe_jailed(rel)
+            elif root_name == "library":
+                p = _library_mod.library_jailed(rel)
+            else:
+                p = jail(rel)
+        except HTTPException:
+            continue
+        if p.is_file():
+            return root_name, p
+    raise HTTPException(404, "source not found under gallery/dupe/library roots")
+
+
+def save_back(render_rel: str, source_rel: str) -> dict:
+    """Overwrite the source file in place with the viewed render.
+
+    No new file is created — that is the point (see issue #7: reducing
+    file bloat is a core intention). Paths outside gallery/dupe/library
+    roots are rejected by _root_of, and a render overwriting itself is
+    rejected as a no-op.
+
+    Library finals are NOT overwritten in place: the Library index
+    records a sha256 per path, and silently changing the bytes under
+    an indexed path would leave the index stale. That case returns
+    409, and the caller should offer Save as new or Promote instead.
+    Whether Library finals should ever be overwritable (with an index
+    refresh) is an open implementation question for Ellie.
+    """
+    render_src = resolve_source(render_rel)
+    root_name, source_dest = _root_of(source_rel)
+    if root_name == "library":
+        raise HTTPException(
+            409, "Library finals are not overwritten in place from Update "
+                 "(the Library index would go stale); use Save as new or Promote")
+    if render_src.resolve() == source_dest.resolve():
+        raise HTTPException(400, "render and source are the same file")
+    shutil.copyfile(render_src, source_dest)
+    log.info("save-back %s -> %s", render_rel, source_rel)
+    return {"ok": True, "overwritten": source_rel, "root": root_name,
+            "bytes": source_dest.stat().st_size}
+
+
+def save_new(render_rel: str, source_rel: str) -> dict:
+    """Save the viewed render as a new version next to its source.
+
+    The only case that deliberately creates a duplicate. Library
+    originals save into the gallery root instead, so a new version
+    never lands in the Library without going through promote/index.
+
+    new_path is always a value the client can re-resolve through the
+    same jails that accepted the source — never a bare filename, which
+    would resolve under DUPE_ROOT to a different file or none at all:
+    gallery-relative for gallery saves (and library originals, which
+    are redirected to the gallery root above), dupe-relative for dupe
+    saves under DUPE_ROOT, and the full absolute path for dupe saves
+    under an allowlisted member root outside DUPE_ROOT (the dupe jail
+    accepts absolute paths under member roots, so that value resolves).
+    """
+    render_src = resolve_source(render_rel)
+    root_name, source_dest = _root_of(source_rel)
+    dest_dir = source_dest.parent if root_name != "library" else _gallery_mod.GALLERY_ROOT
+    dest = _unique_dest(dest_dir, f"{source_dest.stem}-update{source_dest.suffix}")
+    shutil.copyfile(render_src, dest)
+    if root_name in ("gallery", "library"):
+        new_rel = dest.relative_to(_gallery_mod.GALLERY_ROOT).as_posix()
+    else:
+        from .dupe import DUPE_ROOT as _dupe_root
+        try:
+            new_rel = dest.relative_to(_dupe_root).as_posix()
+        except ValueError:
+            new_rel = dest.as_posix()
+    log.info("save-new %s -> %s", render_rel, new_rel)
+    return {"ok": True, "new_path": new_rel, "root": root_name}
+
+
 def _unique_dest(dest_dir: Path, name: str) -> Path:
     dest = dest_dir / name
     if not dest.exists():
@@ -584,3 +671,23 @@ class SaveFamilyBody(BaseModel):
 def save_family_endpoint(body: SaveFamilyBody):
     return save_family(body.render_path, body.original_path, body.tag,
                        body.intermediates, body.recipe, body.masked)
+
+
+class SaveBackBody(BaseModel):
+    render_path: str
+    source_path: str
+
+
+@router.post("/save-back")
+def save_back_endpoint(body: SaveBackBody):
+    return save_back(body.render_path, body.source_path)
+
+
+class SaveNewBody(BaseModel):
+    render_path: str
+    source_path: str
+
+
+@router.post("/save-new")
+def save_new_endpoint(body: SaveNewBody):
+    return save_new(body.render_path, body.source_path)

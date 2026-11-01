@@ -4,9 +4,10 @@
 // Renders stay in-session (stack); only an explicit Save writes to the
 // Library via the save-family machinery. No delete here by design.
 import { registerModule } from '../shell.js';
+import { createSendMenu } from '../components/send-menu.js';
 import {
   createStack, current, source, isOriginal, canRevert, compareEntry,
-  pushRender, swap, revert, revertToOriginal, saveable,
+  pushRender, setViewedAsBase, selectEntry, revert, revertToOriginal, saveable,
 } from './update-stack.js';
 // Zoom gesture math is shared with the viewers (2026-10-29):
 // pinchScale, clampPan, wheelScale, dist. The binding is NOT
@@ -130,19 +131,39 @@ function panelHTML() {
             <button class="ee-btn" data-act="upd-mask-undo" id="upd-mask-undo" disabled>↩ Undo</button>
           </div>
           <span id="upd-mask-source"></span>
-          <span class="upd-caption" title="White = regenerate. Paint the region to change; everything else stays pixel-exact.">White = regenerate. Paint on the stage image; everything else stays pixel-exact.</span>
+          <span id="upd-mask-last"></span>
+          <div class="upd-row">
+            <button class="ee-btn" data-act="upd-mask-reapply" title="Re-apply the last mask, if it matches this base's size">↩ Re-apply last mask</button>
+          </div>
+          <span class="upd-caption" title="White = regenerate. Paint the region to change; everything else stays pixel-exact.">White = regenerate. Paint on the stage image; everything else stays pixel-exact. The last mask is kept when you set a new base, and can be re-applied if it matches the new base's size; on a size mismatch it is not auto-applied — paint or edit first.</span>
         </div>
       </section>
       <section class="upd-sec">
         <h4>Versions</h4>
         <div class="upd-stack-grid">
           <button class="ee-btn" data-act="upd-compare" id="upd-compare" disabled title="Show the before/after divider, starting closed on the new render">⇔ Compare</button>
-          <button class="ee-btn" data-act="upd-swap" title="Accept current render as the next edit's source">Swap</button>
-          <button class="ee-btn" data-act="upd-revert">Revert</button>
+          <button class="ee-btn" data-act="upd-set-base" title="Accept the viewed entry as the next run's source">Set viewed as base</button>
+          <button class="ee-btn" data-act="upd-revert">← Revert</button>
+          <button class="ee-btn" data-act="upd-forward" title="View the next existing generation">Forward →</button>
           <button class="ee-btn" data-act="upd-revert-orig">Revert to original</button>
         </div>
         <span class="stackpos" id="upd-pos">no stack</span>
-        <button class="ee-btn primary" data-act="upd-save" id="upd-save" disabled>⬆ Save to Library</button>
+        <span class="stackpos" id="upd-base-ind">No base set yet</span>
+        <button class="ee-btn primary" data-act="upd-save" id="upd-save" disabled>💾 Save…</button>
+        <div id="upd-save-dialog" style="display:none;border:1px solid #4a4a6c;border-radius:6px;padding:8px;gap:8px;flex-direction:column">
+          <span class="upd-caption" id="upd-save-note">Choose how to save the viewed entry.</span>
+          <button class="ee-btn primary" data-act="upd-save-overwrite" title="Overwrite the original source in place — no new file">Overwrite source</button>
+          <button class="ee-btn" data-act="upd-save-new" title="Save the viewed entry as a new version next to the source">Save as new version</button>
+          <label>Promote tag
+            <input type="text" id="upd-save-tag" value="zengosoft"></label>
+          <button class="ee-btn" data-act="upd-save-promote" title="Promote to Library, same machinery as before">⬆ Promote to Library</button>
+          <button class="ee-btn" data-act="upd-save-cancel">Cancel</button>
+        </div>
+      </section>
+      <section class="upd-sec">
+        <h4>Send</h4>
+        <span class="upd-caption">Send the viewed entry to another tab — a reference, not a copy. Only saving creates a file. Mask does not travel with Send To (the shared payload carries urls, not masks); mask travelling is Update-local, via Re-apply last mask above.</span>
+        <span id="upd-send-wrap"></span>
       </section>
     </aside>
     <main class="upd-main">
@@ -172,9 +193,10 @@ class UpdateView {
     this.el = {};
     for (const id of ['preset', 'seed', 'random', 'run', 'cancel', 'status', 'prompt',
       'saved', 'stage', 'empty', 'cmp', 'img-a', 'wrap-b', 'img-b', 'div',
-      'tag-a', 'tag-b', 'pos', 'save', 'compare', 'denoise', 'denoise-lbl',
+      'tag-a', 'tag-b', 'pos', 'base-ind', 'save', 'save-dialog', 'save-tag',
+      'send-wrap', 'compare', 'denoise', 'denoise-lbl',
       'denoise-val', 'mask', 'mask-canvas', 'mask-undo', 'mask-opacity',
-      'mask-show', 'mask-source', 'brush', 'zoom-val']) {
+      'mask-show', 'mask-source', 'mask-last', 'brush', 'zoom-val']) {
       this.el[id.replace(/-(\w)/g, (_, c) => c.toUpperCase())] =
         panel.querySelector(`#upd-${id}`);
     }
@@ -190,6 +212,9 @@ class UpdateView {
     this.maskOpacity = 0.55;
     this.maskShow = true;
     this.maskUndoStack = [];    // mask-canvas data URLs, one per stroke start
+    this.lastMask = null;      // travelling mask: {dataUrl, width, height}
+                               // kept when a new base is set; re-applied
+                               // only if it matches the new base's size
     this.jobCancelled = false;
     // Zoom (2026-10-29): relative to fit — 1 = the fit size
     // fitComparer() computes, up to 4. The transform applies to
@@ -279,13 +304,57 @@ class UpdateView {
     vc.style.pointerEvents = this.compareOn ? 'none' : 'auto';
   }
 
+  // Keep the current painted mask for travelling: called before a new
+  // base's blank mask replaces it. The travelling mask is NOT auto-
+  // applied — see reapplyLastMask().
+  captureLastMask() {
+    if (this.maskCanvas && this.maskHasWhite()) {
+      this.lastMask = {
+        dataUrl: this.maskCanvas.toDataURL('image/png'),
+        width: this.maskCanvas.width, height: this.maskCanvas.height,
+      };
+      if (this.el.maskLast) {
+        this.el.maskLast.textContent =
+          `Last mask kept: ${this.lastMask.width}×${this.lastMask.height}. Re-apply it if it matches the new base.`;
+      }
+    }
+  }
+
+  // Re-apply the travelling mask, only when dimensions match. On a
+  // mismatch, warn and do NOT apply — the user paints/edits first.
+  // This is the warn/edit-first path, not a silent misaligned apply.
+  reapplyLastMask() {
+    if (!this.lastMask) { this.el.status.textContent = 'no last mask kept yet'; return; }
+    if (!this.maskCanvas) { this.el.status.textContent = 'pick the masked-inpaint recipe and a base first'; return; }
+    if (this.lastMask.width !== this.maskCanvas.width ||
+        this.lastMask.height !== this.maskCanvas.height) {
+      this.el.status.textContent =
+        `last mask is ${this.lastMask.width}×${this.lastMask.height}, ` +
+        `but this base is ${this.maskCanvas.width}×${this.maskCanvas.height} — ` +
+        `not auto-applied. Paint or edit a mask for this base instead.`;
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      const ctx = this.maskCanvas.getContext('2d');
+      ctx.clearRect(0, 0, this.maskCanvas.width, this.maskCanvas.height);
+      ctx.drawImage(img, 0, 0);
+      this.maskPainted = this.maskHasWhite();
+      this.drawMaskView();
+      this.el.status.textContent = 'last mask re-applied';
+    };
+    img.src = this.lastMask.dataUrl;
+  }
+
   // (Re)build the mask for the CURRENT source entry: black canvas at the
   // source's natural size, painted on the stage image via the overlay.
-  // Called when the recipe is picked, a source arrives, or Swap
-  // moves the source — a mask always belongs to exactly one source.
+  // Called when the recipe is picked, a source arrives, or Set viewed
+  // as base moves the source — the previous mask is kept travelling
+  // (captureLastMask), never silently carried over pixel-for-pixel.
   initMaskForSource() {
     const srcEntry = this.stack && source(this.stack);
     if (!srcEntry) return;
+    this.captureLastMask();
     this.maskPainted = false;
     this.maskUndoStack = [];
     this.maskCanvas = null;  // stale mask must not paint over the new source
@@ -306,7 +375,8 @@ class UpdateView {
 
   // The mask belongs to the source entry, not the viewed entry: say so in
   // the panel, so painting after a Revert is not mistaken for painting
-  // on the viewed image. Swap to make the viewed image the source.
+  // on the viewed image. Set viewed as base to make the viewed image
+  // the source; the previous mask is then kept travelling, not auto-applied.
   updateMaskSourceLabel() {
     if (!this.el.maskSource) return;
     const s = this.stack;
@@ -521,12 +591,66 @@ class UpdateView {
     }
   }
 
-  // ---- save ----------------------------------------------------------------
-  async save() {
+  // ---- save, three-way -----------------------------------------------------
+  // Save dialog: Overwrite source (in place, no new file), Save as new
+  // version (a deliberate duplicate next to the source), or Promote to
+  // Library (the previous save-family machinery, unchanged). Overwrite
+  // targets the ORIGINAL entry's path — overwriting a render tmp file
+  // would be meaningless — and the backend rejects Library finals.
+  toggleSaveDialog(show) {
+    if (!this.el.saveDialog) return;
+    this.el.saveDialog.style.display = show ? 'flex' : 'none';
+    if (show && this.stack) {
+      const orig = this.stack.entries[0];
+      if (this.el.saveNote) {
+        this.el.saveNote.textContent =
+          `Viewed: ${current(this.stack).name}. Overwrite will replace the original source in place: ${orig.name}.`;
+      }
+    }
+  }
+
+  async saveOverwrite() {
     if (!this.stack || !saveable(this.stack)) return;
     const entry = current(this.stack);
-    const tag = prompt('Save to Library — tag/project:', 'zengosoft');
-    if (tag === null) return;
+    const orig = this.stack.entries[0];
+    if (!orig.path) { this.el.status.textContent = 'original source has no server path'; return; }
+    if (!confirm(`Overwrite the original source in place?\n${orig.name}\nNo new file will be created.`)) return;
+    try {
+      const r = await fetch('/api/update/save-back', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ render_path: entry.path, source_path: orig.path }),
+      });
+      if (!r.ok) throw new Error((await r.json()).detail || r.status);
+      const data = await r.json();
+      this.toggleSaveDialog(false);
+      this.el.status.textContent = `saved back — overwrote ${data.overwritten} (${data.bytes} bytes)`;
+    } catch (err) {
+      this.el.status.textContent = 'save-back failed: ' + err.message;
+    }
+  }
+
+  async saveNew() {
+    if (!this.stack || !saveable(this.stack)) return;
+    const entry = current(this.stack);
+    const orig = this.stack.entries[0];
+    try {
+      const r = await fetch('/api/update/save-new', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ render_path: entry.path, source_path: orig.path }),
+      });
+      if (!r.ok) throw new Error((await r.json()).detail || r.status);
+      const data = await r.json();
+      this.toggleSaveDialog(false);
+      this.el.status.textContent = `saved as new version — ${data.new_path}`;
+    } catch (err) {
+      this.el.status.textContent = 'save-as-new failed: ' + err.message;
+    }
+  }
+
+  async savePromote() {
+    if (!this.stack || !saveable(this.stack)) return;
+    const entry = current(this.stack);
+    const tag = (this.el.saveTag && this.el.saveTag.value.trim()) || 'zengosoft';
     try {
       const r = await fetch('/api/update/save-family', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -542,6 +666,7 @@ class UpdateView {
       });
       if (!r.ok) throw new Error((await r.json()).detail || r.status);
       const data = await r.json();
+      this.toggleSaveDialog(false);
       this.el.status.textContent =
         `saved — final ${data.final} · original ${data.original} (family ${data.family_id})`;
     } catch (err) {
@@ -697,6 +822,13 @@ class UpdateView {
     if (this.el.cancel) this.el.cancel.disabled = !this.running;
     this.el.save.disabled = !s || !saveable(s);
     this.el.pos.textContent = s ? `entry ${s.idx + 1}/${s.entries.length} · source ${s.sourceIdx + 1}` : 'no stack';
+    // Viewing/Base indicator: always present in the Versions section.
+    if (this.el.baseInd) {
+      this.el.baseInd.textContent = s
+        ? `Viewing entry ${s.idx + 1} of ${s.entries.length} · Base entry ${s.sourceIdx + 1} of ${s.entries.length}` +
+          (s.idx === s.sourceIdx ? ' (viewing the base)' : '')
+        : 'No base set yet';
+    }
     this.syncComparer();
   }
 
@@ -776,7 +908,48 @@ class UpdateView {
     const syncSeedBox = () => { this.el.seed.disabled = this.el.random.checked; };
     this.el.random.addEventListener('change', syncSeedBox);
     syncSeedBox();
-    this.el.save.addEventListener('click', () => this.save());
+    this.el.save.addEventListener('click', () => this.toggleSaveDialog(true));
+    this.panel.querySelector('[data-act="upd-save-overwrite"]')
+      .addEventListener('click', () => this.saveOverwrite());
+    this.panel.querySelector('[data-act="upd-save-new"]')
+      .addEventListener('click', () => this.saveNew());
+    this.panel.querySelector('[data-act="upd-save-promote"]')
+      .addEventListener('click', () => this.savePromote());
+    this.panel.querySelector('[data-act="upd-save-cancel"]')
+      .addEventListener('click', () => this.toggleSaveDialog(false));
+    this.panel.querySelector('[data-act="upd-mask-reapply"]')
+      .addEventListener('click', () => this.reapplyLastMask());
+    // Send To (existing shared system, not a new router): viewed entry
+    // only, as a gallery server url + provenance path. Targets are
+    // exactly the ones planSend supports, minus Update itself (sending
+    // to yourself would just replace your own stack). Library/Gallery
+    // are NOT planSend targets, so they are not offered here — Promote
+    // (above) is the Library route. Payload carries no mask: see the
+    // Send section note — mask travelling stays Update-local.
+    if (this.el.sendWrap) {
+      const sendMenu = createSendMenu({
+        className: 'ee-btn',
+        entries: [
+          { label: '→ FaceCycle', target: 'facecycle' },
+          { label: '🎛 Filters', target: 'filters' },
+          { label: '🎭 Puppet Theater — new layer', target: 'puppet', as: 'layer' },
+          { label: '🎭 Puppet Theater — as background', target: 'puppet', as: 'background' },
+          { label: '🦊 FoxDen — input image', target: 'foxden' },
+        ],
+        getPayload: () => {
+          const entry = this.stack && current(this.stack);
+          if (!entry || !entry.path) return { error: 'Viewed entry has no server path.' };
+          return {
+            urls: [`/api/gallery/file?path=${encodeURIComponent(entry.path)}`],
+            names: [entry.name],
+            source: 'Update',
+            provenance: { kind: 'update', paths: [entry.path] },
+          };
+        },
+      });
+      this.el.sendWrap.appendChild(sendMenu.el);
+      this.sendMenu = sendMenu;
+    }
     this.el.saved.addEventListener('change', () => {
       const name = this.el.saved.value;
       if (!name) return;
@@ -788,18 +961,24 @@ class UpdateView {
       .addEventListener('click', () => this.savePrompt());
     this.panel.querySelector('[data-act="upd-del-prompt"]')
       .addEventListener('click', () => this.deletePrompt());
-    this.panel.querySelector('[data-act="upd-swap"]')
+    this.panel.querySelector('[data-act="upd-set-base"]')
       .addEventListener('click', () => {
         if (!this.stack) return;
-        this.stack = swap(this.stack);
-        this.el.status.textContent = `source set to entry ${this.stack.sourceIdx + 1}`;
-        if (this.maskedMode) this.initMaskForSource();  // mask belongs to the source
+        this.stack = setViewedAsBase(this.stack);
+        this.el.status.textContent = `base set to entry ${this.stack.sourceIdx + 1} (viewing entry ${this.stack.idx + 1})`;
+        if (this.maskedMode) this.initMaskForSource();  // keeps the old mask travelling
         this.showCurrent();
       });
     this.panel.querySelector('[data-act="upd-revert"]')
       .addEventListener('click', () => {
         if (!canRevert(this.stack)) return;
         this.stack = revert(this.stack);
+        this.showCurrent();
+      });
+    this.panel.querySelector('[data-act="upd-forward"]')
+      .addEventListener('click', () => {
+        if (!this.stack || this.stack.idx >= this.stack.entries.length - 1) return;
+        this.stack = selectEntry(this.stack, this.stack.idx + 1);
         this.showCurrent();
       });
     this.panel.querySelector('[data-act="upd-revert-orig"]')
