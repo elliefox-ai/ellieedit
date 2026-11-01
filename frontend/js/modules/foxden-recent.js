@@ -18,3 +18,26 @@ export function recentLabel(total, extra = '') {
   const n = Number.isFinite(total) && total > 0 ? total : 0;
   return `recent · ${n}${extra}`;
 }
+
+// Flatten the /recent items into the zoom viewer's cycle order: items in
+// server order, each item's urls in order, carrying the item as the entry
+// (workflow / seed / prompt for the viewer meta). Non-array input and
+// items without urls contribute nothing.
+export function flattenRecent(items) {
+  const out = [];
+  if (!Array.isArray(items)) return out;
+  for (const it of items) {
+    if (!it || !Array.isArray(it.urls)) continue;
+    for (const url of it.urls) out.push({ url, entry: it });
+  }
+  return out;
+}
+
+// Step through a cycle list with wrap-around: 0 -> len-1 going back, and
+// len-1 -> 0 going forward. Empty list: -1. A non-finite start lands on
+// the first item going forward, the last going back.
+export function cycleIndex(idx, delta, len) {
+  if (!Number.isFinite(len) || len <= 0) return -1;
+  if (!Number.isFinite(idx)) return delta < 0 ? len - 1 : 0;
+  return ((idx + delta) % len + len) % len;
+}

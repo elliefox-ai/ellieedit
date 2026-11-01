@@ -47,6 +47,7 @@
           display:none; flex-direction:column; }
 .fx-big .bar { display:flex; gap:10px; padding:10px 16px; background:#161628; align-items:center; }
 .fx-big .bar .meta { flex:1; font-size:11px; color:#8a8aaa; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fx-big .bar .fx-btn:disabled { opacity:.4; }
 .fx-big .stage { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; }
 .fx-big .stage img { max-width:100%; max-height:100%; object-fit:contain; }
 

@@ -1,5 +1,5 @@
 // FoxDen recent-strip helpers: collapse persistence + count label.
-import { COLLAPSE_KEY, readCollapsed, writeCollapsed, recentLabel } from
+import { COLLAPSE_KEY, readCollapsed, writeCollapsed, recentLabel, flattenRecent, cycleIndex } from
   '../../frontend/js/modules/foxden-recent.js';
 import assert from 'node:assert/strict';
 
@@ -34,5 +34,26 @@ assert.equal(recentLabel(0), 'recent · 0');
 assert.equal(recentLabel(undefined), 'recent · 0');
 assert.equal(recentLabel(NaN), 'recent · 0');
 assert.equal(recentLabel(3, ' · adopted 1'), 'recent · 3 · adopted 1');
+
+// flatten: server order, urls in order, entry carried per url; junk skipped
+const a = { workflow: 'w', seed: 1, prompt: 'p', urls: ['u1', 'u2'] };
+const b = { workflow: 'w', seed: 2, prompt: 'q', urls: ['u3'] };
+assert.deepEqual(flattenRecent([a, b]),
+  [{ url: 'u1', entry: a }, { url: 'u2', entry: a }, { url: 'u3', entry: b }]);
+assert.deepEqual(flattenRecent([]), []);
+assert.deepEqual(flattenRecent(null), []);
+assert.deepEqual(flattenRecent([{ urls: null }, { noUrls: true }, a]),
+  [{ url: 'u1', entry: a }, { url: 'u2', entry: a }]);
+
+// cycle: plain steps plus wrap-around both ways, empty list is -1
+assert.equal(cycleIndex(0, 1, 3), 1);
+assert.equal(cycleIndex(2, 1, 3), 0);
+assert.equal(cycleIndex(0, -1, 3), 2);
+assert.equal(cycleIndex(1, -1, 3), 0);
+assert.equal(cycleIndex(0, 0, 1), 0);
+assert.equal(cycleIndex(0, 1, 0), -1);
+assert.equal(cycleIndex(0, 1, -2), -1);
+assert.equal(cycleIndex(NaN, 1, 3), 0);
+assert.equal(cycleIndex(NaN, -1, 3), 2);
 
 console.log('PASS foxden-recent');
