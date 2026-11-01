@@ -148,7 +148,7 @@ function panelHTML() {
           <button class="ee-btn" data-act="upd-revert-orig">Revert to original</button>
         </div>
         <span class="stackpos" id="upd-pos">no stack</span>
-        <span class="stackpos" id="upd-base-ind">no base yet — always shown, never flashed and hidden</span>
+        <span class="stackpos" id="upd-base-ind">No base set yet</span>
         <button class="ee-btn primary" data-act="upd-save" id="upd-save" disabled>💾 Save…</button>
         <div id="upd-save-dialog" style="display:none;border:1px solid #4a4a6c;border-radius:6px;padding:8px;gap:8px;flex-direction:column">
           <span class="upd-caption" id="upd-save-note">Choose how to save the viewed entry.</span>
@@ -822,13 +822,12 @@ class UpdateView {
     if (this.el.cancel) this.el.cancel.disabled = !this.running;
     this.el.save.disabled = !s || !saveable(s);
     this.el.pos.textContent = s ? `entry ${s.idx + 1}/${s.entries.length} · source ${s.sourceIdx + 1}` : 'no stack';
-    // Permanent Viewing/Base indicator: always shown, never flashed
-    // and hidden. This is the replacement for the old Swap flash.
+    // Viewing/Base indicator: always present in the Versions section.
     if (this.el.baseInd) {
       this.el.baseInd.textContent = s
         ? `Viewing entry ${s.idx + 1} of ${s.entries.length} · Base entry ${s.sourceIdx + 1} of ${s.entries.length}` +
           (s.idx === s.sourceIdx ? ' (viewing the base)' : '')
-        : 'no base yet — always shown, never flashed and hidden';
+        : 'No base set yet';
     }
     this.syncComparer();
   }

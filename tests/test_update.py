@@ -488,6 +488,35 @@ def test_save_new_creates_unique_version(roots, client):
     assert (groot / new_path).is_file()
 
 
+def test_save_new_dupe_member_root_returns_resolvable_path(tmp_path, monkeypatch):
+    """PR #12 review fix: a dupe save next to a source under an
+    allowlisted member root outside DUPE_ROOT must not return a bare
+    filename — that would resolve under DUPE_ROOT, to a different file
+    or none. It returns the absolute path, which the dupe jail accepts
+    for member-root files, so the returned value re-resolves to the
+    file that was actually written."""
+    import backend.routers.dupe as dupe_mod
+    groot = tmp_path / "gallery"
+    droot = tmp_path / "dupes"
+    gather = tmp_path / "gather"
+    for d in (groot, droot, gather):
+        d.mkdir()
+    monkeypatch.setattr(gallery_mod, "GALLERY_ROOT", groot)
+    monkeypatch.setattr(dupe_mod, "DUPE_ROOT", droot)
+    monkeypatch.setattr(dupe_mod, "DUPE_MEMBER_ROOTS", [droot, gather])
+    make_png(groot / "ellieedit_tmp" / "update_00001_.png")
+    src = gather / "staging" / "original.png"
+    make_png(src)
+    data = update_mod.save_new(
+        "ellieedit_tmp/update_00001_.png", str(src))
+    assert data["root"] == "dupe"
+    assert data["new_path"] != src.name
+    assert Path(data["new_path"]).is_file()
+    assert Path(data["new_path"]).parent == src.parent
+    # The returned value re-resolves through the dupe jail itself.
+    assert dupe_mod.jailed(data["new_path"]) == Path(data["new_path"]).resolve()
+
+
 def test_update_save_base_mask_send_frontend_wiring():
     """Update save/base/mask/Send To (issues #7/#8/#9): three-way save
     dialog, Set viewed as base + permanent indicator, travelling mask
@@ -500,9 +529,10 @@ def test_update_save_base_mask_send_frontend_wiring():
                    '/api/update/save-new', 'upd-mask-reapply',
                    'Re-apply last mask', 'createSendMenu',
                    "target: 'facecycle'", "target: 'filters'",
-                   "target: 'foxden'", 'upd-forward'):
+                   "target: 'foxden'", 'upd-forward', 'No base set yet'):
         assert needle in upd, needle
     assert 'data-act="upd-swap"' not in upd
+    assert 'no base yet' not in upd
     stack = (REPO / "frontend" / "js" / "modules" / "update-stack.js").read_text()
     assert 'setViewedAsBase' in stack and 'selectEntry' in stack
 

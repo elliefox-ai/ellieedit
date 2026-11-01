@@ -313,16 +313,29 @@ def save_new(render_rel: str, source_rel: str) -> dict:
     The only case that deliberately creates a duplicate. Library
     originals save into the gallery root instead, so a new version
     never lands in the Library without going through promote/index.
+
+    new_path is always a value the client can re-resolve through the
+    same jails that accepted the source — never a bare filename, which
+    would resolve under DUPE_ROOT to a different file or none at all:
+    gallery-relative for gallery saves (and library originals, which
+    are redirected to the gallery root above), dupe-relative for dupe
+    saves under DUPE_ROOT, and the full absolute path for dupe saves
+    under an allowlisted member root outside DUPE_ROOT (the dupe jail
+    accepts absolute paths under member roots, so that value resolves).
     """
     render_src = resolve_source(render_rel)
     root_name, source_dest = _root_of(source_rel)
     dest_dir = source_dest.parent if root_name != "library" else _gallery_mod.GALLERY_ROOT
     dest = _unique_dest(dest_dir, f"{source_dest.stem}-update{source_dest.suffix}")
     shutil.copyfile(render_src, dest)
-    if root_name == "gallery":
+    if root_name in ("gallery", "library"):
         new_rel = dest.relative_to(_gallery_mod.GALLERY_ROOT).as_posix()
     else:
-        new_rel = dest.name
+        from .dupe import DUPE_ROOT as _dupe_root
+        try:
+            new_rel = dest.relative_to(_dupe_root).as_posix()
+        except ValueError:
+            new_rel = dest.as_posix()
     log.info("save-new %s -> %s", render_rel, new_rel)
     return {"ok": True, "new_path": new_rel, "root": root_name}
 
