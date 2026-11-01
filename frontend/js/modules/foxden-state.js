@@ -2,10 +2,26 @@
 // so node can test them. One shape serves both named presets and the
 // auto-remembered `_last` composition.
 
-const ASPECTS = ['landscape', 'portrait'];
+const ASPECTS = ['landscape', 'portrait', 'square'];
 
-// Optional fields (steps, input_image) pass through untouched as soon as the
-// form emits them — presets never need a
+// Stepped output sizes (issue #3, 2026-11-01). Each aspect keeps its ratio
+// exactly across steps; step 1 is the pre-existing default size for every
+// aspect, so old presets and the `_last` state keep their old dimensions.
+// Steps are standard 16:9 / 1:1 sizes, smallest to largest.
+export const SIZES = {
+  landscape: [[768, 432], [1024, 576], [1280, 720], [1536, 864]],
+  portrait: [[432, 768], [576, 1024], [720, 1280], [864, 1536]],
+  square: [[768, 768], [1024, 1024], [1280, 1280], [1536, 1536]],
+};
+
+export function sizeFor(aspect, idx) {
+  const list = SIZES[ASPECTS.includes(aspect) ? aspect : 'landscape'];
+  const i = Number.isFinite(Number(idx)) ? Math.min(list.length - 1, Math.max(0, Math.trunc(Number(idx)))) : 1;
+  return list[i];
+}
+
+// Optional fields (steps, input_image, size_idx) pass through untouched as
+// soon as the form emits them — presets never need a
 // migration when the form grows.
 export function normalizeState(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
@@ -22,6 +38,7 @@ export function normalizeState(raw) {
     denoise: num(r.denoise) === null ? 1 : Math.min(1, Math.max(0, num(r.denoise))),
   };
   if (num(r.steps) !== null) out.steps = num(r.steps);
+  if (num(r.size_idx) !== null) out.size_idx = Math.min(3, Math.max(0, Math.trunc(num(r.size_idx))));
   if (typeof r.input_image === 'string' && r.input_image) out.input_image = r.input_image;
   return out;
 }

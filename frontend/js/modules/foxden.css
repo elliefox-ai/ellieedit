@@ -72,4 +72,6 @@
 .fx-chipimg img { width:100%; height:100%; object-fit:cover; display:block; }
 .fx-denoise input[type=range] { width:100%; min-height:44px; accent-color:#7a6aaa; }
 .fx-denoise #dval, .fx-denoise [data-id="dval"] { font-family:monospace; }
+.fx-size input[type=range] { width:100%; min-height:44px; accent-color:#7a6aaa; }
+.fx-size [data-id="fx-sizeval"] { font-family:monospace; }
 [data-id="aspects"].dim { opacity:.4; }

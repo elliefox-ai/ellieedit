@@ -1,7 +1,7 @@
 // Task 5 add.2 — form-state normalization, lock-seed semantics, debounce.
 // Run: node tests/js/foxden-state.test.mjs
 import assert from 'node:assert/strict';
-import { normalizeState, presetState, debounce, cleanName, nextSeed } from '../../frontend/js/modules/foxden-state.js';
+import { normalizeState, presetState, debounce, cleanName, nextSeed, sizeFor, SIZES } from '../../frontend/js/modules/foxden-state.js';
 
 const full = { workflow: 'klein', prompt: 'a fox', aspect: 'portrait', seed: 42,
   loras: [{ name: 'a', strength_model: 0.5 }], suspended_loras: [{ name: 'b', strength_model: 1.25 }],
@@ -22,6 +22,26 @@ assert.equal(presetState({ ...full, denoise: 0.3 }, false).denoise, 0.3);
 const g = normalizeState({ aspect: 'diagonal', seed: 'abc', loras: [null, {}, { name: 'x', strength_model: 'z' }], steps: 'n/a' });
 assert.equal(g.aspect, 'landscape'); assert.equal(g.seed, null);
 assert.deepEqual(g.loras, [{ name: 'x', strength_model: 1 }]); assert.ok(!('steps' in g));
+
+// square aspect + stepped sizes (issue #3): step 1 is the old default for
+// every aspect, ratios are exact, out-of-range / unknown inputs clamp safely
+assert.equal(normalizeState({ aspect: 'square' }).aspect, 'square');
+assert.deepEqual(sizeFor('landscape', 1), [1024, 576]);
+assert.deepEqual(sizeFor('portrait', 1), [576, 1024]);
+assert.deepEqual(sizeFor('square', 1), [1024, 1024]);
+assert.deepEqual(sizeFor('square', 0), [768, 768]);
+assert.deepEqual(sizeFor('square', 3), [1536, 1536]);
+assert.deepEqual(sizeFor('square', 99), [1536, 1536]);
+assert.deepEqual(sizeFor('square', -1), [768, 768]);
+assert.deepEqual(sizeFor('diagonal', 1), [1024, 576]);
+assert.equal(normalizeState({ size_idx: 3 }).size_idx, 3);
+assert.equal(normalizeState({ size_idx: 99 }).size_idx, 3);
+assert.equal(normalizeState({ size_idx: 'junk' }).size_idx, undefined);
+assert.ok(!('size_idx' in normalizeState({})));
+for (const [aspect, list] of Object.entries(SIZES)) {
+  assert.equal(list.length, 4, aspect);
+  assert.ok(list.every(([w, h]) => Number.isInteger(w) && Number.isInteger(h) && w % 16 === 0 && h % 16 === 0), aspect);
+}
 
 // lock seed: saved only when ticked; otherwise random (null)
 assert.equal(presetState(full, true).seed, 42);
