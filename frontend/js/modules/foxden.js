@@ -5,7 +5,7 @@
 import { registerModule, registerReceiver } from '../shell.js';
 import { createSendMenu } from '../components/send-menu.js';
 import { nameFromUrl, receiptText } from '../send-to.js';
-import { readCollapsed, writeCollapsed, recentLabel } from './foxden-recent.js';
+import { readCollapsed, writeCollapsed, recentLabel, flattenRecent, cycleIndex } from './foxden-recent.js';
 import { createPins } from './foxden-loras.js';
 import { normalizeState, presetState, debounce, cleanName, nextSeed, sizeFor } from './foxden-state.js';
 
@@ -83,6 +83,8 @@ registerModule({
       </div>
       <div class="fx-big" data-id="big">
         <div class="bar"><span class="meta" data-id="bigmeta"></span>
+          <button class="ee-btn fx-btn" data-id="bigprev" aria-label="Previous recent image" title="Previous">‹</button>
+          <button class="ee-btn fx-btn" data-id="bignext" aria-label="Next recent image" title="Next">›</button>
           <button class="ee-btn fx-btn" data-id="reuse">↺ Reuse settings</button>
           <button class="ee-btn fx-btn" data-id="bigclose">✕</button></div>
         <div class="stage"><img data-id="bigimg" alt=""></div>
@@ -93,7 +95,8 @@ registerModule({
       'lcount', 'lfilter', 'loras', 'pins', 'susp',
       'preset-pick', 'preset-lock', 'preset-save', 'preset-del',
       'icount', 'ireceipt', 'ichips', 'iup', 'iclear', 'ifile', 'denoise', 'dval', 'go', 'status', 'out', 'recent', 'recentwrap',
-      'refresh', 'rtoggle', 'rcount', 'big', 'bigmeta', 'reuse', 'bigclose', 'bigimg'].map(k => [k, $(k)]));
+      'refresh', 'rtoggle', 'rcount', 'big', 'bigmeta', 'reuse', 'bigclose', 'bigimg',
+      'bigprev', 'bignext'].map(k => [k, $(k)]));
 
     let aspect = 'landscape';
     let sizeIdx = 1;  // step 1 = pre-existing default size for every aspect
@@ -406,22 +409,59 @@ registerModule({
     el.go.addEventListener('click', generate);
 
     // ── viewer / recent ──
-    function thumb(url, small, entry) {
+    // The zoom viewer cycles through a list, not just the tapped image:
+    // recent-strip thumbs pass the flattened recent list, so ‹ / › (and
+    // the arrow keys) walk recents with wrap-around. Inline outputs are
+    // not in the recent list, so opening one cycles within itself and the
+    // step buttons stay disabled.
+    function thumb(url, small, entry, cycleList) {
       const im = document.createElement('img');
       im.src = url; im.alt = 'render';
-      im.addEventListener('click', () => openBig(url, entry));
+      im.addEventListener('click', () => openBig(url, entry, cycleList));
       return im;
     }
     let bigUrl = '';
-    function openBig(url, entry) {
-      bigUrl = url;
-      bigEntry = entry || null;
-      el.bigimg.src = url;
-      el.bigmeta.textContent = entry ? `${entry.workflow} · seed ${entry.seed} · ${entry.prompt}` : '';
-      el.reuse.style.display = entry ? '' : 'none';
+    let bigList = [];
+    let bigIdx = -1;
+    function bigMetaText(entry, idx, len) {
+      const base = entry ? `${entry.workflow} · seed ${entry.seed} · ${entry.prompt}` : '';
+      const pos = len > 1 && idx >= 0 ? ` · ${idx + 1}/${len}` : '';
+      return base ? base + pos : (pos ? pos.trim().replace(/^· /, '') : '');
+    }
+    function updateBigNav() {
+      const on = bigList.length > 1;
+      el.bigprev.disabled = !on; el.bignext.disabled = !on;
+    }
+    function showBig(idx) {
+      if (!bigList.length) return;
+      bigIdx = cycleIndex(idx, 0, bigList.length);
+      const cur = bigList[bigIdx];
+      bigUrl = cur.url;
+      bigEntry = cur.entry || null;
+      el.bigimg.src = cur.url;
+      el.bigmeta.textContent = bigMetaText(bigEntry, bigIdx, bigList.length);
+      el.reuse.style.display = bigEntry ? '' : 'none';
+      updateBigNav();
+    }
+    function openBig(url, entry, cycleList) {
+      bigList = (Array.isArray(cycleList) && cycleList.length) ? cycleList : [{ url, entry: entry || null }];
+      bigIdx = bigList.findIndex(e => e.url === url);
+      if (bigIdx < 0) { bigList = [{ url, entry: entry || null }]; bigIdx = 0; }
+      showBig(bigIdx);
       el.big.style.display = 'flex';
     }
-    el.bigclose.addEventListener('click', () => { el.big.style.display = 'none'; el.bigimg.src = ''; bigUrl = ''; });
+    el.bigclose.addEventListener('click', () => {
+      el.big.style.display = 'none'; el.bigimg.src = ''; bigUrl = ''; bigList = []; bigIdx = -1;
+    });
+    el.bigprev.addEventListener('click', () => showBig(bigIdx - 1));
+    el.bignext.addEventListener('click', () => showBig(bigIdx + 1));
+    document.addEventListener('keydown', e => {
+      if (el.big.style.display !== 'flex') return;
+      if (e.target.closest && e.target.closest('input, textarea, select')) return;
+      if (e.key === 'ArrowLeft') { showBig(bigIdx - 1); e.preventDefault(); }
+      else if (e.key === 'ArrowRight') { showBig(bigIdx + 1); e.preventDefault(); }
+      else if (e.key === 'Escape') el.bigclose.click();
+    });
     // v1.4 "Send to ▸": a finished render can go to Puppet Theater (as a
     // layer or the background) or to FaceCycle. Server urls only.
     const sendMenu = createSendMenu({
@@ -464,8 +504,21 @@ registerModule({
         const { items, total } = await api('/recent?limit=16');
         recentTotal = total ?? items.length;
         el.recent.innerHTML = '';
-        for (const it of items) for (const u of it.urls) el.recent.appendChild(thumb(u, true, it));
+        const flat = flattenRecent(items);
+        for (const f of flat) el.recent.appendChild(thumb(f.url, true, f.entry, flat));
         if (!items.length) el.recent.innerHTML = '<span class="lbl">none yet</span>';
+        // A refresh while the viewer is open keeps the cycle list current:
+        // if the open image is still in recents, re-point at it (position
+        // and nav update, image itself untouched); otherwise leave the
+        // viewer's existing list alone so the open image stays viewable.
+        if (bigUrl) {
+          const i = flat.findIndex(f => f.url === bigUrl);
+          if (i >= 0) {
+            bigList = flat; bigIdx = i;
+            el.bigmeta.textContent = bigMetaText(bigEntry, bigIdx, bigList.length);
+            updateBigNav();
+          }
+        }
         countLabel();
       } catch (e) { jobbar.textContent = ''; }
     }
