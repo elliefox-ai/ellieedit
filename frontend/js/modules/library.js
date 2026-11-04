@@ -11,6 +11,7 @@
 import { registerModule } from '../shell.js';
 import { createSendMenu } from '../components/send-menu.js';
 import { buildListParams, countLine } from './library-core.js';
+import { libraryDetails } from './viewer-details.js';
 import { bindViewerZoom } from './zoom-viewer.js';
 
 const PAGE_SIZE = 40; // must match backend PAGE_SIZE for cursor math
@@ -149,6 +150,10 @@ function panelHTML() {
     }
     .lib-viewer .bar .fname { color: #b0b0d0; font-size: 12px; flex: 1;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lib-viewer .details { padding: 6px 16px; color: #8a8aaa; font-size: 12px;
+      background: #161628; border-bottom: 1px solid #2a2a44;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lib-viewer .details:empty { display: none; }
     .lib-viewer .bar .ee-btn { min-height: 44px; }
     .lib-viewer .bar .ee-btn.danger { border-color: #7a3a3a; color: #e87a7a; }
     .lib-viewer .bar .ee-btn.danger.confirming {
@@ -258,6 +263,7 @@ function panelHTML() {
         <button class="ee-btn" data-act="viewer-zoom-fit" title="Reset zoom to fit">Fit</button>
         <button class="ee-btn" id="libv-close">✕</button>
       </div>
+      <div class="details" id="libv-details"></div>
       <div class="stage"><img id="libv-img" alt=""></div>
       <div class="gone-note" id="libv-note">already queued — › for next</div>
       <div class="navzone left" id="libv-prev">‹</div>
@@ -277,6 +283,7 @@ class LibraryView {
       more: panel.querySelector('#lib-more'),
       viewer: panel.querySelector('#lib-viewer'),
       vName: panel.querySelector('#libv-name'),
+      vDetails: panel.querySelector('#libv-details'),
       vImg: panel.querySelector('#libv-img'),
       vNote: panel.querySelector('#libv-note'),
       vRetag: panel.querySelector('#libv-retag'),
@@ -1106,6 +1113,7 @@ class LibraryView {
     this.el.vImg.src = this.fileUrl(it.path);
     const tags = (it.tags || []).join(', ');
     this.el.vName.textContent = `${it.name}${tags ? ' · ' + tags : ''}`;
+    this.el.vDetails.textContent = libraryDetails(it, idx, this.items.length);
     // Family toggle (Phase 0): finals with an original offer it directly.
     const hasFam = !!(it.family_id && it.original);
     this.el.vFamily.style.display = hasFam ? '' : 'none';
@@ -1123,6 +1131,8 @@ class LibraryView {
     this.el.vFamily.textContent = this.viewingOriginal ? '⧉ Final' : '⧉ Original';
     const tags = (it.tags || []).join(', ');
     this.el.vName.textContent = `${it.name}${tags ? ' · ' + tags : ''}` +
+      (this.viewingOriginal ? ' · original' : '');
+    this.el.vDetails.textContent = libraryDetails(it, this.viewIdx, this.items.length) +
       (this.viewingOriginal ? ' · original' : '');
   }
 
