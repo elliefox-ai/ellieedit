@@ -49,6 +49,7 @@ from PIL import Image, ImageChops, ImageOps
 from pydantic import BaseModel
 
 from .. import comfy
+from .. import provenance as _prov
 
 Image.MAX_IMAGE_PIXELS = None  # local tool; images may be large
 
@@ -614,6 +615,16 @@ def render(pid: str, body: RenderBody):
         log.error("[puppet render] ERROR: %s", e)
         raise HTTPException(status_code=502, detail=f"final pass failed: {e}")
     render_asset = _store_render_asset(pid, png)
+    # Issue #14 A1: the stored render asset gets a recipe record. Its
+    # parent is the project composite (recorded in extra), not a single
+    # source image; size is the composite size.
+    if render_asset:
+        _prov.record_for_image(f"projects/{pid}/assets/{render_asset}",
+                               "puppet", prompt=body.prompt,
+                               workflow=engine, seed=int(body.seed or 0),
+                               width=w, height=h, denoise=denoise,
+                               extra={"project": pid,
+                                      "mask_used": mask_used})
     return {"image_b64": base64.b64encode(png).decode(),
             "denoise": denoise, "width": w, "height": h,
             "mask_used": mask_used, "engine": engine,

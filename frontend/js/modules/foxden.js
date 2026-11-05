@@ -221,6 +221,11 @@ registerModule({
     // Last-selected wins (v1). Natural size is read so the scheduler gets the
     // image's own resolution; aspect buttons are grayed while one is set. ──
     let inputImage = null, inputDims = null, inputItems = [];
+    // Issue #14 A1: the gallery path of a send-to input image, so the
+    // next generate's provenance record can link back to it. Set only
+    // by the foxden-receive handler, cleared by ANY other input change
+    // (setInput) so a manually picked input never inherits a stale parent.
+    let inputParent = null;
     const viewUrl = n => {
       const i = n.replace(/\\/g, '/').lastIndexOf('/');
       const sub = i >= 0 ? n.slice(0, i) : '', fn = i >= 0 ? n.slice(i + 1) : n;
@@ -248,6 +253,7 @@ registerModule({
     }
     function setInput(name) {
       el.ireceipt.textContent = '';            // any manual change retires the receipt
+      inputParent = null;                      // and any received parent link
       inputImage = name || null; inputDims = null;
       if (inputImage) {
         const probe = new Image();
@@ -370,6 +376,9 @@ registerModule({
         denoise: parseFloat(el.denoise.value),                       // always sent
       };
       if (inputImage) body.input_image = inputImage;
+      // Issue #14 A1: a send-to input's gallery path travels as the
+      // new render's parent_image (backend validates it like input_image).
+      if (inputImage && inputParent) body.parent_image = inputParent;
       // Seed-lock (2026-10-26): unchecked (default) rolls a fresh random
       // seed on every generate; checked keeps the typed seed. The field
       // updates here, before submit, so the seed being used is visible.
@@ -475,10 +484,25 @@ registerModule({
       getPayload: () => {
         if (!bigUrl) return { error: 'No render open.' };
         const out = { urls: [bigUrl], names: [nameFromUrl(bigUrl)], source: 'FoxDen' };
-        try {
-          const qpath = new URL(bigUrl, location.origin).searchParams.get('path');
-          if (qpath) out.provenance = { kind: 'foxden', paths: [qpath] };
-        } catch { /* non-URL bigUrl: Update opens it pathless, as before */ }
+        // The render's addressable path: the view URL carries no `path`
+        // param, so take it from the recent entry's output record.
+        let rpath = null;
+        try { rpath = new URL(bigUrl, location.origin).searchParams.get('path'); } catch { /* non-URL bigUrl */ }
+        const e = bigEntry;
+        if (!rpath && e && Array.isArray(e.outputs) && e.outputs[0]) {
+          const o = e.outputs[0];
+          rpath = o.subfolder ? `${o.subfolder}/${o.filename}` : o.filename;
+        }
+        if (rpath) out.provenance = { kind: 'foxden', paths: [rpath] };
+        // Issue #14 A1: the open render's own recipe travels with it
+        // (its provenance-record path rides in recipe.path, so a
+        // receiving FoxDen can link the next generation back to it).
+        if (e && e.prompt) {
+          out.recipe = { prompt: e.prompt, workflow: e.workflow,
+            seed: e.seed, steps: e.steps, width: e.width,
+            height: e.height, loras: e.loras, denoise: e.denoise,
+            input_image: e.input_image, path: rpath || null };
+        }
         el.bigclose.click();                 // the viewer shouldn't be waiting when the user returns
         return out;
       },
@@ -562,7 +586,7 @@ registerModule({
         : { ok: false, reason: 'FoxDen is still loading — try again in a moment.' },
     });
     window.addEventListener('ellieedit:foxden-receive', async e => {
-      const { urls, names, source } = e.detail || {};
+      const { urls, names, source, recipe, provenance } = e.detail || {};
       if (!Array.isArray(urls) || !urls.length) return;
       try {
         say('receiving image…');
@@ -575,6 +599,10 @@ registerModule({
         const name = j.subfolder ? `${j.subfolder}/${j.name}` : j.name;
         if (!inputItems.includes(name)) inputItems.unshift(name);
         setInput(name); scheduleSave();
+        // Issue #14 A1: keep the sent image's gallery path as this
+        // input's parent (set AFTER setInput, which clears it). The
+        // recipe's path wins; else the provenance path; else none.
+        inputParent = (recipe && recipe.path) || (provenance && Array.isArray(provenance.paths) && provenance.paths[0]) || null;
         el.ireceipt.textContent = receiptText(1, source) + (urls.length > 1 ? ` (first of ${urls.length}; input takes one)` : '');
         say(`Input image set: ${name}.`, 'ok');
       } catch (err) { say('Receive failed: ' + err.message, 'err'); }

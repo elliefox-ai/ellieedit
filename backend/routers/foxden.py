@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from .. import comfy
+from .. import provenance as _prov
 
 log = logging.getLogger("ellieedit.foxden")
 
@@ -425,6 +426,10 @@ class GenerateBody(BaseModel):
     # Stored in recent/presets/Reuse either way.
     denoise: float = 1.0
     input_image: str | None = None          # name from /inputs or /upload (img2img)
+    # Recipe parent (issue #14 A1): the gallery path of the image sent to
+    # FoxDen as its input, so the new render's provenance record can link
+    # back to the source image's record. Set by the frontend on receive.
+    parent_image: str | None = None
 
 
 def _node_errors_text(resp: dict) -> str:
@@ -452,6 +457,11 @@ def generate(body: GenerateBody):
         if (not n.strip() or len(n) > 255 or n.startswith("/") or ".." in n.split("/")
                 or ":" in n):
             raise HTTPException(400, "invalid input_image name")
+    if body.parent_image is not None:
+        n = body.parent_image.replace("\\", "/")
+        if (not n.strip() or len(n) > 255 or n.startswith("/") or ".." in n.split("/")
+                or ":" in n):
+            raise HTTPException(400, "invalid parent_image path")
     if len(body.loras) > 8:
         raise HTTPException(400, "at most 8 LoRAs")
     avail = set(scan_loras())
@@ -486,6 +496,7 @@ def generate(body: GenerateBody):
         "loras": [lo.model_dump() for lo in body.loras],
         "suspended_loras": [lo.model_dump() for lo in body.suspended_loras],
         "denoise": body.denoise, "input_image": body.input_image,
+        "parent_image": body.parent_image,
         "submitted": time.time(),
     }
     return {"prompt_id": pid, "seed": seed, "workflow": body.workflow}
@@ -610,6 +621,23 @@ def _log_recent(pid: str, images: list[dict]) -> None:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError:
         log.warning("foxden recent log write failed", exc_info=True)
+    # Issue #14 A1: the same recipe, once per output file, in the shared
+    # provenance log. The delivery copy (same filename, another folder)
+    # gets no separate record — latest_for_path(filename) already finds
+    # this one, and a copy is not a new generation.
+    for o in entry.get("outputs", []):
+        sub = (o.get("subfolder") or "").strip("/ ")
+        name = o.get("filename") or ""
+        if not name:
+            continue
+        _prov.record_for_image(
+            f"{sub}/{name}" if sub else name, "foxden",
+            prompt=meta.get("prompt"), workflow=meta.get("workflow"),
+            seed=meta.get("seed"), steps=meta.get("steps"),
+            width=meta.get("width"), height=meta.get("height"),
+            loras=meta.get("loras"), denoise=meta.get("denoise"),
+            input_image=meta.get("input_image"),
+            parent_image=meta.get("parent_image"))
 
 
 def _read_rows() -> list[dict]:
@@ -789,6 +817,27 @@ def reconcile(force: bool = False):
             except OSError as e:
                 raise HTTPException(500, f"could not write recent log: {e}")
             _logged.update(r["prompt_id"] for r in fresh)
+            # Issue #14 A1: reconciled renders get provenance records too,
+            # with whatever the graph recovery managed (unrecoverable fields
+            # stay None — the helper never invents them).
+            for r in fresh:
+                for o in r.get("outputs", []):
+                    sub = (o.get("subfolder") or "").strip("/ ")
+                    name = o.get("filename") or ""
+                    if not name:
+                        continue
+                    _prov.record_for_image(
+                        f"{sub}/{name}" if sub else name, "foxden",
+                        # "(reconciled)" is a recovery placeholder, not a
+                        # prompt — record it as absent, never invented.
+                        prompt=(None if r.get("prompt") == "(reconciled)"
+                                else r.get("prompt")),
+                        workflow=r.get("workflow"),
+                        seed=r.get("seed"), steps=r.get("steps"),
+                        width=r.get("width"), height=r.get("height"),
+                        loras=r.get("loras"), denoise=r.get("denoise"),
+                        input_image=r.get("input_image"),
+                        extra={"reconciled": True})
         deliver = [o for r in fresh for o in r["outputs"]]
         deliver += [o for r in rows[-DELIVER_BACKFILL:]
                     for o in r.get("outputs", [])]

@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import comfy
+from .. import provenance as _prov
 
 log = logging.getLogger("ellieedit.facecycle")
 
@@ -168,6 +169,12 @@ def replace_sources(body: ReplaceSourcesBody, request: Request = None):
         saved_rel = dest.resolve().relative_to(groot).as_posix()
     except (OSError, ValueError):
         saved_rel = dest.name
+    # Issue #14 A1: the composite is a generated image — record it. It
+    # has no prompt/seed/workflow of its own (it is a composite of the
+    # sources, not a generation), so those stay absent; the sources and
+    # the base travel in extra, and the base is the parent.
+    _prov.record_for_image(saved_rel, "facecycle", parent_image=base_rel,
+                           extra={"sources": srcs, "family": body.family})
     if body.kind == "dupe":
         entry = {"ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
                  "family": body.family,

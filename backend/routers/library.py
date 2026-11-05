@@ -41,6 +41,7 @@ from fastapi import Response as FResponse
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+from .. import provenance as _prov
 from . import dupe as _dupe_mod
 from . import gallery as _gallery_mod
 from .gallery import EXTS, get_thumbnail
@@ -224,9 +225,20 @@ def _unique_dest(dest_dir: Path, name: str) -> Path:
     raise HTTPException(409, "could not find unique destination name")
 
 
-def promote_move(src: Path, tag: str | None = None) -> dict:
+def promote_move(src: Path, tag: str | None = None,
+                 recipe: dict | None = None) -> dict:
     """Move src into LIBRARY_ROOT/<tag>/<name>; append the index record.
-    Returns the record. Raises HTTPException on invalid source."""
+    Returns the record. Raises HTTPException on invalid source.
+
+    Issue #14 A1: the source's recipe travels with it. ``recipe`` is the
+    A1 recipe fields (prompt/workflow/seed/steps/size/loras/denoise) as
+    supplied by a caller that already knows them (Update save-family);
+    otherwise the source's latest provenance record is looked up by its
+    path. The carried recipe is embedded in the index record as
+    ``provenance`` AND appended to the provenance log for the new path,
+    so a Library final keeps its recipe after the move. Library finals
+    stay non-overwritable — this only ever appends, never rewrites an
+    existing record."""
     try:
         src.resolve()
     except OSError:
@@ -283,6 +295,22 @@ def promote_move(src: Path, tag: str | None = None) -> dict:
         "ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "sha256": digest,
     }
+    # Issue #14 A1: carry the recipe. An explicitly supplied recipe wins;
+    # otherwise look the source up in the provenance log (by the path it
+    # was promoted from, then by bare filename, for FoxDen-style records).
+    fields = {}
+    if isinstance(recipe, dict):
+        fields = {k: v for k, v in recipe.items()
+                  if k in ("prompt", "workflow", "seed", "steps", "width",
+                           "height", "loras", "denoise", "input_image")
+                  and v not in (None, [], "")}
+    if not fields:
+        fields = _prov.recipe_fields(
+            _prov.lookup_parent([promoted_from, src.name]))
+    if fields:
+        record["provenance"] = _prov.record_for_image(
+            record["path"], "library-promote", parent_image=promoted_from,
+            sha256=digest, **fields)
     append_index(record)
     log.info("promoted %s -> %s (tag=%s)", promoted_from, record["path"], record["tags"][0])
     return record
