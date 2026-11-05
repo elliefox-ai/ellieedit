@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { routeSend, planSend, normalizeSend, nameFromUrl, receiptText, gate,
-  SEND_TARGETS, FACECYCLE_MAX } from '../../frontend/js/send-to.js';
+  cleanRecipe, SEND_TARGETS, FACECYCLE_MAX } from '../../frontend/js/send-to.js';
 import { planFaceCycleHandoff } from '../../frontend/js/handoff.js';
 
 const G = '/api/gallery/file?path=out%2Fa.png';
@@ -104,6 +104,29 @@ test('receipt text names the source and the mode', () => {
 test('gate: a busy reason rejects, none accepts', () => {
   assert.deepEqual(gate(''), { ok: true });
   assert.deepEqual(gate('mid-render'), { ok: false, reason: 'mid-render' });
+});
+
+test('issue #14 A1: a recipe travels with the image to every target', () => {
+  const recipe = { prompt: 'a lantern', workflow: 'klein', seed: 7, steps: 20,
+    width: 1024, height: 576, loras: [{ name: 'a.safetensors', strength_model: 0.8 }],
+    denoise: 1, input_image: 'in.png', path: 'foxden_00001_.png' };
+  for (const target of SEND_TARGETS) {
+    const r = routeSend({ target, urls: [G], names: ['a.png'], source: 'FoxDen', recipe });
+    assert.ok(!r.error, `${target}: ${r.error}`);
+    assert.deepEqual(r.events[0].detail.recipe, recipe, `${target} carries the recipe`);
+  }
+  // absent recipe stays absent — old senders keep their exact old shapes
+  assert.ok(!('recipe' in routeSend({ target: 'foxden', urls: [G] }).events[0].detail));
+  assert.ok(!('recipe' in routeSend({ target: 'update', urls: [G] }).events[0].detail));
+});
+
+test('issue #14 A1: cleanRecipe keeps only known A1 fields, drops the rest', () => {
+  assert.equal(cleanRecipe(null), null);
+  assert.equal(cleanRecipe('nope'), null);
+  assert.equal(cleanRecipe({}), null);
+  assert.deepEqual(cleanRecipe({ prompt: 'x', secret: 'no', seed: '7', steps: 20,
+    loras: 'not-a-list', denoise: NaN }),
+    { prompt: 'x', seed: 7, steps: 20 });
 });
 
 test('planSend: unknown tab, validation errors and gate refusals all stay on the source tab', () => {
