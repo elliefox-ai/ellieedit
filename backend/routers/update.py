@@ -38,6 +38,7 @@ from PIL import Image, ImageOps
 from pydantic import BaseModel
 
 from .. import comfy as _comfy
+from .. import provenance as _prov
 from . import gallery as _gallery_mod
 from . import library as _library_mod
 
@@ -302,6 +303,10 @@ def save_back(render_rel: str, source_rel: str) -> dict:
     if render_src.resolve() == source_dest.resolve():
         raise HTTPException(400, "render and source are the same file")
     shutil.copyfile(render_src, source_dest)
+    # Issue #14 A1: the overwritten file keeps the render's recipe (or,
+    # with no render record, a record that links it to the render).
+    _prov.carry([render_rel], source_rel, "update-save-back",
+                sha256=_library_mod.sha256_of(source_dest))
     log.info("save-back %s -> %s", render_rel, source_rel)
     return {"ok": True, "overwritten": source_rel, "root": root_name,
             "bytes": source_dest.stat().st_size}
@@ -336,6 +341,9 @@ def save_new(render_rel: str, source_rel: str) -> dict:
             new_rel = dest.relative_to(_dupe_root).as_posix()
         except ValueError:
             new_rel = dest.as_posix()
+    # Issue #14 A1: the new version carries the render's recipe.
+    _prov.carry([render_rel], new_rel, "update-save-new",
+                sha256=_library_mod.sha256_of(dest))
     log.info("save-new %s -> %s", render_rel, new_rel)
     return {"ok": True, "new_path": new_rel, "root": root_name}
 
@@ -362,8 +370,11 @@ def save_family(render_rel: str, original_path: str, tag: str | None,
     records recipe='masked-inpaint', masked=True — additive fields only,
     so old records stay valid."""
     render_src = resolve_source(render_rel)
-    record = _library_mod.promote_move(render_src,
-                                       (tag or "").strip().lower() or None)
+    # Issue #14 A1: the render's recipe travels into the Library with it
+    # (promote_move embeds it in the index record and the provenance log).
+    record = _library_mod.promote_move(
+        render_src, (tag or "").strip().lower() or None,
+        recipe=_prov.recipe_fields(_prov.lookup_parent([render_rel])))
     final_rel = record["path"]
     family_id = uuid.uuid4().hex[:12]
     tag_dir = _library_mod.LIBRARY_ROOT / Path(final_rel).parent.name
@@ -372,6 +383,9 @@ def save_family(render_rel: str, original_path: str, tag: str | None,
     orig_dest = _unique_dest(tag_dir, f"{Path(final_rel).stem}-original{orig_src.suffix}")
     shutil.copyfile(orig_src, orig_dest)
     orig_rel = orig_dest.relative_to(_library_mod.LIBRARY_ROOT).as_posix()
+    # Issue #14 A1: the travelling original keeps the source's recipe.
+    _prov.carry([original_path], orig_rel, "update-save-family-original",
+                sha256=_library_mod.sha256_of(orig_dest))
     now = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     _library_mod.append_index({
         "path": orig_rel, "tags": record["tags"],
@@ -390,6 +404,8 @@ def save_family(render_rel: str, original_path: str, tag: str | None,
     if recipe is not None:   # additive: old callers omit it, records stay valid
         final_rec["recipe"] = recipe
         final_rec["masked"] = bool(masked)
+    if record.get("provenance"):   # Issue #14 A1: recipe carried by promote
+        final_rec["provenance"] = record["provenance"]
     _library_mod.append_index(final_rec)
     log.info("save-family %s: original=%s final=%s tag=%s",
              family_id, orig_rel, final_rel, record["tags"])
@@ -497,6 +513,13 @@ def _execute_run(body: RunBody) -> dict:
     cand = (_gallery_mod.GALLERY_ROOT / sub / im["filename"])
     if cand.is_file():
         render_rel = (Path(sub) / im["filename"]).as_posix()
+    # Issue #14 A1: the first recipe record an Update render ever gets.
+    # Steps/size/LoRAs are not exposed by the preset graph in a standard
+    # way, so they stay absent — never invented.
+    if render_rel:
+        _prov.record_for_image(render_rel, "update", prompt=body.prompt,
+                               workflow=body.preset, seed=seed,
+                               parent_image=body.path)
     return {"ok": True, "prompt_id": pid, "seed": seed,
             "image": "data:image/png;base64," + base64.b64encode(data).decode(),
             "render_path": render_rel, "recipe": body.preset, "masked": False}
@@ -626,9 +649,15 @@ def _execute_inpaint(body: InpaintBody) -> dict:
     except Exception as e:
         log.error("[update inpaint] ERROR: %s", e)
         raise HTTPException(502, f"masked inpaint failed: {e}")
+    render_path = _store_update_render(png)
+    # Issue #14 A1: recipe record for the inpaint render.
+    if render_path:
+        _prov.record_for_image(render_path, "update", prompt=body.prompt,
+                               workflow="masked-inpaint", seed=seed,
+                               denoise=denoise, parent_image=body.path)
     return {"ok": True, "seed": seed, "denoise": denoise,
             "image": "data:image/png;base64," + base64.b64encode(png).decode(),
-            "render_path": _store_update_render(png),
+            "render_path": render_path,
             "recipe": "masked-inpaint", "masked": True}
 
 
