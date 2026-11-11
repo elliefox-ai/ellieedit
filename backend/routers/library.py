@@ -58,8 +58,11 @@ LIBRARY_SORTS = ("new", "old", "name", "name_desc", "tag")
 
 def sort_rows(rows: list[dict], sort: str) -> list[dict]:
     """Pure: order library rows for a sort mode. 'new' is the default
-    newest-first order _all_rows already produces; 'tag' sorts by the
-    first tag (then name) so a project's images cluster together."""
+    newest-first order _all_rows already produces; 'tag' sorts by
+    tags[0] — the first tag in the row's tag list as stored in the tag
+    index (an explicitly assigned tag; when none was assigned the index
+    carries the folder-name-derived fallback tag), then by name, so a
+    project's images cluster together."""
     if sort == "old":
         return sorted(rows, key=lambda r: (r["mtime"], r["path"]))
     if sort == "name":

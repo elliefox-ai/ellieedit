@@ -901,8 +901,13 @@ def test_foxden_zoom_recipe_column_and_input_browser():
     for needle in ('data-id="isort"', 'data-id="ifilter"', 'data-id="imore"',
                    "orderInputs(inputItems, inputRecency", "pageInputs(names, inputsShown)"):
         assert needle in fx, needle
-    # workflow survives loadConfig on tab re-activation (bug 1+2 fix)
-    assert "stillValid ? prevWf : c.default_workflow" in fx
+    # workflow survives loadConfig on tab re-activation (bug 1+2 fix;
+    # fix round 1 moved the rebuild into a tested helper that captures
+    # the value BEFORE innerHTML — the old inline version read prevWf
+    # after the rebuild and always "preserved" klein)
+    assert "rebuildSelectPreserving(el.wf" in fx
+    state_src = (HERE.parent / "frontend" / "js" / "modules" / "foxden-state.js").read_text()
+    assert "export function rebuildSelectPreserving" in state_src
     # pure helpers exist and are wired
     inputs_mod = (HERE.parent / "frontend" / "js" / "modules" / "foxden-inputs.js").read_text()
     recipe_mod = (HERE.parent / "frontend" / "js" / "modules" / "foxden-recipe.js").read_text()
@@ -933,19 +938,32 @@ def test_js_foxden_recipe_helpers():
 
 # ------------------------------------------------------- Filters Chunk B (2026-11-11)
 def test_filters_chunk_b_vibrance_panzoom_sendupdate_wiring():
-    """Chunk B: vibrance lives in the Colorhold drawer as backend sliders,
-    the Filters stage binds the shared Chunk C pan/zoom component with a
-    control-drag gate, and 'Send to Update' goes through /store + the
-    standard cross-tab route (server url + provenance, never a data url)."""
+    """Chunk B + fix round 1: vibrance lives in the TUNES (basic tuning)
+    drawer as backend sliders — relocated out of the Colorhold drawer on
+    Alexander's 2026-11-11 review ("Vibrance is a basic filter, like
+    Saturation") — works with colorhold off via an identity colorhold pass
+    (strength 0), and the 0-100 protect slider is normalized to the API's
+    0-1 in colorholdParams. The Filters stage binds the shared Chunk C
+    pan/zoom component with a control-drag gate, and 'Send to Update' goes
+    through /store + the standard cross-tab route (server url + provenance,
+    never a data url)."""
     mods = HERE.parent / "frontend" / "js" / "modules"
     src = (mods / "filters.js").read_text()
     pz = (mods / "pan-zoom.js").read_text()
     router = (HERE.parent / "backend" / "routers" / "filters.py").read_text()
     vib = (HERE.parent / "backend" / "vibrance.py").read_text()
-    # Vibrance: sliders alongside sat_mul, wired to the backend apply body.
-    for needle in ('data-id="ch-vib"', 'data-id="ch-vib-fall"', 'data-id="ch-vib-prot"',
+    # Vibrance: sliders in the tunes drawer (before the Saturation slider),
+    # wired to the backend apply body with the protect 0-100 -> 0-1 mapping.
+    tunes_idx = src.index('data-id="tunes-drawer"')
+    for needle in ('data-id="vib-strength"', 'data-id="vib-falloff"', 'data-id="vib-protect"',
                    "vibrance: s.vibrance,"):
         assert needle in src, needle
+        assert src.index(needle) > tunes_idx, f"{needle} must live in the tunes drawer"
+    assert src.index('data-id="vib-strength"') < src.index('data-id="tn-sat"')
+    assert 'data-id="ch-vib"' not in src      # old colorhold-bundled ids gone
+    assert "vibrance_protect: s.vibrance_protect / 100" in src  # scale fix
+    assert "s.chEnabled || s.vibrance > 0" in src               # works w/o colorhold
+    assert "strength: s.chEnabled ? 100 : 0" in src             # identity colorhold
     assert "vibrance: float = 0.0" in router
     assert "_vib.apply_vibrance" in router
     # Pan/zoom: the shared component, with the gate refusing control drags.

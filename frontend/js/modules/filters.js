@@ -77,10 +77,6 @@ function panelHTML() {
           <label>Dark threshold <input type="range" data-id="ch-dark" min="0.1" max="0.9" step="0.01" value="0.45"> <span data-id="ch-dark-val">0.45</span></label>
           <label>Line saturation <input type="range" data-id="ch-sat" min="0.5" max="2" step="0.05" value="1.45"> <span data-id="ch-sat-val">1.45</span></label>
           <label>Line darkness <input type="range" data-id="ch-val" min="0.3" max="1" step="0.01" value="0.72"> <span data-id="ch-val-val">0.72</span></label>
-          <label>Vibrance <input type="range" data-id="ch-vib" min="0" max="100" step="1" value="0"> <span data-id="ch-vib-val">0%</span></label>
-          <label>Vibrance falloff <input type="range" data-id="ch-vib-fall" min="0.05" max="0.6" step="0.01" value="0.25"> <span data-id="ch-vib-fall-val">0.25</span></label>
-          <label>Skin protection <input type="range" data-id="ch-vib-prot" min="0" max="100" step="1" value="50"> <span data-id="ch-vib-prot-val">50%</span></label>
-          <span class="flt-caption">Vibrance boosts muted colors first and leaves already-saturated colors alone (OKLCH chroma, gamut-clamped). Falloff widens the muted→saturated ramp; skin protection makes reds/oranges/yellows resist the boost. 0 = off, byte-exact v5.</span>
           <label>Fill smoothing <input type="range" data-id="ch-smooth" min="0" max="5" step="1" value="3"> <span data-id="ch-smooth-val">7</span> <span class="flt-caption">(0 = off, then 3–11)</span></label>
           <label>Line smoothing <input type="range" data-id="ch-sigma" min="0" max="2" step="0.1" value="0"> <span data-id="ch-sigma-val">0</span> <span class="flt-caption">(secondary — softens source-lineart jaggies)</span></label>
           <label><input type="checkbox" data-id="ch-gate"> Protect black masses (thin-stroke gate, opt-in)</label>
@@ -94,6 +90,16 @@ function panelHTML() {
       <section class="flt-sec">
         <button class="ee-btn flt-drawer-toggle active-toggle" data-act="toggle-tunes" aria-expanded="true">✨ Tunes (canvas)</button>
         <div class="flt-drawer" data-id="tunes-drawer">
+          <!-- Vibrance lives here as a basic tune (Alexander, 2026-11-11:
+          "I'd meant Vibrance to be a basic filter, like Saturation") — not
+          bundled with the colorhold controls. It still travels to the
+          backend apply call, and works with colorhold OFF (identity
+          colorhold pass, strength 0). Protect is a 0-100 slider mapped to
+          the API's 0-1 in colorholdParams() -->
+          <label>Vibrance <input type="range" data-id="vib-strength" min="0" max="100" step="1" value="0"> <span data-id="vib-strength-val">0%</span></label>
+          <label>Vibrance falloff <input type="range" data-id="vib-falloff" min="0.05" max="0.6" step="0.01" value="0.25"> <span data-id="vib-falloff-val">0.25</span></label>
+          <label>Skin protection <input type="range" data-id="vib-protect" min="0" max="100" step="1" value="50"> <span data-id="vib-protect-val">50%</span></label>
+          <span class="flt-caption">Vibrance boosts muted colors first and leaves already-saturated colors alone (OKLCH chroma, gamut-clamped). Falloff widens the muted→saturated ramp; skin protection makes reds/oranges/yellows resist the boost. 0 = off.</span>
           <label>Saturation <input type="range" data-id="tn-sat" min="0" max="2" step="0.05" value="1"> <span data-id="tn-sat-val">1</span></label>
           <label>Brightness <input type="range" data-id="tn-bri" min="-0.5" max="0.5" step="0.01" value="0"> <span data-id="tn-bri-val">0</span></label>
           <label>Contrast <input type="range" data-id="tn-con" min="0" max="2" step="0.05" value="1"> <span data-id="tn-con-val">1</span></label>
@@ -150,8 +156,8 @@ const SLIDERS = [
   ['gate-maxw', 'gate_maxw', v => parseInt(v, 10), 'backend'],
   ['gate-bh', 'gate_bh_full', parseFloat, 'backend'],
   ['gate-strength', 'gate_strength', parseFloat, 'backend'],
-  ['ch-vib', 'vibrance', parseFloat, 'backend'], ['ch-vib-fall', 'vibrance_falloff', parseFloat, 'backend'],
-  ['ch-vib-prot', 'vibrance_protect', parseFloat, 'backend'],
+  ['vib-strength', 'vibrance', parseFloat, 'backend'], ['vib-falloff', 'vibrance_falloff', parseFloat, 'backend'],
+  ['vib-protect', 'vibrance_protect', parseFloat, 'backend'],
   ['tn-sat', 'satMul', parseFloat, 'canvas'], ['tn-bri', 'brightness', parseFloat, 'canvas'],
   ['tn-con', 'contrast', parseFloat, 'canvas'], ['tn-lift', 'lift', parseFloat, 'canvas'],
   ['tn-edge', 'edge', parseFloat, 'canvas'], ['strength', 'strength', parseFloat, 'canvas'],
@@ -185,7 +191,7 @@ class Filters {
       const el = q(id);
       el.addEventListener('input', () => {
         const valEl = q(id + '-val');
-        if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength' || id === 'ch-vib' || id === 'ch-vib-prot') ? `${el.value}%`
+        if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength' || id === 'vib-strength' || id === 'vib-protect') ? `${el.value}%`
           : (id === 'ch-smooth') ? (el.value === '0' ? '0' : el.value * 2 + 1) : el.value;
         // Canvas sliders (tunes + universal strength) re-draw instantly
         // from the last colorhold result — no backend round-trip, so
@@ -297,11 +303,17 @@ class Filters {
   // otherwise dragging them would re-fetch the backend for no reason.
   colorholdParams() {
     const s = this.state();
+    // Scale mapping (fix round 1, 2026-11-11): sliders follow the UI 0-100
+    // convention used by strength/gate-strength, but the API's
+    // vibrance_protect is 0-1 (backend/vibrance.py DEFAULT_PROTECT) — so
+    // protect is divided by 100 here, at the single params boundary.
+    // vibrance itself is already 0-100 on both sides; falloff is 0-1 on
+    // both sides (slider range 0.05-0.6).
     return { chEnabled: s.chEnabled, dark_t: s.dark_t, sat_mul: s.sat_mul,
       val_mul: s.val_mul, smooth: s.smooth, line_sigma: s.line_sigma,
       gate: s.gate, gate_maxw: s.gate_maxw, gate_bh_full: s.gate_bh_full,
       gate_strength: s.gate_strength, vibrance: s.vibrance,
-      vibrance_falloff: s.vibrance_falloff, vibrance_protect: s.vibrance_protect };
+      vibrance_falloff: s.vibrance_falloff, vibrance_protect: s.vibrance_protect / 100 };
   }
 
   applyState(s) {
@@ -312,7 +324,7 @@ class Filters {
       if (s[key] === undefined) continue;
       q(id).value = s[key];
       const valEl = q(id + '-val');
-    if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength' || id === 'ch-vib' || id === 'ch-vib-prot') ? `${s[key]}%` : String(s[key]);
+    if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength' || id === 'vib-strength' || id === 'vib-protect') ? `${s[key]}%` : String(s[key]);
       void parse;
     }
   }
@@ -420,7 +432,11 @@ class Filters {
     const key = JSON.stringify({ ...s, src: this.source.path || 'upload', preview });
     if (key === this.colorholdKey && this.colorholdUrl) return this.colorholdUrl;
     const body = { dark_t: s.dark_t, sat_mul: s.sat_mul, val_mul: s.val_mul,
-      smooth: s.smooth, line_sigma: s.line_sigma, strength: 100,
+      smooth: s.smooth, line_sigma: s.line_sigma,
+      // colorhold off + vibrance on = vibrance-only pass: strength 0 makes
+      // apply_strength an exact lerp back to the original after the (wasted
+      // but cached) colorhold stages, so the output is original + vibrance.
+      strength: s.chEnabled ? 100 : 0,
       gate: s.gate, gate_maxw: s.gate_maxw, gate_bh_full: s.gate_bh_full,
       gate_strength: s.gate_strength, vibrance: s.vibrance,
       vibrance_falloff: s.vibrance_falloff, vibrance_protect: s.vibrance_protect };
@@ -452,7 +468,9 @@ class Filters {
       // or gate slider change re-runs only the backend step for the
       // new parameter set, on the downscaled preview; full res is
       // re-run once, on commit.
-      if (s.chEnabled) {
+      if (s.chEnabled || s.vibrance > 0) {
+        // Vibrance applies even with colorhold off: the fetch below sends
+        // colorhold strength 0 (identity) and only the vibrance pass runs.
         const key = JSON.stringify({ ...this.colorholdParams(), src: this.source.path || 'upload', preview });
         if (key !== this.colorholdKey || !this.baseImg) {
           const url = await this.fetchColorhold(preview);

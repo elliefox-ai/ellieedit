@@ -7,7 +7,7 @@ import { createSendMenu } from '../components/send-menu.js';
 import { nameFromUrl, receiptText } from '../send-to.js';
 import { readCollapsed, writeCollapsed, recentLabel, flattenRecent, cycleIndex } from './foxden-recent.js';
 import { createPins } from './foxden-loras.js';
-import { normalizeState, presetState, debounce, cleanName, nextSeed, sizeFor } from './foxden-state.js';
+import { normalizeState, presetState, debounce, cleanName, nextSeed, sizeFor, rebuildSelectPreserving } from './foxden-state.js';
 import { orderInputs, pageInputs, INPUTS_PAGE } from './foxden-inputs.js';
 import { recipeSettings, recipeLines, copyText } from './foxden-recipe.js';
 
@@ -133,17 +133,16 @@ registerModule({
         const c = await api('/config');
         el.conn.textContent = c.comfy_reachable ? '● ComfyUI connected' : '○ ComfyUI unreachable';
         el.conn.className = 'fx-status ' + (c.comfy_reachable ? 'ok' : 'err');
-        el.wf.innerHTML = c.workflows.map(w =>
-          `<option value="${w.id}" ${w.available ? '' : 'disabled'}>${esc(w.id)}${w.available ? '' : ' (file missing)'}</option>`).join('');
-        // Chunk A bug fix (2026-11-11): loadConfig also runs on every tab
-        // re-activation, and unconditionally resetting to the default
-        // workflow there is what made the selection "snap back to klein"
-        // and what clobbered ReUse's choice a moment after it landed.
-        // Preserve the current selection whenever it is still valid; the
-        // default only applies on the very first paint (empty select).
-        const prevWf = el.wf.value;
-        const stillValid = prevWf && [...el.wf.options].some(o => o.value === prevWf && !o.disabled);
-        el.wf.value = stillValid ? prevWf : c.default_workflow;
+        // Fix round 1 (2026-11-11): the previous inline version read
+        // prevWf AFTER `el.wf.innerHTML = …`, but assigning innerHTML
+        // already resets the select to its first option (klein) — so the
+        // "preserve" branch always preserved klein and the selection
+        // snapped back on every tab re-activation. The rebuild now lives
+        // in foxden-state.rebuildSelectPreserving, which captures the
+        // value BEFORE touching innerHTML (and is unit-tested for it).
+        rebuildSelectPreserving(el.wf, c.workflows.map(w =>
+          `<option value="${w.id}" ${w.available ? '' : 'disabled'}>${esc(w.id)}${w.available ? '' : ' (file missing)'}</option>`).join(''),
+          c.default_workflow);
         allLoras = c.loras;
         renderLoras();
       } catch (e) { el.conn.textContent = 'config failed: ' + e.message; el.conn.className = 'fx-status err'; }
