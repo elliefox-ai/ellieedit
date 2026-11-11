@@ -24,6 +24,7 @@
 
 import { registerModule, registerReceiver } from '../shell.js';
 import { tuneImageData, tunesAreIdentity } from './filters-tunes.js';
+import { bindPanZoom } from './pan-zoom.js';
 
 const PREVIEW_MAX_SIDE = 1024;
 
@@ -76,6 +77,10 @@ function panelHTML() {
           <label>Dark threshold <input type="range" data-id="ch-dark" min="0.1" max="0.9" step="0.01" value="0.45"> <span data-id="ch-dark-val">0.45</span></label>
           <label>Line saturation <input type="range" data-id="ch-sat" min="0.5" max="2" step="0.05" value="1.45"> <span data-id="ch-sat-val">1.45</span></label>
           <label>Line darkness <input type="range" data-id="ch-val" min="0.3" max="1" step="0.01" value="0.72"> <span data-id="ch-val-val">0.72</span></label>
+          <label>Vibrance <input type="range" data-id="ch-vib" min="0" max="100" step="1" value="0"> <span data-id="ch-vib-val">0%</span></label>
+          <label>Vibrance falloff <input type="range" data-id="ch-vib-fall" min="0.05" max="0.6" step="0.01" value="0.25"> <span data-id="ch-vib-fall-val">0.25</span></label>
+          <label>Skin protection <input type="range" data-id="ch-vib-prot" min="0" max="100" step="1" value="50"> <span data-id="ch-vib-prot-val">50%</span></label>
+          <span class="flt-caption">Vibrance boosts muted colors first and leaves already-saturated colors alone (OKLCH chroma, gamut-clamped). Falloff widens the muted→saturated ramp; skin protection makes reds/oranges/yellows resist the boost. 0 = off, byte-exact v5.</span>
           <label>Fill smoothing <input type="range" data-id="ch-smooth" min="0" max="5" step="1" value="3"> <span data-id="ch-smooth-val">7</span> <span class="flt-caption">(0 = off, then 3–11)</span></label>
           <label>Line smoothing <input type="range" data-id="ch-sigma" min="0" max="2" step="0.1" value="0"> <span data-id="ch-sigma-val">0</span> <span class="flt-caption">(secondary — softens source-lineart jaggies)</span></label>
           <label><input type="checkbox" data-id="ch-gate"> Protect black masses (thin-stroke gate, opt-in)</label>
@@ -128,6 +133,7 @@ function panelHTML() {
       <div class="flt-row" style="padding:8px 12px;border-top:1px solid #2a2a44">
         <button class="ee-btn" data-act="view-filtered">Filtered</button>
         <button class="ee-btn" data-act="view-original">Original</button>
+        <button class="ee-btn" data-act="send-update">↗ Send to Update</button>
         <span class="flt-status" data-id="view-label"></span>
       </div>
     </div>
@@ -144,6 +150,8 @@ const SLIDERS = [
   ['gate-maxw', 'gate_maxw', v => parseInt(v, 10), 'backend'],
   ['gate-bh', 'gate_bh_full', parseFloat, 'backend'],
   ['gate-strength', 'gate_strength', parseFloat, 'backend'],
+  ['ch-vib', 'vibrance', parseFloat, 'backend'], ['ch-vib-fall', 'vibrance_falloff', parseFloat, 'backend'],
+  ['ch-vib-prot', 'vibrance_protect', parseFloat, 'backend'],
   ['tn-sat', 'satMul', parseFloat, 'canvas'], ['tn-bri', 'brightness', parseFloat, 'canvas'],
   ['tn-con', 'contrast', parseFloat, 'canvas'], ['tn-lift', 'lift', parseFloat, 'canvas'],
   ['tn-edge', 'edge', parseFloat, 'canvas'], ['strength', 'strength', parseFloat, 'canvas'],
@@ -164,6 +172,8 @@ class Filters {
     this.viewing = 'filtered';
     this.debounce = null;
     this.lastSave = 0;
+    this.pzView = { scale: 1, tx: 0, ty: 0 };
+    this.controlDrag = false;  // gate: a drag started on the controls panel never pans the image
 
     act('toggle-colorhold').addEventListener('click', () => this.toggleDrawer('colorhold', act('toggle-colorhold')));
     act('toggle-tunes').addEventListener('click', () => this.toggleDrawer('tunes', act('toggle-tunes')));
@@ -175,7 +185,7 @@ class Filters {
       const el = q(id);
       el.addEventListener('input', () => {
         const valEl = q(id + '-val');
-        if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength') ? `${el.value}%`
+        if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength' || id === 'ch-vib' || id === 'ch-vib-prot') ? `${el.value}%`
           : (id === 'ch-smooth') ? (el.value === '0' ? '0' : el.value * 2 + 1) : el.value;
         // Canvas sliders (tunes + universal strength) re-draw instantly
         // from the last colorhold result — no backend round-trip, so
@@ -192,6 +202,8 @@ class Filters {
     act('save').addEventListener('click', () => this.saveToLibrary());
     act('view-filtered').addEventListener('click', () => { this.viewing = 'filtered'; this.renderCanvas(); });
     act('view-original').addEventListener('click', () => { this.viewing = 'original'; this.renderCanvas(); });
+    act('send-update').addEventListener('click', () => this.sendToUpdate());
+    this.bindPanZoomControls();
     act('preset-save').addEventListener('click', () => this.savePreset());
     act('preset-del').addEventListener('click', () => this.deletePreset());
     q('preset-sel').addEventListener('change', () => this.loadPreset());
@@ -206,6 +218,71 @@ class Filters {
     drawer.hidden = !open;
     btn.setAttribute('aria-expanded', String(open));
     btn.classList.toggle('active-toggle', open);
+  }
+
+  // ---- pan/zoom in place (Chunk B, on the Chunk C shared component) ------
+  // The stage is the bindPanZoom host; the canvas is the fit element
+  // (pan-zoom geom() accepts img or canvas). The gate refuses any gesture
+  // that started on the controls panel, so slider drags never pan the
+  // image even if the pointer ends over the stage.
+  bindPanZoomControls() {
+    const stage = this.panel.querySelector('.flt-stage');
+    const side = this.panel.querySelector('.flt-side');
+    side.addEventListener('pointerdown', () => { this.controlDrag = true; }, { capture: true });
+    window.addEventListener('pointerup', () => { this.controlDrag = false; }, { capture: true });
+    window.addEventListener('pointercancel', () => { this.controlDrag = false; }, { capture: true });
+    this.applyPz = () => {
+      const canvas = this.el.q('canvas');
+      const v = this.pzView;
+      canvas.style.transformOrigin = 'center center';
+      canvas.style.transform = v.scale === 1 ? '' : `translate(${v.tx}px, ${v.ty}px) scale(${v.scale})`;
+    };
+    this.pz = bindPanZoom({
+      stage,
+      getView: () => this.pzView,
+      setView: v => { this.pzView = v; this.applyPz(); },
+      gate: () => !this.controlDrag,
+    });
+  }
+
+  resetPz() {
+    this.pzView = { scale: 1, tx: 0, ty: 0 };
+    if (this.applyPz) this.applyPz();
+  }
+
+  // Send the currently filtered image into the Update tab flow: one
+  // bounded store write (same /api/filters/store path as commit, which
+  // now logs provenance for the new path), then the standard cross-tab
+  // send-to route — server url + provenance path, never a data url.
+  async sendToUpdate() {
+    if (!this.source || !this.baseImg) { this.setStatus('No image to send.', true); return; }
+    this.setStatus('Storing for Update…');
+    try {
+      this.viewing = 'filtered';
+      this.renderCanvas();
+      const canvas = this.el.q('canvas');
+      const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+      const dataUrl = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result);
+        fr.onerror = rej;
+        fr.readAsDataURL(blob);
+      });
+      const r = await fetch('/api/filters/store', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_b64: dataUrl }) });
+      if (!r.ok) throw new Error(`store failed: ${r.status}`);
+      const { render_path } = await r.json();
+      window.dispatchEvent(new CustomEvent('ellieedit:send-to', { detail: {
+        target: 'update',
+        urls: [`/api/gallery/file?path=${encodeURIComponent(render_path)}`],
+        names: [`filtered ${this.source.name}`],
+        source: 'Filters',
+        provenance: { kind: 'filters', paths: [render_path] } } }));
+      this.setStatus(`Sent to Update: ${render_path}`);
+    } catch (e) {
+      this.setStatus(e.message, true);
+    }
   }
 
   state() {
@@ -223,7 +300,8 @@ class Filters {
     return { chEnabled: s.chEnabled, dark_t: s.dark_t, sat_mul: s.sat_mul,
       val_mul: s.val_mul, smooth: s.smooth, line_sigma: s.line_sigma,
       gate: s.gate, gate_maxw: s.gate_maxw, gate_bh_full: s.gate_bh_full,
-      gate_strength: s.gate_strength };
+      gate_strength: s.gate_strength, vibrance: s.vibrance,
+      vibrance_falloff: s.vibrance_falloff, vibrance_protect: s.vibrance_protect };
   }
 
   applyState(s) {
@@ -234,7 +312,7 @@ class Filters {
       if (s[key] === undefined) continue;
       q(id).value = s[key];
       const valEl = q(id + '-val');
-      if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength') ? `${s[key]}%` : String(s[key]);
+    if (valEl) valEl.textContent = (id === 'strength' || id === 'gate-strength' || id === 'ch-vib' || id === 'ch-vib-prot') ? `${s[key]}%` : String(s[key]);
       void parse;
     }
   }
@@ -242,7 +320,8 @@ class Filters {
   resetDefaults() {
     this.applyState({ chEnabled: true, dark_t: 0.45, sat_mul: 1.45, val_mul: 0.72,
       smooth: 7, line_sigma: 0, gate: false, gate_maxw: 6, gate_bh_full: 0.06,
-      gate_strength: 100, satMul: 1, brightness: 0, contrast: 1,
+      gate_strength: 100, vibrance: 0, vibrance_falloff: 0.25, vibrance_protect: 50,
+      satMul: 1, brightness: 0, contrast: 1,
       lift: 0, edge: 0, strength: 100 });
     this.scheduleRender();
   }
@@ -286,6 +365,7 @@ class Filters {
       this.committedPath = null;
       this.el.act('save').disabled = true;
       this.el.q('src-name').textContent = name + (path ? ` (${path})` : '');
+      this.resetPz();
       this.scheduleRender(true);
     } catch (e) {
       this.setStatus(`Could not load source: ${e.message}`, true);
@@ -307,6 +387,7 @@ class Filters {
     this.committedPath = null;
     this.el.act('save').disabled = true;
     this.el.q('src-name').textContent = file.name + ' (upload)';
+    this.resetPz();
     this.scheduleRender(true);
   }
 
@@ -341,7 +422,8 @@ class Filters {
     const body = { dark_t: s.dark_t, sat_mul: s.sat_mul, val_mul: s.val_mul,
       smooth: s.smooth, line_sigma: s.line_sigma, strength: 100,
       gate: s.gate, gate_maxw: s.gate_maxw, gate_bh_full: s.gate_bh_full,
-      gate_strength: s.gate_strength };
+      gate_strength: s.gate_strength, vibrance: s.vibrance,
+      vibrance_falloff: s.vibrance_falloff, vibrance_protect: s.vibrance_protect };
     if (preview) body.preview_max_side = PREVIEW_MAX_SIDE;
     if (this.source.path) body.path = this.source.path;
     else body.image_b64 = this.source.dataUrl;

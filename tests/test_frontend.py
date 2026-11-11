@@ -929,3 +929,36 @@ def test_js_foxden_recipe_helpers():
     )
     assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
     assert "PASS" in r.stdout
+
+
+# ------------------------------------------------------- Filters Chunk B (2026-11-11)
+def test_filters_chunk_b_vibrance_panzoom_sendupdate_wiring():
+    """Chunk B: vibrance lives in the Colorhold drawer as backend sliders,
+    the Filters stage binds the shared Chunk C pan/zoom component with a
+    control-drag gate, and 'Send to Update' goes through /store + the
+    standard cross-tab route (server url + provenance, never a data url)."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    src = (mods / "filters.js").read_text()
+    pz = (mods / "pan-zoom.js").read_text()
+    router = (HERE.parent / "backend" / "routers" / "filters.py").read_text()
+    vib = (HERE.parent / "backend" / "vibrance.py").read_text()
+    # Vibrance: sliders alongside sat_mul, wired to the backend apply body.
+    for needle in ('data-id="ch-vib"', 'data-id="ch-vib-fall"', 'data-id="ch-vib-prot"',
+                   "vibrance: s.vibrance,"):
+        assert needle in src, needle
+    assert "vibrance: float = 0.0" in router
+    assert "_vib.apply_vibrance" in router
+    # Pan/zoom: the shared component, with the gate refusing control drags.
+    assert "bindPanZoom" in src and "gate: () => !this.controlDrag" in src
+    assert "img, canvas" in pz          # geom accepts the canvas stage
+    assert "stage.querySelector('img, canvas')" in pz
+    # Send to Update: store first (bounded write + provenance), then send-to.
+    assert 'data-act="send-update"' in src
+    assert "this.sendToUpdate()" in src
+    assert "target: 'update'" in src
+    assert "/api/gallery/file?path=" in src
+    assert "kind: 'filters'" in src
+    assert "record_for_image" in router  # provenance for every stored output
+    # Backend vibrance model pins: falloff ramp + skin protection exist.
+    assert "def muted_weight" in vib and "def skin_protect_weight" in vib
+    assert "def gamut_clamp" in vib

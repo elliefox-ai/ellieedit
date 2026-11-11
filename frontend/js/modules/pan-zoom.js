@@ -119,8 +119,11 @@ export function bindPanZoom({ stage, getView, setView, gate, onPinchStart, onEnd
 
   function geom() {
     const r = stage.getBoundingClientRect();
-    const img = stage.querySelector('img');
-    const natW = img && img.naturalWidth, natH = img && img.naturalHeight;
+    // img (review halves) or canvas (Filters stage) — anything with
+    // naturalWidth or width/height intrinsic dims works as the fit box.
+    const el = stage.querySelector('img, canvas');
+    const natW = el && (el.naturalWidth || el.width);
+    const natH = el && (el.naturalHeight || el.height);
     const fit = fitBox(natW, natH, r.width, r.height);
     return { r, fit };
   }
