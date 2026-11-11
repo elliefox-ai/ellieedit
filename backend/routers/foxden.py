@@ -653,6 +653,21 @@ def _read_rows() -> list[dict]:
     return rows
 
 
+@router.get("/provenance")
+def provenance(path: str):
+    """Latest provenance record for one image path (Chunk A UX, 2026-11-11).
+
+    The zoom viewer's settings column shows what Reuse settings would
+    apply; this is its data source (PR #18's latest_for_path). No record
+    is a normal outcome (pre-provenance images) -> 404, the viewer falls
+    back to the recent entry it already has.
+    """
+    rec = _prov.latest_for_path(path)
+    if rec is None:
+        raise HTTPException(404, "no provenance record for this path")
+    return rec
+
+
 @router.get("/recent")
 def recent(limit: int = 12):
     limit = max(1, min(limit, 100))
@@ -906,7 +921,24 @@ def inputs():
         names = info["LoadImage"]["input"]["required"]["image"][0]
     except (TypeError, KeyError, IndexError):
         names = []
-    return {"items": [n for n in names if isinstance(n, str)]}
+    names = [n for n in names if isinstance(n, str)]
+    # Chunk A UX (2026-11-11): the raw ComfyUI list is alphabetical and can
+    # be hundreds long — unusable as a chip strip. Alongside the names this
+    # returns a ``recency`` map (input name -> last-used ISO ts) harvested
+    # from the shared provenance log (input_image fields, newest record
+    # wins), so the browser can default to recency order. Sorting/filtering
+    # itself lives in the pure frontend helpers (foxden-inputs.js).
+    recency: dict = {}
+    try:
+        for rec in _prov.read_records():
+            ii = rec.get("input_image")
+            if isinstance(ii, str) and ii:
+                ts = rec.get("ts") or ""
+                if ts > recency.get(ii, ""):
+                    recency[ii] = ts
+    except Exception:                      # provenance is a convenience here
+        log.debug("inputs recency harvest failed", exc_info=True)
+    return {"items": names, "recency": recency}
 
 
 # ---------------------------------------------------------------- presets

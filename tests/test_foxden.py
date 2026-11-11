@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from backend import provenance as _prov
 from backend.main import app
 from backend.routers import foxden
 
@@ -63,6 +64,9 @@ def env(tmp_path, monkeypatch):
     (tmp_path / "share").mkdir()                    # the parent share exists...
     monkeypatch.setenv("ELLIEEDIT_FOXDEN_DELIVERY_DIR",
                        str(tmp_path / "share" / "_FoxDen"))  # ...the leaf doesn't
+    # provenance is repo-global by default; tests must never read/write the
+    # real log (Chunk A: /inputs and /provenance now consult it)
+    monkeypatch.setenv("ELLIEEDIT_PROVENANCE_PATH", str(tmp_path / "prov.jsonl"))
     foxden._pending_meta.clear()
     foxden._logged.clear()
     foxden._delivered.clear()
@@ -319,7 +323,7 @@ def test_upload_rejects_non_multipart_and_comfy_failure(client, monkeypatch):
 
 def test_inputs_listing(client, monkeypatch):
     fake_comfy(monkeypatch, {"/object_info/LoadImage": (200, {"LoadImage": {"input": {"required": {"image": [["a.png", "b.png"], {}]}}}})})
-    assert client.get("/api/foxden/inputs").json() == {"items": ["a.png", "b.png"]}
+    assert client.get("/api/foxden/inputs").json() == {"items": ["a.png", "b.png"], "recency": {}}
 
 
 def test_view_proxy_and_jail(client, monkeypatch):
@@ -772,3 +776,60 @@ def test_reconcile_recovers_denoise_and_input_image_from_graph():
     wf = foxden.apply_edits(KLEIN, "p", 2, 1024, 576, denoise=0.7, input_image="fox.png")
     m = foxden._meta_from_graph(wf)
     assert m["denoise"] == 0.7 and m["input_image"] == "fox.png"
+
+
+# ---------------------------------------------------- Chunk A (2026-11-11)
+
+def test_inputs_returns_recency_from_provenance(client, env, monkeypatch):
+    """Chunk A UX: /inputs pairs the ComfyUI LoadImage names with a
+    recency map harvested from the shared provenance log (input_image
+    fields, newest ts wins) so the browser can default to recency order."""
+    fake_comfy(monkeypatch, {
+        "/object_info/LoadImage": (200, {"LoadImage": {"input": {"required": {
+            "image": [["alpha.png", "beta.png", "gamma.png"]]}}}}),
+    })
+    prov = env / "prov.jsonl"
+    monkeypatch.setenv("ELLIEEDIT_PROVENANCE_PATH", str(prov))
+    prov.write_text("\n".join([
+        json.dumps({"path": "r1.png", "input_image": "alpha.png", "ts": "2026-11-10T10:00:00-08:00"}),
+        json.dumps({"path": "r2.png", "input_image": "beta.png", "ts": "2026-11-11T09:00:00-08:00"}),
+        json.dumps({"path": "r3.png", "input_image": "alpha.png", "ts": "2026-11-11T08:00:00-08:00"}),
+        json.dumps({"path": "r4.png"}),
+        "{corrupt",
+    ]) + "\n")
+    d = client.get("/api/foxden/inputs").json()
+    assert d["items"] == ["alpha.png", "beta.png", "gamma.png"]
+    # newest record per input wins (r3 is newer than r1 for alpha.png)
+    assert d["recency"]["alpha.png"] == "2026-11-11T08:00:00-08:00"
+    assert d["recency"]["beta.png"] == "2026-11-11T09:00:00-08:00"
+    assert "gamma.png" not in d["recency"]
+    # no log at all: empty recency, never fatal
+    monkeypatch.setenv("ELLIEEDIT_PROVENANCE_PATH", str(env / "missing.jsonl"))
+    assert client.get("/api/foxden/inputs").json()["recency"] == {}
+
+
+def test_provenance_endpoint_returns_latest_recipe(client, env, monkeypatch):
+    """Chunk A UX: GET /api/foxden/provenance?path= is the zoom viewer's
+    settings-column data source (PR #18 latest_for_path); missing record
+    is a 404 so the viewer falls back to the recent entry."""
+    prov = env / "prov.jsonl"
+    monkeypatch.setenv("ELLIEEDIT_PROVENANCE_PATH", str(prov))
+    rec = _prov.build_record("sub/out.png", "foxden", prompt="a fox",
+                             workflow="klein-q8", seed=7, steps=4,
+                             width=1024, height=576, denoise=0.6,
+                             loras=[{"name": "detail", "strength_model": 0.8}])
+    _prov.append_record(rec)
+    r = client.get("/api/foxden/provenance", params={"path": "sub/out.png"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["prompt"] == "a fox" and body["workflow"] == "klein-q8"
+    assert body["seed"] == 7 and body["steps"] == 4 and body["denoise"] == 0.6
+    assert body["loras"] == [{"name": "detail", "strength_model": 0.8}]
+    # latest record wins
+    _prov.append_record(_prov.build_record("sub/out.png", "foxden", prompt="newer"))
+    assert client.get("/api/foxden/provenance",
+                      params={"path": "sub/out.png"}).json()["prompt"] == "newer"
+    # no record -> 404, not an error page
+    assert client.get("/api/foxden/provenance",
+                      params={"path": "nope.png"}).status_code == 404
+    assert client.get("/api/foxden/provenance", params={"path": ""}).status_code in (404, 422)

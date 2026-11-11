@@ -50,6 +50,20 @@
 .fx-big .bar .fx-btn:disabled { opacity:.4; }
 .fx-big .stage { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; }
 .fx-big .stage img { max-width:100%; max-height:100%; object-fit:contain; }
+/* Chunk A UX (2026-11-11): zoom-viewer settings column — offset, never
+   overlay; the image shrinks, the column never covers it. */
+.fx-bigbody { flex:1; min-height:0; display:flex; align-items:stretch; gap:10px; padding:10px 16px 16px; }
+.fx-bigbody .stage { padding:0; }
+.fx-recipe { flex:0 0 240px; max-width:240px; overflow-y:auto; background:#161628;
+  border:1px solid #2a2a44; border-radius:10px; padding:10px 12px;
+  display:flex; flex-direction:column; gap:8px; font-size:12px; color:#c4c4d4; }
+.fx-recipe[hidden] { display:none; }
+.fx-recipe-head { font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:#8a8aaa; }
+.fx-recipe-prompt { background:#12121f; border:1px solid #2a2a44; border-radius:8px;
+  padding:8px 10px; white-space:pre-wrap; word-break:break-word; max-height:40%; overflow-y:auto; }
+.fx-recipe-copy { align-self:flex-start; }
+.fx-recipe-line { font-family:monospace; font-size:11px; word-break:break-all; }
+@media (max-width:760px) { .fx-recipe { flex-basis:180px; max-width:180px; } }
 
 /* Task 5 add.6 — pinned LoRA chips just above the scrollable list */
 .fx-pins, .fx-susp { display:flex; flex-direction:column; gap:6px; margin-bottom:6px; }
@@ -67,8 +81,12 @@
 .fx-presets .fx-btn { min-width:44px; min-height:44px; }
 
 /* Task 5 add.5 — input image chips + denoise (slider is never hidden/grayed) */
-.fx-chips { display:flex; gap:6px; overflow-x:auto; padding:4px 0 6px; }
+.fx-chips { display:flex; gap:6px; flex-wrap:wrap; overflow-x:auto; padding:4px 0 6px; }
 .fx-chipimg { flex:0 0 auto; width:64px; height:64px; padding:0; border:2px solid #2a2a44; border-radius:8px; background:#12121f; overflow:hidden; cursor:pointer; }
+/* Chunk A UX (2026-11-11): input-image browser bar + Show more */
+.fx-ibar select, .fx-ibar input[type=text] { width:auto; }
+.fx-ibar select { min-width:110px; }
+.fx-ibar input[type=text] { flex:1; min-width:120px; }
 .fx-chipimg.on { border-color:#7a6aaa; box-shadow:0 0 0 2px #7a6aaa66; }
 .fx-chipimg img { width:100%; height:100%; object-fit:cover; display:block; }
 .fx-denoise input[type=range] { width:100%; min-height:44px; accent-color:#7a6aaa; }

@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'frontend');
 const files = ['index.html', 'js/shell.js', 'sw.js', 'js/send-to.js', 'js/key-guards.js', 'js/components/send-menu.js',
   ...['gallery', 'facecycle', 'review', 'dupe', 'foxden', 'foxden-recent',
+      'foxden-inputs', 'foxden-recipe',
       'puppet', 'puppet-core', 'filters', 'filters-tunes'].map(m => `js/modules/${m}.js`)];
 
 for (const rel of files) {
