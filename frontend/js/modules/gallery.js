@@ -17,6 +17,7 @@ import { planMarkBatch } from './marking-batch.js';
 import { crumbsFor, joinDir, isBrowsableDir } from './gallery-path.js';
 import { bindViewerZoom } from './zoom-viewer.js';
 import { diffManifest, planManifestChange, pickSurvivor, scrollDeltaFor } from './gallery-scroll.js';
+import { galleryDetails } from './viewer-details.js';
 
 function panelHTML() {
   return `
@@ -145,6 +146,10 @@ function panelHTML() {
     }
     .gal-viewer .bar .fname { color: #b0b0d0; font-size: 12px; flex: 1;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gal-viewer .details { padding: 6px 16px; color: #8a8aaa; font-size: 12px;
+      background: #161628; border-bottom: 1px solid #2a2a44;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gal-viewer .details:empty { display: none; }
     .gal-viewer .stage { flex: 1; display: flex; align-items: center; justify-content: center;
       overflow: hidden; min-height: 0; touch-action: none; }
     .gal-viewer .stage img { max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none; }
@@ -210,6 +215,7 @@ function panelHTML() {
       <button class="ee-btn" data-act="viewer-zoom-fit" title="Reset zoom to fit">Fit</button>
       <button class="ee-btn" data-act="close">✕</button>
     </div>
+    <div class="details" data-id="viewer-details"></div>
     <div class="stage"><img data-id="viewer-img" alt=""></div>
     <div class="moved-note" data-id="viewer-note">already moved — › for next</div>
     <div class="navzone left" data-act="prev">‹</div>
@@ -243,6 +249,7 @@ export class Gallery {
       markCount: panel.querySelector('[data-id="mark-count"]'),
       viewer: panel.querySelector('[data-id="viewer"]'),
       viewerName: panel.querySelector('[data-id="viewer-name"]'),
+      viewerDetails: panel.querySelector('[data-id="viewer-details"]'),
       viewerImg: panel.querySelector('[data-id="viewer-img"]'),
       viewerNote: panel.querySelector('[data-id="viewer-note"]'),
       pendingBar: panel.querySelector('[data-id="pending-bar"]'),
@@ -1329,6 +1336,7 @@ export class Gallery {
     this.el.viewerImg.src = this.fileUrl(it);
     this.el.viewerName.textContent = `${it.name} · ${it.width}×${it.height} · ${new Date(it.mtime * 1000).toLocaleString()}` +
       (it.bank && it.bank !== 'primary' ? ` · 🏦 ${it.bank_label || it.bank}` : '');
+    this.el.viewerDetails.textContent = galleryDetails(it, idx, this.items.length);
     // Read-only banks: the destructive/move buttons go inert in the viewer.
     const w = it.writable !== false;
     const delBtn = this.panel.querySelector('[data-act="viewer-delete"]');
