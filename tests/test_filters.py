@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from backend import colorhold as ch
+from backend import vibrance as _vib
 from backend.main import app
 
 HERE = Path(__file__).resolve().parent
@@ -223,3 +224,90 @@ def test_js_filters_tunes():
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
     assert "PASS" in r.stdout
+
+
+# ---------------------------------------------------------------------------
+# Vibrance (Chunk B, 2026-11-11) — selective saturation in OKLCH.
+# ---------------------------------------------------------------------------
+
+def _warm_hue_rgb(hue01=0.0, sat=0.6):
+    import colorsys
+    r, g, b = colorsys.hsv_to_rgb(hue01, sat, 0.7)
+    return np.full((4, 4, 3), (r, g, b), np.float32)
+
+
+def test_vibrance_zero_is_bit_identical_passthrough():
+    rng = np.random.default_rng(7)
+    rgb = rng.random((8, 8, 3)).astype(np.float32)
+    out, info = _vib.apply_vibrance(rgb, strength=0)
+    assert np.array_equal(out, np.clip(rgb, 0, 1))
+    assert info["clamped_px"] == 0
+
+
+def test_vibrance_boosts_muted_more_than_saturated():
+    # A muted blue-grey vs a saturated red: same strength, the muted pixel's
+    # chroma must rise MORE than the saturated pixel's (Photoshop model).
+    rgb = np.zeros((1, 2, 3), np.float32)
+    rgb[0, 0] = [0.55, 0.60, 0.75]   # muted, low chroma
+    rgb[0, 1] = [0.9, 0.1, 0.1]      # saturated red
+    _, C0, _ = _vib.rgb_to_oklch(rgb)
+    out, _ = _vib.apply_vibrance(rgb, strength=60, falloff=0.25, protect=0.5)
+    _, C1, _ = _vib.rgb_to_oklch(out)
+    assert C1[0, 0] > C0[0, 0]
+    assert C1[0, 1] > C0[0, 1]
+    assert (C1[0, 1] - C0[0, 1]) < (C1[0, 0] - C0[0, 0]) * 0.5
+
+
+def test_vibrance_muted_weight_monotone_and_bounded():
+    C = np.linspace(0, 0.5, 50, dtype=np.float32)
+    w = _vib.muted_weight(C, 0.25)
+    assert np.all(np.diff(w) <= 1e-6)          # non-increasing
+    assert w[0] == 1.0 and w[-1] == 0.0        # muted=1, saturated=0
+    with pytest.raises(ValueError):
+        _vib.apply_vibrance(np.zeros((2, 2, 3), np.float32), strength=101)
+    with pytest.raises(ValueError):
+        _vib.apply_vibrance(np.zeros((2, 2, 3), np.float32), strength=-1)
+
+
+def test_vibrance_skin_protection_resists_warm_hues():
+    warm = _warm_hue_rgb(0.02)     # near-red (skin territory)
+    cool = _warm_hue_rgb(0.55)     # cyan — unprotected
+    lw, Cw, _ = _vib.rgb_to_oklch(warm)
+    lc, Cc, _ = _vib.rgb_to_oklch(cool)
+    pw = _vib.skin_protect_weight(np.array([0.0]))
+    pc = _vib.skin_protect_weight(np.array([0.55]))
+    assert pw > pc
+    assert pw == pytest.approx(1.0) and pc == 0.0
+    out_w, _ = _vib.apply_vibrance(warm, strength=80, protect=1.0)
+    out_c, _ = _vib.apply_vibrance(cool, strength=80, protect=1.0)
+    _, Cw1, _ = _vib.rgb_to_oklch(out_w)
+    _, Cc1, _ = _vib.rgb_to_oklch(out_c)
+    # Relative chroma gain: protected warm hue gains far less than cool.
+    assert (Cw1[0, 0] / Cw[0, 0]) < (Cc1[0, 0] / Cc[0, 0])
+
+
+def test_vibrance_lightness_untouched_and_in_gamut():
+    rgb = np.random.default_rng(3).random((16, 16, 3)).astype(np.float32)
+    out, _ = _vib.apply_vibrance(rgb, strength=100, falloff=0.4, protect=0.5)
+    L0, _, _ = _vib.rgb_to_oklch(rgb)
+    L1, _, _ = _vib.rgb_to_oklch(out)
+    np.testing.assert_allclose(L1, L0, atol=1e-4)   # chroma-only change
+    # (atol 1e-4: float32 noise at the gamut boundary, ~3.7e-5 worst-case —
+    # not a real lightness shift; the pre-fix bug was 0.068.)
+    assert out.min() >= 0.0 and out.max() <= 1.0     # always in sRGB
+
+
+def test_vibrance_deterministic_and_endpoint_wired(client):
+    rgb = np.random.default_rng(9).random((8, 8, 3)).astype(np.float32)
+    a, _ = _vib.apply_vibrance(rgb, strength=50, falloff=0.3, protect=0.5)
+    b, _ = _vib.apply_vibrance(rgb, strength=50, falloff=0.3, protect=0.5)
+    np.testing.assert_array_equal(a, b)
+    b64 = base64.b64encode(ch.array_to_png_bytes(rgb)).decode()
+    r = client.post("/api/filters/apply",
+                    json={"image_b64": b64, "vibrance": 50,
+                          "vibrance_falloff": 0.3, "vibrance_protect": 0.5})
+    assert r.status_code == 200
+    assert r.json()["vibrance_clamped_px"] >= 0
+    # Off by default: no vibrance fields -> still exact v5 path.
+    d = client.get("/api/filters/defaults").json()
+    assert d["vibrance"] == 0.0 and d["vibrance_falloff"] > 0

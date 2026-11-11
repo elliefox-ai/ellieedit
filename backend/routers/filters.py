@@ -41,6 +41,8 @@ from PIL import Image
 from pydantic import BaseModel
 
 from .. import colorhold as _ch
+from .. import provenance as _prov
+from .. import vibrance as _vib
 from . import gallery as _gallery_mod
 from . import library as _library_mod
 
@@ -120,6 +122,12 @@ class ApplyBody(BaseModel):
     gate_maxw: int = _ch.DEFAULT_GATE_MAXW
     gate_bh_full: float = _ch.DEFAULT_GATE_BH_FULL
     gate_strength: float = _ch.DEFAULT_GATE_STRENGTH
+    # Vibrance (selective saturation, 0-100; off at 0 = byte-exact v5).
+    # Applied as an OKLCH post-pass on the composited result — see
+    # backend/vibrance.py for the model and its R&D provenance.
+    vibrance: float = 0.0
+    vibrance_falloff: float = _vib.DEFAULT_FALLOFF
+    vibrance_protect: float = _vib.DEFAULT_PROTECT
     preview_max_side: int | None = None
 
 
@@ -138,6 +146,9 @@ def defaults():
         "gate_maxw": _ch.DEFAULT_GATE_MAXW,
         "gate_bh_full": _ch.DEFAULT_GATE_BH_FULL,
         "gate_strength": _ch.DEFAULT_GATE_STRENGTH,
+        "vibrance": 0.0,
+        "vibrance_falloff": _vib.DEFAULT_FALLOFF,
+        "vibrance_protect": _vib.DEFAULT_PROTECT,
         "engine": _ch.fill_engine(),
         "rejected": [
             "line_sat beyond ~1.75 (indistinguishable, 2026-10-31)",
@@ -158,6 +169,12 @@ def apply(body: ApplyBody):
             line_sigma=body.line_sigma, strength=body.strength,
             gate=body.gate, gate_maxw=body.gate_maxw,
             gate_bh_full=body.gate_bh_full, gate_strength=body.gate_strength)
+        if body.vibrance:
+            out, vinfo = _vib.apply_vibrance(
+                out, strength=body.vibrance,
+                falloff=body.vibrance_falloff, protect=body.vibrance_protect)
+        else:
+            vinfo = {"clamped_px": 0}
     except HTTPException:
         raise
     except ValueError as e:
@@ -173,7 +190,7 @@ def apply(body: ApplyBody):
         "width": int(out.shape[1]), "height": int(out.shape[0]),
         "engine": info["engine"], "cached_fill": info["cached_fill"],
         "gate": info["gate"], "gate_effective_maxw": info["gate_effective_maxw"],
-        "cached_thin": info["cached_thin"],
+        "cached_thin": info["cached_thin"], "vibrance_clamped_px": vinfo["clamped_px"],
     }
 
 
@@ -195,6 +212,10 @@ def store(body: StoreBody):
         d.mkdir(parents=True, exist_ok=True)
         name = f"filter-{uuid.uuid4().hex[:10]}.png"
         (d / name).write_bytes(raw)
+        # Provenance for every stored filter output (Chunk B: the send-to
+        # Update path hands this path to Update's save-family, which then
+        # carries it forward). Best-effort, like every provenance write.
+        _prov.record_for_image(f"ellieedit_tmp/filters/{name}", "filters")
     except OSError as e:
         log.warning("[filters] store failed: %s", e)
         raise HTTPException(502, f"could not store result: {e}")
