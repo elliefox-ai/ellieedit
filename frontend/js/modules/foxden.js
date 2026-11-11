@@ -8,6 +8,8 @@ import { nameFromUrl, receiptText } from '../send-to.js';
 import { readCollapsed, writeCollapsed, recentLabel, flattenRecent, cycleIndex } from './foxden-recent.js';
 import { createPins } from './foxden-loras.js';
 import { normalizeState, presetState, debounce, cleanName, nextSeed, sizeFor } from './foxden-state.js';
+import { orderInputs, pageInputs, INPUTS_PAGE } from './foxden-inputs.js';
+import { recipeSettings, recipeLines, copyText } from './foxden-recipe.js';
 
 const API = '/api/foxden';
 const esc = s => String(s).replace(/[&<>"]/g, c =>
@@ -52,7 +54,15 @@ registerModule({
           </div>
           <div class="fx-inputs">
             <label>Input image (img2img) <span data-id="icount"></span> <span data-id="ireceipt" class="fx-receipt" style="color:#8ad08a"></span></label>
+            <div class="fx-row fx-ibar">
+              <select data-id="isort" aria-label="Sort input images">
+                <option value="recent">Recent</option>
+                <option value="name">Name</option>
+              </select>
+              <input type="text" data-id="ifilter" placeholder="filter…" aria-label="Filter input images">
+            </div>
             <div class="fx-chips" data-id="ichips"></div>
+            <button class="ee-btn fx-btn" data-id="imore" hidden>Show more</button>
             <div class="fx-row">
               <button class="ee-btn fx-btn" data-id="iup">⬆ Upload</button>
               <button class="ee-btn fx-btn" data-id="iclear" title="Back to text-to-image">✕ None</button>
@@ -87,15 +97,18 @@ registerModule({
           <button class="ee-btn fx-btn" data-id="bignext" aria-label="Next recent image" title="Next">›</button>
           <button class="ee-btn fx-btn" data-id="reuse">↺ Reuse settings</button>
           <button class="ee-btn fx-btn" data-id="bigclose">✕</button></div>
-        <div class="stage"><img data-id="bigimg" alt=""></div>
+        <div class="fx-bigbody">
+          <aside class="fx-recipe" data-id="recipe" hidden aria-label="Settings this image was made with"></aside>
+          <div class="stage"><img data-id="bigimg" alt=""></div>
+        </div>
       </div>
     </div>`;
     const $ = id => panel.querySelector(`[data-id="${id}"]`);
     const el = Object.fromEntries(['conn', 'wf', 'prompt', 'aspects', 'fx-size', 'fx-sizeval', 'seed', 'dice',
       'lcount', 'lfilter', 'loras', 'pins', 'susp',
       'preset-pick', 'preset-lock', 'preset-save', 'preset-del',
-      'icount', 'ireceipt', 'ichips', 'iup', 'iclear', 'ifile', 'denoise', 'dval', 'go', 'status', 'out', 'recent', 'recentwrap',
-      'refresh', 'rtoggle', 'rcount', 'big', 'bigmeta', 'reuse', 'bigclose', 'bigimg',
+      'icount', 'ireceipt', 'ichips', 'iup', 'iclear', 'ifile', 'isort', 'ifilter', 'imore', 'denoise', 'dval', 'go', 'status', 'out', 'recent', 'recentwrap',
+      'refresh', 'rtoggle', 'rcount', 'big', 'bigmeta', 'reuse', 'bigclose', 'bigimg', 'recipe',
       'bigprev', 'bignext'].map(k => [k, $(k)]));
 
     let aspect = 'landscape';
@@ -122,7 +135,15 @@ registerModule({
         el.conn.className = 'fx-status ' + (c.comfy_reachable ? 'ok' : 'err');
         el.wf.innerHTML = c.workflows.map(w =>
           `<option value="${w.id}" ${w.available ? '' : 'disabled'}>${esc(w.id)}${w.available ? '' : ' (file missing)'}</option>`).join('');
-        el.wf.value = c.default_workflow;
+        // Chunk A bug fix (2026-11-11): loadConfig also runs on every tab
+        // re-activation, and unconditionally resetting to the default
+        // workflow there is what made the selection "snap back to klein"
+        // and what clobbered ReUse's choice a moment after it landed.
+        // Preserve the current selection whenever it is still valid; the
+        // default only applies on the very first paint (empty select).
+        const prevWf = el.wf.value;
+        const stillValid = prevWf && [...el.wf.options].some(o => o.value === prevWf && !o.disabled);
+        el.wf.value = stillValid ? prevWf : c.default_workflow;
         allLoras = c.loras;
         renderLoras();
       } catch (e) { el.conn.textContent = 'config failed: ' + e.message; el.conn.className = 'fx-status err'; }
@@ -221,6 +242,8 @@ registerModule({
     // Last-selected wins (v1). Natural size is read so the scheduler gets the
     // image's own resolution; aspect buttons are grayed while one is set. ──
     let inputImage = null, inputDims = null, inputItems = [];
+    let inputRecency = {};        // name -> last-used ts (from /inputs + local picks)
+    let inputsShown = INPUTS_PAGE; // browsing window, grown by Show more
     // Issue #14 A1: the gallery path of a send-to input image, so the
     // next generate's provenance record can link back to it. Set only
     // by the foxden-receive handler, cleared by ANY other input change
@@ -231,6 +254,11 @@ registerModule({
       const sub = i >= 0 ? n.slice(0, i) : '', fn = i >= 0 ? n.slice(i + 1) : n;
       return `${API}/view?type=input&filename=${encodeURIComponent(fn)}&subfolder=${encodeURIComponent(sub)}`;
     };
+    // Chunk A UX (2026-11-11): the chip strip was the whole (unsorted,
+    // possibly hundreds-long) ComfyUI input list. Now it's a browser:
+    // recency-first order (server recency map from provenance + this
+    // client's own picks/uploads), sort by recency or name, a filter box,
+    // and a sane page size with Show more. Pure logic in foxden-inputs.js.
     function paintInput() {
       el.aspects.classList.toggle('dim', !!inputImage);
       el.aspects.querySelectorAll('[data-a]').forEach(b => { b.disabled = !!inputImage; });
@@ -238,24 +266,36 @@ registerModule({
       // resolution, so the size slider is disabled alongside the aspects.
       if (el['fx-size']) el['fx-size'].disabled = !!inputImage;
       el.icount.textContent = inputImage ? '(selected)' : '';
+      const ordered = orderInputs(inputItems, inputRecency,
+        { sort: el.isort.value, q: el.ifilter.value });
+      // A selected image off-window stays visible: prepend it if filtered out.
+      const names = ordered.includes(inputImage) || !inputImage
+        ? ordered : [inputImage, ...ordered];
+      const { items, more } = pageInputs(names, inputsShown);
       el.ichips.innerHTML = '';
-      const names = inputItems.includes(inputImage) || !inputImage ? inputItems : [inputImage, ...inputItems];
-      for (const n of names) {
+      for (const n of items) {
         const b = document.createElement('button');
         b.className = 'fx-chipimg' + (n === inputImage ? ' on' : '');
-        b.title = n; b.setAttribute('aria-pressed', n === inputImage ? 'true' : 'false');
+        b.title = n + (inputRecency[n] ? ` · last used ${inputRecency[n]}` : '');
+        b.setAttribute('aria-pressed', n === inputImage ? 'true' : 'false');
         const im = document.createElement('img');
         im.loading = 'lazy'; im.alt = n; im.src = viewUrl(n);
         b.appendChild(im);
         b.addEventListener('click', () => { setInput(n === inputImage ? null : n); scheduleSave(); });
         el.ichips.appendChild(b);
       }
+      el.imore.hidden = more === 0;
+      el.imore.textContent = `Show more (${more} more)`;
     }
+    el.isort.addEventListener('change', () => { inputsShown = INPUTS_PAGE; paintInput(); });
+    el.ifilter.addEventListener('input', () => { inputsShown = INPUTS_PAGE; paintInput(); });
+    el.imore.addEventListener('click', () => { inputsShown += INPUTS_PAGE; paintInput(); });
     function setInput(name) {
       el.ireceipt.textContent = '';            // any manual change retires the receipt
       inputParent = null;                      // and any received parent link
       inputImage = name || null; inputDims = null;
       if (inputImage) {
+        inputRecency[inputImage] = new Date().toISOString();   // this client's own pick counts as recency
         const probe = new Image();
         probe.onload = () => { if (inputImage === name) inputDims = [probe.naturalWidth, probe.naturalHeight]; };
         probe.src = viewUrl(inputImage);
@@ -263,7 +303,11 @@ registerModule({
       paintInput();
     }
     async function loadInputs() {
-      try { inputItems = (await api('/inputs')).items || []; } catch (e) { inputItems = []; }
+      try {
+        const d = await api('/inputs');
+        inputItems = d.items || [];
+        inputRecency = (d.recency && typeof d.recency === 'object') ? d.recency : inputRecency;
+      } catch (e) { inputItems = []; }
       paintInput();
     }
     el.iclear.addEventListener('click', () => { setInput(null); scheduleSave(); });
@@ -441,6 +485,58 @@ registerModule({
       const on = bigList.length > 1;
       el.bigprev.disabled = !on; el.bignext.disabled = !on;
     }
+    // ── settings column (Chunk A UX, 2026-11-11): what "Reuse settings"
+    // would apply to the open image. Data source: the provenance record
+    // for the image's path (PR #18), falling back to the in-memory recent
+    // entry for pre-provenance images. Left-side column, prompt prominent
+    // with a copy button — offset, never overlay. ──
+    let recipeToken = 0;
+    function outputPathOf(entry) {
+      if (!entry || !Array.isArray(entry.outputs) || !entry.outputs[0]) return null;
+      const o = entry.outputs[0];
+      return o.subfolder ? `${o.subfolder}/${o.filename}` : (o.filename || null);
+    }
+    function paintRecipe(settings) {
+      el.recipe.innerHTML = '';
+      if (!settings) { el.recipe.hidden = true; return; }
+      el.recipe.hidden = false;
+      const head = document.createElement('div');
+      head.className = 'fx-recipe-head';
+      head.textContent = 'settings used';
+      el.recipe.appendChild(head);
+      const prow = document.createElement('div');
+      prow.className = 'fx-recipe-prompt';
+      prow.textContent = settings.prompt || '(no prompt recorded)';
+      const copy = document.createElement('button');
+      copy.className = 'ee-btn fx-btn fx-recipe-copy';
+      copy.textContent = '⧉ Copy prompt';
+      copy.addEventListener('click', async () => {
+        const ok = await copyText(settings.prompt || '');
+        copy.textContent = ok ? '✓ copied' : '✕ copy failed';
+        setTimeout(() => { copy.textContent = '⧉ Copy prompt'; }, 1500);
+      });
+      el.recipe.append(prow, copy);
+      for (const line of recipeLines(settings)) {
+        const d = document.createElement('div');
+        d.className = 'fx-recipe-line';
+        d.textContent = line;
+        el.recipe.appendChild(d);
+      }
+    }
+    async function loadRecipe(entry) {
+      const token = ++recipeToken;
+      // Immediate paint from the in-memory entry, then upgrade from the
+      // provenance log when a record for this path exists.
+      paintRecipe(recipeSettings(entry, null));
+      const path = outputPathOf(entry);
+      if (!path) return;
+      try {
+        const r = await fetch(`${API}/provenance?path=${encodeURIComponent(path)}`);
+        if (!r.ok) return;                       // pre-provenance image: entry fallback stands
+        const rec = await r.json();
+        if (token === recipeToken && el.big.style.display === 'flex') paintRecipe(recipeSettings(entry, rec));
+      } catch (e) { /* network hiccup: entry fallback stands */ }
+    }
     function showBig(idx) {
       if (!bigList.length) return;
       bigIdx = cycleIndex(idx, 0, bigList.length);
@@ -450,6 +546,7 @@ registerModule({
       el.bigimg.src = cur.url;
       el.bigmeta.textContent = bigMetaText(bigEntry, bigIdx, bigList.length);
       el.reuse.style.display = bigEntry ? '' : 'none';
+      loadRecipe(bigEntry);
       updateBigNav();
     }
     function openBig(url, entry, cycleList) {
@@ -461,6 +558,7 @@ registerModule({
     }
     el.bigclose.addEventListener('click', () => {
       el.big.style.display = 'none'; el.bigimg.src = ''; bigUrl = ''; bigList = []; bigIdx = -1;
+      recipeToken++; el.recipe.hidden = true; el.recipe.innerHTML = '';
     });
     el.bigprev.addEventListener('click', () => showBig(bigIdx - 1));
     el.bignext.addEventListener('click', () => showBig(bigIdx + 1));

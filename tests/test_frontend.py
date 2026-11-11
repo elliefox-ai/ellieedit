@@ -873,3 +873,59 @@ def test_library_keep_alive_no_reload_on_tab_activation():
     gal = (HERE.parent / "frontend" / "js" / "modules" / "gallery.js").read_text()
     assert "detail: { path: j.path }" in gal
     assert "const j = await r.json().catch(() => ({}));" in gal
+
+
+def test_foxden_zoom_recipe_column_and_input_browser():
+    """Chunk A UX (2026-11-11): the zoom viewer gains a left-side settings
+    column (offset, never overlay; hidden when there is nothing to show)
+    with the prompt prominent + a copy button, fed by the provenance
+    endpoint with the in-memory recent entry as fallback. The input-image
+    browser gains sort/filter and a Show more window. Workflow selection
+    survives loadConfig re-runs (tab-activation bug fix)."""
+    fx = (HERE.parent / "frontend" / "js" / "modules" / "foxden.js").read_text()
+    css = (HERE.parent / "frontend" / "js" / "modules" / "foxden.css").read_text()
+    # recipe column: hidden-by-default aside inside the zoom viewer
+    assert 'data-id="recipe" hidden' in fx and "fx-recipe" in css
+    assert "fx-bigbody" in fx and css    # row layout: column sits beside the stage
+    assert ".fx-recipe[hidden] { display:none; }" in css
+    # provenance endpoint is the data source; entry fallback painted first
+    assert "${API}/provenance?path=" in fx
+    assert "recipeSettings(entry, null)" in fx
+    # prompt prominent with clipboard write + visual confirmation
+    assert "Copy prompt" in fx and "copyText(settings.prompt" in fx
+    assert "✓ copied" in fx
+    # column is reset when the viewer closes
+    close = fx[fx.index("el.bigclose.addEventListener"):]
+    assert "el.recipe.hidden = true" in close.split("});")[0]
+    # input browser: sort + filter + windowed strip
+    for needle in ('data-id="isort"', 'data-id="ifilter"', 'data-id="imore"',
+                   "orderInputs(inputItems, inputRecency", "pageInputs(names, inputsShown)"):
+        assert needle in fx, needle
+    # workflow survives loadConfig on tab re-activation (bug 1+2 fix)
+    assert "stillValid ? prevWf : c.default_workflow" in fx
+    # pure helpers exist and are wired
+    inputs_mod = (HERE.parent / "frontend" / "js" / "modules" / "foxden-inputs.js").read_text()
+    recipe_mod = (HERE.parent / "frontend" / "js" / "modules" / "foxden-recipe.js").read_text()
+    assert "export function orderInputs" in inputs_mod and "export function pageInputs" in inputs_mod
+    assert "export function recipeSettings" in recipe_mod
+    assert "export function recipeLines" in recipe_mod and "export async function copyText" in recipe_mod
+
+
+def test_js_foxden_inputs_helpers():
+    """Chunk A: input-browser recency/name sort, filter, paging (node)."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "foxden-inputs.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+    assert "PASS" in r.stdout
+
+
+def test_js_foxden_recipe_helpers():
+    """Chunk A: provenance-over-entry mapping, recipe lines, clipboard (node)."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "foxden-recipe.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+    assert "PASS" in r.stdout
