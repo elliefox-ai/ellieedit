@@ -45,6 +45,38 @@ export class ChampionLadder {
     if (item) this.runnerUp = item;
   }
 
+  // Corner-X removal (2026-11-11 Chunk C): drop an image from the comparison
+  // set WITHOUT adding it to `rejected` — removal is not a verdict, so the
+  // removed image must never reach the pending-deletion queue. The comparison
+  // continues with the remainder. Removing the champion promotes the current
+  // challenger (or, with none left, the runner-up) with no duel; removing the
+  // challenger just drops it. Returns the removed item, or null if impossible.
+  remove(which) {
+    if (this.done) return null;
+    if (which === 'a') {
+      const gone = this.champion;
+      if (this.idx < this.challengers.length) {
+        this.champion = this.challengers.splice(this.idx, 1)[0];
+        if (this.idx >= this.challengers.length) this.done = true;
+      } else if (this.runnerUp && this.runnerUp !== gone) {
+        this.champion = this.runnerUp;
+        this.runnerUp = null;
+        this.done = true;
+      } else {
+        this.champion = null;
+        this.done = true;
+      }
+      if (this.runnerUp === gone) this.runnerUp = null;
+      return gone;
+    }
+    const gone = this.challenger;
+    if (!gone) return null;
+    this.challengers.splice(this.idx, 1);
+    if (this.idx >= this.challengers.length) this.done = true;
+    if (this.runnerUp === gone) this.runnerUp = null;
+    return gone;
+  }
+
   _advance() {
     this.idx++;
     if (this.idx >= this.challengers.length) this.done = true;

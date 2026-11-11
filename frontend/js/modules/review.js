@@ -10,6 +10,7 @@
 import { registerModule } from '../shell.js';
 import { computeEdgeMap, buildRectMask } from '../edge-stop.js';
 import { ChampionLadder } from '../champion-ladder.js';
+import { bindPanZoom, mirrorView, ZOOM_MIN } from './pan-zoom.js';
 
 function panelHTML() {
   return `
@@ -74,6 +75,14 @@ function panelHTML() {
     .rv-duel .half.champ { border-right: 1px solid #2a2a44; }
     .rv-duel .half.champ .tag { color: #e8b84d; font-weight: 600; }
     .rv-duel .half .pick { position: absolute; bottom: 10px; }
+    .rv-duel .half .rv-x { position: absolute; top: 4px; right: 4px; width: 24px; height: 24px;
+      border-radius: 50%; background: rgba(0,0,0,0.55); color: #fff; font-size: 14px;
+      line-height: 22px; text-align: center; padding: 0; }
+    .rv-duel .half .rv-x:hover { background: #8a3a3a; }
+    .rv-duel .half img { will-change: transform; }
+    .rv-mirror { position: absolute; top: 6px; left: 50%; transform: translateX(-50%);
+      font-size: 11px; color: #b0b0d0; background: rgba(0,0,0,0.5); padding: 3px 8px;
+      border-radius: 4px; display: flex; align-items: center; gap: 4px; z-index: 2; }
     .rv-rejected { display: flex; gap: 6px; padding: 6px 10px; overflow-x: auto;
       background: #101020; border-top: 1px solid #2a2a44; min-height: 54px; align-items: center; }
     .rv-rejected .rj-cell { flex: 0 0 44px; height: 44px; border-radius: 4px; overflow: hidden;
@@ -123,15 +132,18 @@ function panelHTML() {
       <button class="ee-btn" data-act="exit">✕ Done</button>
     </div>
     <div class="rv-compare" data-id="compare">
+      <label class="rv-mirror" title="Both images zoom and pan to the same relative area"><input type="checkbox" data-id="mirror-zoom" checked> ⇄ Mirror zoom</label>
       <div class="rv-duel">
         <div class="half champ">
           <span class="tag">Champion</span>
           <img data-id="img-a" alt="">
+          <button class="ee-btn rv-x" data-act="drop-a" title="Remove from comparison (not marked for deletion)">×</button>
           <button class="ee-btn primary pick" data-act="keep-champion">Keep Champion</button>
         </div>
         <div class="half">
           <span class="tag" data-id="challenger-tag">Challenger</span>
           <img data-id="img-b" alt="">
+          <button class="ee-btn rv-x" data-act="drop-b" title="Remove from comparison (not marked for deletion)">×</button>
           <button class="ee-btn primary pick" data-act="keep-challenger">Keep Challenger</button>
         </div>
       </div>
@@ -194,6 +206,7 @@ export class Review {
       saveName: panel.querySelector('[data-id="save-name"]'),
       blendHint: panel.querySelector('[data-id="blend-hint"]'),
       challengerTag: panel.querySelector('[data-id="challenger-tag"]'),
+      mirrorZoom: panel.querySelector('[data-id="mirror-zoom"]'),
       rejected: panel.querySelector('[data-id="rejected"]'),
       rejectedLabel: panel.querySelector('[data-id="rejected-label"]'),
       results: panel.querySelector('[data-id="results"]'),
@@ -210,6 +223,12 @@ export class Review {
     this.blendPair = null;    // {a, b, imgA, imgB}
     this.splitFrac = 0.5;
     this.maskRect = null;     // {x,y,w,h} in image coords
+    // Mirrored pan/zoom (Chunk C): shared relative viewport + per-half local
+    // views. Mirroring is a toggle (default ON): when off, each half pans and
+    // zooms independently; when on, any gesture on one half is replayed onto
+    // the other via the normalized-centre math in pan-zoom.js.
+    this.pzViews = { a: { scale: 1, tx: 0, ty: 0 }, b: { scale: 1, tx: 0, ty: 0 } };
+    this.bindDuelPanZoom();
     this.io = new IntersectionObserver(entries => {
       for (const e of entries) {
         if (!e.isIntersecting) continue;
@@ -276,6 +295,118 @@ export class Review {
     }
   }
 
+  // ---- mirrored pan/zoom (Chunk C) -----------------------------------------
+  // Each duel half is a pan/zoom stage via the shared bindPanZoom component.
+  // With mirroring on, the gesture result on the active half is converted to
+  // a shared viewport (zoom + normalized centre) and replayed onto the other
+  // half — images with different aspect ratios track the same RELATIVE area
+  // because each side's fit box already contains its own aspect ratio.
+  bindDuelPanZoom() {
+    const applyHalf = (which) => {
+      const img = which === 'a' ? this.el.imgA : this.el.imgB;
+      const v = this.pzViews[which];
+      img.style.transform = v.scale === 1 ? '' : `translate(${v.tx}px, ${v.ty}px) scale(${v.scale})`;
+    };
+    const halfOf = which => which === 'a' ? this.el.imgA.closest('.half') : this.el.imgB.closest('.half');
+    const bindHalf = (which, other) => {
+      const half = halfOf(which);
+      const getLocal = () => {
+        const img = which === 'a' ? this.el.imgA : this.el.imgB;
+        const r = half.getBoundingClientRect();
+        const natW = img.naturalWidth, natH = img.naturalHeight;
+        const s = natW && natH && r.width && r.height
+          ? Math.min(r.width / natW, r.height / natH) : 0;
+        return s ? { stageW: r.width, stageH: r.height, fitW: natW * s, fitH: natH * s } : null;
+      };
+      bindPanZoom({
+        stage: half,
+        getView: () => this.pzViews[which],
+        setView: v => {
+          this.pzViews[which] = v;
+          applyHalf(which);
+          if (this.el.mirrorZoom.checked) {
+            const gSrc = getLocal(), gDst = getLocalFor(other);
+            if (gSrc && gDst) {
+              this.pzViews[other] = mirrorView(
+                { ...gSrc, ...v }, { ...gDst, scale: this.pzViews[other].scale });
+              applyHalf(other);
+            }
+          }
+        },
+        // Pick buttons and the X stay interactive; the binder only pans when
+        // a pointer actually lands on the stage and moves, and clicks pass
+        // through untouched.
+      });
+    };
+    const getLocalFor = which => {
+      const img = which === 'a' ? this.el.imgA : this.el.imgB;
+      const r = halfOf(which).getBoundingClientRect();
+      const natW = img.naturalWidth, natH = img.naturalHeight;
+      const s = natW && natH && r.width && r.height
+        ? Math.min(r.width / natW, r.height / natH) : 0;
+      return s ? { stageW: r.width, stageH: r.height, fitW: natW * s, fitH: natH * s } : null;
+    };
+    bindHalf('a', 'b');
+    bindHalf('b', 'a');
+    if (this.el.mirrorZoom) {
+      this.el.mirrorZoom.addEventListener('change', () => {
+        // Turning mirroring ON re-syncs the passive half to the active view
+        // immediately, so the two never sit at different areas.
+        if (!this.el.mirrorZoom.checked) return;
+        this.syncMirror('a', 'b');
+      });
+    }
+  }
+
+  syncMirror(src, dst) {
+    const gSrc = (() => {
+      const img = src === 'a' ? this.el.imgA : this.el.imgB;
+      const half = (src === 'a' ? this.el.imgA : this.el.imgB).closest('.half');
+      const r = half.getBoundingClientRect();
+      const natW = img.naturalWidth, natH = img.naturalHeight;
+      const s = natW && natH && r.width && r.height
+        ? Math.min(r.width / natW, r.height / natH) : 0;
+      return s ? { stageW: r.width, stageH: r.height, fitW: natW * s, fitH: natH * s } : null;
+    })();
+    const gDst = (() => {
+      const img = dst === 'a' ? this.el.imgA : this.el.imgB;
+      const half = (dst === 'a' ? this.el.imgA : this.el.imgB).closest('.half');
+      const r = half.getBoundingClientRect();
+      const natW = img.naturalWidth, natH = img.naturalHeight;
+      const s = natW && natH && r.width && r.height
+        ? Math.min(r.width / natW, r.height / natH) : 0;
+      return s ? { stageW: r.width, stageH: r.height, fitW: natW * s, fitH: natH * s } : null;
+    })();
+    if (!gSrc || !gDst) return;
+    this.pzViews[dst] = mirrorView({ ...gSrc, ...this.pzViews[src] }, gDst);
+    const img = dst === 'a' ? this.el.imgA : this.el.imgB;
+    const v = this.pzViews[dst];
+    img.style.transform = v.scale === 1 ? '' : `translate(${v.tx}px, ${v.ty}px) scale(${v.scale})`;
+  }
+
+  resetPanzoom() {
+    this.pzViews = { a: { scale: 1, tx: 0, ty: 0 }, b: { scale: 1, tx: 0, ty: 0 } };
+    this.el.imgA.style.transform = '';
+    this.el.imgB.style.transform = '';
+  }
+
+  // Corner-X removal: drop an image from the comparison set. This is NOT a
+  // verdict — the removed image never enters `rejected`, so it can never be
+  // marked pending-deletion by the results view.
+  dropFromLadder(which) {
+    const l = this.ladder;
+    if (!l) return;
+    const gone = l.remove(which);
+    if (!gone) return;
+    this.toast(`${gone.name} removed from comparison (not marked)`);
+    if (l.done && !l.champion) {
+      this.exitReview();
+      return;
+    }
+    this.resetPanzoom();
+    this.showPair();
+  }
+
   // Restart the ladder over the same selection (results-view Redo round).
   redoRound() {
     if (!this.ladderSel || this.ladderSel.length < 2) return;
@@ -297,6 +428,7 @@ export class Review {
     this.el.imgA.src = this.fileUrl(l.champion.path);
     this.el.imgB.src = this.fileUrl(l.challenger.path);
     this.el.challengerTag.textContent = `Challenger ${l.k}/${l.total - 1}`;
+    this.resetPanzoom();
     this.renderRejected();
     this.el.compare.style.display = 'flex';
     this.el.stage.style.display = 'none';
@@ -607,6 +739,8 @@ export class Review {
     act('exit').addEventListener('click', () => this.exitFull());
     act('keep-champion').addEventListener('click', () => this.pick('a'));
     act('keep-challenger').addEventListener('click', () => this.pick('b'));
+    act('drop-a').addEventListener('click', () => this.dropFromLadder('a'));
+    act('drop-b').addEventListener('click', () => this.dropFromLadder('b'));
     act('res-blend').addEventListener('click', () => this.startBlend());
     act('res-keep-exit').addEventListener('click', () => this.keepChampionExit());
     act('res-redo').addEventListener('click', () => this.redoRound());
