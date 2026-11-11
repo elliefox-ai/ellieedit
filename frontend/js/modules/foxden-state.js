@@ -84,4 +84,20 @@ export function debounce(fn, ms, timers = {
   return run;
 }
 
+// Rebuild the workflow <select> while preserving the user's current choice.
+// The previous value MUST be captured BEFORE innerHTML is replaced:
+// assigning innerHTML resets a <select> to its first option, and the
+// Chunk A fix (2026-11-11) read prevWf AFTER the rebuild, so it always
+// "preserved" klein — the exact snap-back it was meant to kill.
+// wf is select-like: { value, innerHTML, options: [{value, disabled}] },
+// so node tests can simulate the rebuild with a plain object.
+export function rebuildSelectPreserving(wf, html, defaultWf) {
+  const prev = wf.value;                       // capture BEFORE the rebuild
+  wf.innerHTML = html;                         // resets value to first option
+  const opts = [...wf.options];
+  const stillValid = prev && opts.some(o => o.value === prev && !o.disabled);
+  wf.value = stillValid ? prev : defaultWf;
+  return wf.value;
+}
+
 export function cleanName(n) { return String(n || '').split(/\s+/).filter(Boolean).join(' ').slice(0, 60); }
