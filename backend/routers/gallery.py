@@ -336,6 +336,21 @@ def _cursor_start(keys: list, cursor: str) -> int:
     return lo
 
 
+def sort_files(files: list[tuple[int, str]], sort: str) -> list[tuple[int, str]]:
+    """Pure: order (mtime, name) rows for a non-default sort mode.
+    'new' never reaches here (default order is the scan's newest-first)."""
+    if sort == "old":
+        return sorted(files)
+    if sort == "name":
+        return sorted(files, key=lambda f: f[1].lower())
+    if sort == "name_desc":
+        return sorted(files, key=lambda f: f[1].lower(), reverse=True)
+    return list(files)
+
+
+GALLERY_SORTS = ("new", "old", "name", "name_desc")
+
+
 def _read_dims(path: str):
     try:
         with Image.open(path) as im:
@@ -377,7 +392,13 @@ def list_banks():
 @router.get("/list")
 def list_images(response: FResponse, dir: str = "", cursor: str = "",
                 pending: str = "all", refresh: bool = False,
-                bank: str = "primary"):
+                bank: str = "primary", sort: str = "new"):
+    """Chunk D sort: `sort` = new (default, mtime:name cursor, unchanged) |
+    old | name | name_desc. Non-default sorts reorder AFTER the pending
+    filter and use a plain integer offset cursor (next_cursor = str(off));
+    the tolerant default cursor is untouched, so existing pagination
+    behavior is byte-for-byte the same when sort is omitted.
+    Sort does not apply to the global pending view (always newest first)."""
     """pending filter (default 'all' = everything, backward compatible):
       active  — exclude every path in the pending-delete manifest
       pending — only manifest paths
@@ -389,6 +410,8 @@ def list_images(response: FResponse, dir: str = "", cursor: str = "",
     t0 = time.perf_counter()
     if pending not in ("all", "active", "pending"):
         raise HTTPException(400, "pending must be all|active|pending")
+    if sort not in GALLERY_SORTS:
+        raise HTTPException(400, "sort must be new|old|name|name_desc")
     from .pending import load_manifest  # lazy: pending.py imports this module
     pending_set = set(load_manifest().keys())
 
@@ -427,7 +450,14 @@ def list_images(response: FResponse, dir: str = "", cursor: str = "",
                  if (manifest_key(bank_obj["id"], rel_of(n)) in pending_set)
                  == (pending == "pending")]
 
-    start = _cursor_start(files, cursor) if cursor else 0
+    if sort == "new":
+        start = _cursor_start(files, cursor) if cursor else 0
+    else:
+        files = sort_files(files, sort)
+        try:
+            start = int(cursor) if cursor else 0
+        except ValueError:
+            raise HTTPException(400, "bad cursor")
     page = files[start:start + PAGE_SIZE]
     dims = _dims_many([(str(base / n), m) for m, n in page])
     t_dims = time.perf_counter()
@@ -451,7 +481,10 @@ def list_images(response: FResponse, dir: str = "", cursor: str = "",
             "manifest_key": manifest_key(bank_obj["id"], rel),
             "pending": manifest_key(bank_obj["id"], rel) in pending_set,
         })
-    next_cursor = f"{page[-1][0]}:{page[-1][1]}" if page and start + PAGE_SIZE < len(files) else None
+    if sort == "new":
+        next_cursor = f"{page[-1][0]}:{page[-1][1]}" if page and start + PAGE_SIZE < len(files) else None
+    else:
+        next_cursor = str(start + PAGE_SIZE) if page and start + PAGE_SIZE < len(files) else None
     ahead = files[start + PAGE_SIZE:start + 2 * PAGE_SIZE]
     warm_thumbs([str(base / n) for _m, n in page] + [str(base / n) for _m, n in ahead])
     response.headers["Server-Timing"] = (
@@ -459,6 +492,7 @@ def list_images(response: FResponse, dir: str = "", cursor: str = "",
         f"dims;dur={(t_dims - t_walk) * 1000:.1f}, "
         f"total;dur={(time.perf_counter() - t0) * 1000:.1f}")
     return {"items": items, "subdirs": subdirs, "next_cursor": next_cursor,
+            "sort": sort,
             "root": str(root_real),
             "bank": bank_obj["id"], "bank_label": bank_obj["label"],
             "writable": bank_obj["writable"]}

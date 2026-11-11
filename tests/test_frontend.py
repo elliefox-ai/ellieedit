@@ -962,3 +962,37 @@ def test_filters_chunk_b_vibrance_panzoom_sendupdate_wiring():
     # Backend vibrance model pins: falloff ramp + skin protection exist.
     assert "def muted_weight" in vib and "def skin_protect_weight" in vib
     assert "def gamut_clamp" in vib
+
+
+# ------------------------------------------------------- Chunk D (2026-11-11)
+def test_chunk_d_gallery_library_sort_controls():
+    """Chunk D: Gallery + Library gain a server-side sort select following
+    the Chunk A input-browser pattern (select control + pure param helper),
+    with the Library perf fixes (cache headers + thumb warming) in place."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    gal = (mods / "gallery.js").read_text()
+    lib = (mods / "library.js").read_text()
+    core = (mods / "library-core.js").read_text()
+    gpy = (HERE.parent / "backend" / "routers" / "gallery.py").read_text()
+    lpy = (HERE.parent / "backend" / "routers" / "library.py").read_text()
+    # sort selects, Chunk A style, in both headers
+    assert 'data-act="sort"' in gal and 'id="lib-sort"' in lib
+    # pure param helper + server contracts
+    assert "export function sortParam" in core
+    assert "GALLERY_SORTS" in gpy and "LIBRARY_SORTS" in lpy
+    assert "def sort_files" in gpy and "def sort_rows" in lpy
+    # every Library list fetch passes the sort through the helper
+    assert lib.count("sort: this.sort") == 3
+    # Library perf: cache headers now match gallery, next-page thumbs warm
+    assert '"Cache-Control": "public, max-age=86400"' in lpy
+    assert "_gallery_mod.warm_thumbs" in lpy
+
+
+def test_js_library_sort_helper():
+    """Chunk D: library sort param assembly (node)."""
+    r = subprocess.run(
+        ["node", str(HERE / "js" / "library-sort.test.mjs")],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
+    assert "PASS" in r.stdout

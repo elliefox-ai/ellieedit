@@ -10,7 +10,7 @@
 // P-promote here — library items are already promoted.
 import { registerModule } from '../shell.js';
 import { createSendMenu } from '../components/send-menu.js';
-import { buildListParams, countLine } from './library-core.js';
+import { buildListParams, countLine, sortParam } from './library-core.js';
 import { libraryDetails } from './viewer-details.js';
 import { bindViewerZoom } from './zoom-viewer.js';
 
@@ -219,6 +219,13 @@ function panelHTML() {
     <div class="lib-tags" id="lib-tags"></div>
     <div class="lib-filters" id="lib-filters">
       <input id="lib-search" placeholder="search name, detail, tag…">
+      <select id="lib-sort" title="Sort — server-side, applies to the whole listing and its paging">
+        <option value="new">Newest first</option>
+        <option value="old">Oldest first</option>
+        <option value="name">Name A→Z</option>
+        <option value="name_desc">Name Z→A</option>
+        <option value="tag">Tag A→Z</option>
+      </select>
       <button class="ee-btn" id="lib-select">☐ Select</button>
       <button class="ee-btn" id="lib-refresh" title="Check the current listing for new/removed files — cheap: does nothing when nothing changed, in-place update otherwise">⟳ Refresh</button>
     </div>
@@ -294,6 +301,7 @@ class LibraryView {
       subject: panel.querySelector('#lib-subject'),
       shot: panel.querySelector('#lib-shot'),
       search: panel.querySelector('#lib-search'),
+      sort: panel.querySelector('#lib-sort'),
       selectBtn: panel.querySelector('#lib-select'),
       refresh: panel.querySelector('#lib-refresh'),
       setSel: panel.querySelector('#lib-set'),
@@ -323,6 +331,7 @@ class LibraryView {
     this.subject = '';
     this.shot = '';
     this.q = '';
+    this.sort = 'new';   // Chunk D: server-side sort, see lib-sort select
     this.cursor = 0;
     this.total = 0;
     this.shown = 0;
@@ -365,6 +374,10 @@ class LibraryView {
     this.el.search.addEventListener('input', () => {
       clearTimeout(this._searchT);
       this._searchT = setTimeout(() => { this.q = this.el.search.value.trim(); this.reload(); }, 400);
+    });
+    this.el.sort.addEventListener('change', () => {
+      this.sort = sortParam(this.el.sort.value) ? this.el.sort.value : 'new';
+      this.reload();
     });
     this.el.selectBtn.addEventListener('click', () => this.toggleSelectMode());
     this.el.setNew.addEventListener('click', () => this.createSet());
@@ -483,7 +496,7 @@ class LibraryView {
     this.el.status.textContent = 'Checking…';
     try {
       const qs = buildListParams({ tag: this.tag, cursor: 0,
-        subject: this.subject, shot: this.shot, q: this.q });
+        subject: this.subject, shot: this.shot, q: this.q, sort: this.sort });
       const d = await fetch('/api/library/list?' + qs).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
       const fresh = (d.items || []).map(i => i.path);
       const known = this.items.slice(0, fresh.length).map(i => i.path);
@@ -520,7 +533,7 @@ class LibraryView {
     let d;
     try {
       const qs = buildListParams({ tag: this.tag, cursor: 0,
-        subject: this.subject, shot: this.shot, q: this.q });
+        subject: this.subject, shot: this.shot, q: this.q, sort: this.sort });
       d = await fetch('/api/library/list?' + qs).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
     } catch { return; }
     this.total = d.total;
@@ -554,7 +567,7 @@ class LibraryView {
     const gen = this.gen;
     try {
       const qs = buildListParams({ tag: this.tag, cursor: this.cursor,
-        subject: this.subject, shot: this.shot, q: this.q });
+        subject: this.subject, shot: this.shot, q: this.q, sort: this.sort });
       const r = await fetch('/api/library/list?' + qs);
       if (!r.ok) throw new Error(r.status);
       const d = await r.json();

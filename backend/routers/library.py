@@ -53,6 +53,24 @@ LIBRARY_ROOT = Path(os.environ.get(
 
 PAGE_SIZE = 40
 
+LIBRARY_SORTS = ("new", "old", "name", "name_desc", "tag")
+
+
+def sort_rows(rows: list[dict], sort: str) -> list[dict]:
+    """Pure: order library rows for a sort mode. 'new' is the default
+    newest-first order _all_rows already produces; 'tag' sorts by the
+    first tag (then name) so a project's images cluster together."""
+    if sort == "old":
+        return sorted(rows, key=lambda r: (r["mtime"], r["path"]))
+    if sort == "name":
+        return sorted(rows, key=lambda r: r["name"].lower())
+    if sort == "name_desc":
+        return sorted(rows, key=lambda r: r["name"].lower(), reverse=True)
+    if sort == "tag":
+        return sorted(rows, key=lambda r: ((r["tags"] or [""])[0],
+                                           r["name"].lower()))
+    return list(rows)
+
 
 def index_path() -> Path:
     return LIBRARY_ROOT / ".library-index.jsonl"
@@ -648,7 +666,8 @@ def _all_rows() -> list[dict]:
 
 
 def list_library(tag: str = "", cursor: int = 0, kind: str = "",
-                 subject: str = "", shot: str = "", q: str = "") -> dict:
+                 subject: str = "", shot: str = "", q: str = "",
+                 sort: str = "new") -> dict:
     """Paged listing of library images with tags. Latest-wins tags joined
     with what's actually on disk (index entries for vanished files are
     skipped). Phase 0:
@@ -661,7 +680,13 @@ def list_library(tag: str = "", cursor: int = 0, kind: str = "",
         'originals' shows only originals, 'all' shows everything;
       - subject / shot / q filters (2026-10-29) apply after kind and
         before paging, so the counts stay honest the same way.
+      - sort (Chunk D 2026-11-11): new (default, unchanged) | old | name |
+        name_desc | tag, applied after every filter and before paging;
+        the integer offset cursor is sort-agnostic, so paging stays
+        correct within each sort view.
     """
+    if sort not in LIBRARY_SORTS:
+        raise HTTPException(400, "sort must be new|old|name|name_desc|tag")
     t0 = time.perf_counter()
     rows = _all_rows()
     t_walk = time.perf_counter()
@@ -689,12 +714,19 @@ def list_library(tag: str = "", cursor: int = 0, kind: str = "",
                 or needle in " ".join(r["tags"]).lower()
                 or needle in r["path"].lower()]
     total = len(rows)
+    rows = sort_rows(rows, sort)
     page = rows[cursor:cursor + PAGE_SIZE]
     next_cursor = cursor + PAGE_SIZE if cursor + PAGE_SIZE < total else None
+    # Chunk D perf: warm this page's thumbnails plus the next page's in
+    # the shared gallery pool, so scrolling finds them ready (Gallery
+    # parity — pure accelerator, a miss just does the on-demand work).
+    _gallery_mod.warm_thumbs(
+        [str(LIBRARY_ROOT / r["path"]) for r in rows[cursor:cursor + 2 * PAGE_SIZE]])
     t_total = time.perf_counter()
     return {"items": page, "total": total, "total_all": total_all,
             "shown": len(page), "tag": tag or None, "tags": all_tags,
             "next_cursor": next_cursor, "kind": kind or "finals",
+            "sort": sort,
             "meta_vocab": {"subjects": META_SUBJECTS, "shots": META_SHOTS,
                            "figures": META_FIGURES},
             "timing_ms": {"index": 0.0, "walk": (t_walk - t0) * 1000,
@@ -756,7 +788,7 @@ class SetMembersBody(BaseModel):
 @router.get("/list")
 def list_endpoint(tag: str = "", cursor: int = 0, kind: str = "",
                   subject: str = "", shot: str = "", q: str = "",
-                  response: FResponse = None):
+                  sort: str = "new", response: FResponse = None):
     if kind not in ("", "originals", "all"):
         raise HTTPException(400, "kind must be '' | originals | all")
     if subject and subject not in META_SUBJECTS:
@@ -764,7 +796,7 @@ def list_endpoint(tag: str = "", cursor: int = 0, kind: str = "",
     if shot and shot not in META_SHOTS:
         raise HTTPException(400, f"unknown shot: {shot}")
     d = list_library(tag=tag, cursor=cursor, kind=kind,
-                     subject=subject, shot=shot, q=q)
+                     subject=subject, shot=shot, q=q, sort=sort)
     if response is not None:   # Server-Timing mirrors Gallery (Phase 0)
         tm = d.get("timing_ms", {})
         response.headers["Server-Timing"] = (
@@ -1083,7 +1115,13 @@ def thumb(path: str = Query(...)):
     if not p.is_file():
         raise HTTPException(404, "not found")
     tp = get_thumbnail(p)
-    return FileResponse(tp, media_type="image/webp")
+    # Chunk D perf: the gallery thumb endpoint has carried max-age=86400
+    # since launch; this endpoint silently omitted it, so every Library
+    # visit re-downloaded every thumbnail. Match the gallery exactly —
+    # thumbs are content-addressed by (path, mtime) in the cache, so a
+    # day of caching cannot serve a stale image.
+    return FileResponse(tp, media_type="image/webp",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 @router.get("/file")
@@ -1091,7 +1129,10 @@ def file(path: str = Query(...)):
     p = library_jailed(path)
     if not p.is_file():
         raise HTTPException(404, "not found")
-    return FileResponse(p)
+    media = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+             "png": "image/png", "webp": "image/webp"}[p.suffix.lower()[1:]]
+    return FileResponse(p, media_type=media,
+                        headers={"Cache-Control": "public, max-age=3600"})
 
 
 def _resolve_source(rel: str, bank: str | None = None) -> Path:

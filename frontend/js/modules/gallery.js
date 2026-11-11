@@ -173,6 +173,12 @@ function panelHTML() {
     <h1>Gallery <span class="subtitle">— generated images</span></h1>
     <div class="gal-crumbs" data-id="crumbs"></div>
     <select data-act="bank" title="Gallery bank — primary is the Comfy output folder; extra banks are read-only unless marked writable"></select>
+    <select data-act="sort" title="Sort — server-side, applies to the whole folder listing and its paging">
+      <option value="new">Newest first</option>
+      <option value="old">Oldest first</option>
+      <option value="name">Name A→Z</option>
+      <option value="name_desc">Name Z→A</option>
+    </select>
     <span class="gal-status" data-id="status"></span>
     <div class="gal-viewseg">
       <button class="ee-btn gal-btn" data-act="view-all">All</button>
@@ -254,6 +260,7 @@ export class Gallery {
       viewerNote: panel.querySelector('[data-id="viewer-note"]'),
       pendingBar: panel.querySelector('[data-id="pending-bar"]'),
       bankSel: panel.querySelector('[data-act="bank"]'),
+      sortSel: panel.querySelector('[data-act="sort"]'),
       pdMsg: panel.querySelector('[data-id="pd-msg"]'),
       pdDeleteAll: panel.querySelector('[data-act="pd-delete-all"]'),
     };
@@ -261,6 +268,7 @@ export class Gallery {
     this.cursor = null;
     this.dir = '';
     this.bank = 'primary';
+    this.sort = 'new';   // Chunk D: server-side sort (new|old|name|name_desc)
     this.banks = [];
     this.lastSelKey = null;   // shift-click range anchor (keyOf)
     this.dupePoll = null;
@@ -335,6 +343,10 @@ export class Gallery {
     act('to-puppet-multi').addEventListener('click', () => this.launchPuppetMulti());
     act('promote-multi').addEventListener('click', () => this.promoteMulti());
     this.el.bankSel.addEventListener('change', () => this.setBank(this.el.bankSel.value));
+    this.el.sortSel.addEventListener('change', () => {
+      this.sort = this.el.sortSel.value || 'new';
+      this.reload();
+    });
     this.loadBanks();
   }
 
@@ -1149,6 +1161,7 @@ export class Gallery {
       const dir = this.viewFilter === 'pending' ? '' : this.dir;
       const p = new URLSearchParams({ dir, pending: this.viewFilter, bank: this.bank });
       if (this.cursor) p.set('cursor', this.cursor);
+      if (this.sort !== 'new') p.set('sort', this.sort);
       const r = await fetch('/api/gallery/list?' + p);
       if (!r.ok) throw new Error(r.status);
       const data = await r.json();
@@ -1305,6 +1318,7 @@ export class Gallery {
     this.el.status.textContent = 'Checking…';
     try {
       const p = new URLSearchParams({ dir: this.viewFilter === 'pending' ? '' : this.dir, pending: this.viewFilter, bank: this.bank });
+      if (this.sort !== 'new') p.set('sort', this.sort);
       const j = await fetch('/api/gallery/list?' + p).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
       const fresh = (j.items || []).map(i => i.path);
       const known = this.items.slice(0, fresh.length).map(i => i.path);
