@@ -311,3 +311,58 @@ def test_vibrance_deterministic_and_endpoint_wired(client):
     # Off by default: no vibrance fields -> still exact v5 path.
     d = client.get("/api/filters/defaults").json()
     assert d["vibrance"] == 0.0 and d["vibrance_falloff"] > 0
+
+
+def _apply_png(client, rgb, **over):
+    b64 = base64.b64encode(ch.array_to_png_bytes(rgb)).decode()
+    body = {"image_b64": b64, "strength": 0}
+    body.update(over)
+    r = client.post("/api/filters/apply", json=body)
+    assert r.status_code == 200, r.text
+    return r
+
+
+def test_vibrance_only_pass_changes_output_with_colorhold_off(client):
+    # Operator report (2026-11-11): vibrance had no effect unless the
+    # colorhold checkbox was on. With colorhold off (strength 0, the
+    # client's encoding of ch-enabled unchecked) and vibrance set, the
+    # vibrance pass must run on its own and visibly change the image.
+    rgb = np.random.default_rng(11).random((16, 16, 3)).astype(np.float32)
+    out = _apply_png(client, rgb, vibrance=40).json()
+    raw = base64.b64decode(out["image"].split(",", 1)[1])
+    tuned = ch.png_bytes_to_rgb(raw)
+    assert not np.array_equal(tuned, rgb)
+    # And it matches applying vibrance to the same 8-bit-quantized source
+    # directly — vibrance is its own stage, not something bolted onto a
+    # colorhold result. (Compare on the PNG-roundtripped source: the
+    # router quantizes to 8-bit through the PNG envelope, same as the
+    # browser path.)
+    src8 = ch.png_bytes_to_rgb(ch.array_to_png_bytes(rgb))
+    direct, _ = _vib.apply_vibrance(src8, strength=40)
+    np.testing.assert_allclose(tuned, np.clip(direct, 0, 1), atol=1.5 / 255)  # 8-bit PNG re-encode
+    assert out["vibrance_clamped_px"] >= 0
+
+
+def test_colorhold_off_vibrance_zero_is_unchanged(client):
+    # vibrance 0 + colorhold off: error-free identity pass — the output
+    # is byte-identical to the 8-bit source through the PNG envelope.
+    rgb = np.random.default_rng(12).random((16, 16, 3)).astype(np.float32)
+    src8 = ch.png_bytes_to_rgb(ch.array_to_png_bytes(rgb))
+    d = _apply_png(client, rgb, vibrance=0).json()
+    tuned = ch.png_bytes_to_rgb(base64.b64decode(
+        d["image"].split(",", 1)[1]))
+    np.testing.assert_array_equal(tuned, src8)
+
+
+def test_colorhold_on_vibrance_on_composes_as_before(client):
+    # Behavior with both enabled is unchanged: colorhold at full strength
+    # followed by the vibrance post-pass on the composited result.
+    rng = np.random.default_rng(13)
+    rgb = (0.15 + 0.7 * rng.random((16, 16, 3))).astype(np.float32)
+    src8 = ch.png_bytes_to_rgb(ch.array_to_png_bytes(rgb))
+    out = _apply_png(client, rgb, strength=100, vibrance=40).json()
+    tuned = ch.png_bytes_to_rgb(base64.b64decode(
+        out["image"].split(",", 1)[1]))
+    colored, _ = ch.colorhold_lineart(src8, strength=100)
+    expect, _ = _vib.apply_vibrance(colored, strength=40)
+    np.testing.assert_allclose(tuned, np.clip(expect, 0, 1), atol=1.5 / 255)  # 8-bit PNG re-encode

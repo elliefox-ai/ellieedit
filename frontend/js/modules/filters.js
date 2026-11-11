@@ -433,9 +433,9 @@ class Filters {
     if (key === this.colorholdKey && this.colorholdUrl) return this.colorholdUrl;
     const body = { dark_t: s.dark_t, sat_mul: s.sat_mul, val_mul: s.val_mul,
       smooth: s.smooth, line_sigma: s.line_sigma,
-      // colorhold off + vibrance on = vibrance-only pass: strength 0 makes
-      // apply_strength an exact lerp back to the original after the (wasted
-      // but cached) colorhold stages, so the output is original + vibrance.
+      // colorhold off + vibrance on = vibrance-only pass: the backend sees
+      // strength 0 with vibrance > 0 and skips the colorhold stages, running
+      // only the vibrance pass on the source (see backend/routers/filters.py).
       strength: s.chEnabled ? 100 : 0,
       gate: s.gate, gate_maxw: s.gate_maxw, gate_bh_full: s.gate_bh_full,
       gate_strength: s.gate_strength, vibrance: s.vibrance,

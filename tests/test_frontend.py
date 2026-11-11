@@ -966,6 +966,9 @@ def test_filters_chunk_b_vibrance_panzoom_sendupdate_wiring():
     assert "strength: s.chEnabled ? 100 : 0" in src             # identity colorhold
     assert "vibrance: float = 0.0" in router
     assert "_vib.apply_vibrance" in router
+    # Vibrance standalone stage: strength 0 + vibrance > 0 skips the
+    # colorhold stages entirely (fix 2026-11-11, operator live review).
+    assert "body.vibrance and body.strength <= 0" in router
     # Pan/zoom: the shared component, with the gate refusing control drags.
     assert "bindPanZoom" in src and "gate: () => !this.controlDrag" in src
     assert "img, canvas" in pz          # geom accepts the canvas stage

@@ -163,18 +163,31 @@ def apply(body: ApplyBody):
     try:
         raw = _load_source(body.path, body.image_b64)
         rgb = _ch.png_bytes_to_rgb(raw, max_side=body.preview_max_side)
-        out, info = _ch.colorhold_lineart(
-            rgb, dark_t=body.dark_t, sat_mul=body.sat_mul,
-            val_mul=body.val_mul, smooth=body.smooth,
-            line_sigma=body.line_sigma, strength=body.strength,
-            gate=body.gate, gate_maxw=body.gate_maxw,
-            gate_bh_full=body.gate_bh_full, gate_strength=body.gate_strength)
-        if body.vibrance:
+        if body.vibrance and body.strength <= 0:
+            # Vibrance-only pass (colorhold disabled): skip the colorhold
+            # stages entirely — vibrance is its own stage, applied straight
+            # to the source. strength 0 means the strength lerp would
+            # return the original anyway, so this is exactly equivalent
+            # to running them, without the wasted (cached) work.
             out, vinfo = _vib.apply_vibrance(
-                out, strength=body.vibrance,
+                rgb, strength=body.vibrance,
                 falloff=body.vibrance_falloff, protect=body.vibrance_protect)
+            info = {"engine": "vibrance-only", "cached_fill": False,
+                    "gate": False, "gate_effective_maxw": None,
+                    "cached_thin": False}
         else:
-            vinfo = {"clamped_px": 0}
+            out, info = _ch.colorhold_lineart(
+                rgb, dark_t=body.dark_t, sat_mul=body.sat_mul,
+                val_mul=body.val_mul, smooth=body.smooth,
+                line_sigma=body.line_sigma, strength=body.strength,
+                gate=body.gate, gate_maxw=body.gate_maxw,
+                gate_bh_full=body.gate_bh_full, gate_strength=body.gate_strength)
+            if body.vibrance:
+                out, vinfo = _vib.apply_vibrance(
+                    out, strength=body.vibrance,
+                    falloff=body.vibrance_falloff, protect=body.vibrance_protect)
+            else:
+                vinfo = {"clamped_px": 0}
     except HTTPException:
         raise
     except ValueError as e:
