@@ -368,3 +368,56 @@ def test_file_bank_serves_and_jails(bank_client):
     assert client.get("/api/gallery/file", params={"path": "h.png", "bank": "home"}).status_code == 200
     assert client.get("/api/gallery/file", params={"path": "../h.png", "bank": "home"}).status_code == 400
     assert client.get("/api/gallery/thumb", params={"path": "h.png", "bank": "home"}).status_code == 200
+
+
+# ------------------------------------------------------- Chunk D (2026-11-11)
+
+def test_gallery_sort_modes(client):
+    """Chunk D: server-side sort = new (default) | old | name | name_desc.
+    Default order is b.jpg (newer) then a.png; name sorts are case-insensitive."""
+    def order(sort):
+        params = {"sort": sort} if sort else {}
+        d = client.get("/api/gallery/list", params=params).json()
+        assert d["sort"] == (sort or "new")
+        return [i["name"] for i in d["items"]]
+    assert order("") == ["b.jpg", "a.png"]
+    assert order("new") == ["b.jpg", "a.png"]
+    assert order("old") == ["a.png", "b.jpg"]
+    assert order("name") == ["a.png", "b.jpg"]
+    assert order("name_desc") == ["b.jpg", "a.png"]
+
+
+def test_gallery_sort_offset_cursor_paging(client, monkeypatch):
+    """Non-default sorts use an integer offset cursor; full walk is exact."""
+    import backend.routers.gallery as g
+    monkeypatch.setattr(g, "PAGE_SIZE", 1)
+    seen, cur = [], ""
+    d = {}
+    while True:
+        params = {"sort": "name"}
+        if cur:
+            params["cursor"] = cur
+        d = client.get("/api/gallery/list", params=params).json()
+        seen += [i["name"] for i in d["items"]]
+        if not d["next_cursor"]:
+            break
+        cur = d["next_cursor"]
+        assert cur.isdigit()
+    assert seen == ["a.png", "b.jpg"]
+
+
+def test_gallery_sort_invalid_and_bad_cursor(client):
+    assert client.get("/api/gallery/list", params={"sort": "bogus"}).status_code == 400
+    r = client.get("/api/gallery/list", params={"sort": "name", "cursor": "1000:a.png"})
+    assert r.status_code == 400
+
+
+def test_gallery_sort_frontend_wiring():
+    """Chunk D: the gallery sort select exists, drives reload, and the list
+    fetch passes sort through on non-default modes only."""
+    from pathlib import Path
+    src = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "gallery.js").read_text()
+    for needle in ('data-act="sort"', 'value="name_desc"',
+                   "this.el.sortSel.addEventListener('change'",
+                   "if (this.sort !== 'new') p.set('sort', this.sort);"):
+        assert needle in src, needle

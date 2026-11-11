@@ -632,3 +632,89 @@ def test_pending_restore_errors(client, env):
     confirm = client.post("/api/library/pending/confirm").json()
     assert confirm["deleted"] == 2  # legacy + the queued original
     assert client.get("/api/library/pending").json()["count"] == 0
+
+
+# ------------------------------------------------------- Chunk D (2026-11-11)
+
+def _seed_library(client, env, names):
+    """Promote gallery sources so the library holds files with distinct
+    names; mtime spacing is applied afterwards on the library copies."""
+    g = env["gallery"] / "ZengoSoft Face"
+    for n in names:
+        (g / n).write_bytes(_png())
+        client.post("/api/library/promote", json={"path": f"ZengoSoft Face/{n}"})
+    lib = env["library"] / "zengosoft"
+    files = sorted(lib.glob("*.png"))
+    for i, f in enumerate(files):
+        import os
+        os.utime(f, (1700000000 + i * 100, 1700000000 + i * 100))
+    return [f.name for f in files]  # promotion order = alphabetical seeds
+
+
+def test_library_sort_modes(client, env):
+    names = _seed_library(client, env, ["mango.png", "apple.png", "Kiwi.png"])
+    def order(sort):
+        r = client.get("/api/library/list", params={"sort": sort} if sort else {})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["sort"] == (sort or "new")
+        return [i["name"] for i in d["items"]]
+    newest_first = ["mango.png", "apple.png", "Kiwi.png"]  # utime loop: alphabetical gets oldest
+    assert order("") == newest_first      # default: newest first
+    assert order("new") == newest_first
+    assert order("old") == list(reversed(newest_first))
+    assert order("name") == ["apple.png", "Kiwi.png", "mango.png"]   # case-insensitive
+    assert order("name_desc") == ["mango.png", "Kiwi.png", "apple.png"]
+
+
+def test_library_sort_tag_and_paging(client, env):
+    import os
+    _seed_library(client, env, ["b.png", "a.png"])
+    client.post("/api/library/retag", json={"path": "zengosoft/a.png", "tags": ["alpha"]})
+    os.utime(env["library"] / "zengosoft" / "a.png", (1700000500, 1700000500))
+    d = client.get("/api/library/list", params={"sort": "tag"}).json()
+    assert [i["name"] for i in d["items"]] == ["a.png", "b.png"]  # alpha cluster first
+    # offset cursor paging stays correct under a non-default sort
+    import backend.routers.library as lib_mod
+    old_ps = lib_mod.PAGE_SIZE
+    lib_mod.PAGE_SIZE = 1
+    try:
+        seen, cur = [], 0
+        while cur is not None:
+            r = client.get("/api/library/list", params={"sort": "name", "cursor": cur})
+            j = r.json()
+            seen += [i["name"] for i in j["items"]]
+            cur = j["next_cursor"]
+        assert seen == ["a.png", "b.png"]
+    finally:
+        lib_mod.PAGE_SIZE = old_ps
+
+
+def test_library_sort_invalid_400(client, env):
+    assert client.get("/api/library/list", params={"sort": "bogus"}).status_code == 400
+
+
+def test_library_thumb_and_file_cache_headers(client, env):
+    """Chunk D perf: the gallery endpoints have carried Cache-Control since
+    launch; the library twins silently omitted it, so every Library visit
+    re-downloaded every thumbnail. Both must now match the gallery."""
+    _seed_library(client, env, ["cachecheck.png"])
+    r = client.get("/api/library/thumb", params={"path": "zengosoft/cachecheck.png"})
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "public, max-age=86400"
+    assert r.headers["content-type"].startswith("image/webp")
+    r = client.get("/api/library/file", params={"path": "zengosoft/cachecheck.png"})
+    assert r.status_code == 200
+    assert r.headers["cache-control"] == "public, max-age=3600"
+    assert r.headers["content-type"] == "image/png"
+
+
+def test_library_sort_frontend_wiring():
+    """Chunk D: the sort select exists, drives reload, and every list fetch
+    passes the current sort through the pure helper."""
+    src = (__import__("pathlib").Path(__file__).parent.parent
+           / "frontend" / "js" / "modules" / "library.js").read_text()
+    for needle in ('id="lib-sort"', 'value="name_desc"', 'value="tag"',
+                   "this.el.sort.addEventListener('change'",
+                   "sort: this.sort"):
+        assert needle in src, needle
