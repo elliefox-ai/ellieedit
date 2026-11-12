@@ -15,6 +15,7 @@ import {
 // while Update binds a comparer + mask + divider, so only the
 // pure math is reused here.
 import { dist, pinchScale, clampPan, wheelScale } from './zoom-viewer.js';
+import { studioState, galleryFileUrl } from './studio-state.js';
 
 function panelHTML() {
   return `
@@ -236,6 +237,24 @@ class UpdateView {
     window.addEventListener('ellieedit:tab-activated', e => {
       if (e.detail?.name === 'update') this.loadSavedPrompts();
     });
+    // Stage 1: the working-image store lives outside the tab lifecycle —
+    // an external "Set as working image" (Gallery 📌) loads here WITHOUT
+    // any config-style reset: presets, prompt, seed, stack history all
+    // keep their state. This subscription is the structural fix for the
+    // chunk-A tab-reset bug class (pinned in tests/test_frontend.py).
+    window.addEventListener('ellieedit:working-changed', e => {
+      const d = e.detail || {};
+      if (!d.path) return;
+      const cur = this.stack ? source(this.stack).path : null;
+      if (d.path === cur) return;   // own send-to already loaded it
+      this.openIn({ url: galleryFileUrl(d.path), name: d.name, path: d.path });
+    });
+    studioState().subscribe(d => {
+      if (!d.path) return;           // clearing never blank the stage
+      if (d.path === (this.stack ? source(this.stack).path : null)) return;
+      this.openIn({ url: galleryFileUrl(d.path), name: d.name, path: d.path });
+    });
+    studioState().restore();
     window.__upd = this;  // debug/probe hook
   }
 
@@ -489,6 +508,13 @@ class UpdateView {
   // { url, name, path }; url is a jailed gallery file link.
   async openIn({ url, name, path }) {
     if (!url) return;
+    // Same-path guard: a store-driven set plus the legacy open-in-update
+    // event (Gallery ✎ Update now does both) must not double-fetch or
+    // rebuild the stack — the second arrival is a no-op.
+    if (path && this.stack && source(this.stack).path === path) {
+      this.el.status.textContent = `source: ${this.stack.entries[0].name} (already loaded)`;
+      return;
+    }
     try {
       const r = await fetch(url);
       if (!r.ok) throw new Error(r.status);

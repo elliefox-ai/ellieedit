@@ -1017,3 +1017,39 @@ def test_js_library_sort_helper():
     )
     assert r.returncode == 0, f"node test failed:\n{r.stdout}\n{r.stderr}"
     assert "PASS" in r.stdout
+
+
+def test_stage1_working_image_pins():
+    """Stage 1 (Studio consolidation): the working-image store exists, the
+    Gallery viewer loads it, the shell shows the indicator chip, and Update
+    consumes store-driven image changes WITHOUT any loadConfig-style reset
+    — the chunk-A tab-reset bug class stays structurally dead (design doc §3)."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    upd = (mods / "update.js").read_text()
+    gal = (mods / "gallery.js").read_text()
+    shell = (HERE.parent / "frontend" / "js" / "shell.js").read_text()
+    store = (mods / "studio-state.js").read_text()
+
+    # The store module: pure factory + pinned sessionStorage key + change event
+    assert "export function createStudioState" in store
+    assert "ellieedit.studio.working" in store
+    assert "ellieedit:working-changed" in store
+
+    # Gallery: explicit set-working viewer action; to-update ALSO sets the store
+    assert 'data-act="set-working"' in gal
+    assert gal.count("studioState().set(") >= 2
+
+    # Update: consumes store changes and NEVER re-sources via tab activation.
+    # The tab-activated listener must stay prompts-only (no loadConfig call).
+    assert "ellieedit:working-changed" in upd
+    assert "studioState().restore()" in upd
+    tab_block = upd[upd.index("ellieedit:tab-activated"):]
+    tab_block = tab_block[:tab_block.index("});")]
+    assert "loadSavedPrompts" in tab_block
+    assert "loadConfig" not in upd  # store-driven loads never reset config
+    # same-path guard so send-to + store set don't double-build the stack
+    assert "already loaded" in upd
+
+    # Shell: visible working-image chip with a clear button, in the tab bar
+    assert "working-chip" in shell
+    assert "Clear working image" in shell

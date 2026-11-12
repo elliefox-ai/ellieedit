@@ -10,6 +10,7 @@
 const BUILD = '2026-11-01c';
 
 import { planSend } from './send-to.js';
+import { studioState } from './modules/studio-state.js';
 
 const registry = [];
 const mounted = new Map(); // name -> { panelEl }
@@ -59,6 +60,37 @@ function buildTabs() {
   marker.style.cssText = 'margin-left:auto;align-self:center;font-size:10px;color:#5a5a7a;padding-right:8px';
   marker.textContent = `build ${BUILD}`;
   tabbar.appendChild(marker);
+  // Working-image chip (decision #3): a visible indicator of what's loaded,
+  // living in the shell — outside every tab, so it survives tab switches.
+  // The × clears the store; switching tabs never does.
+  const chip = document.createElement('span');
+  chip.id = 'working-chip';
+  chip.style.cssText = 'display:none;align-self:center;margin-right:8px;padding:2px 8px;' +
+    'background:#2d2d44;border:1px solid #5a5a7a;border-radius:12px;font-size:11px;color:#cfcfe8;' +
+    'max-width:24vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+  const chipLabel = document.createElement('span');
+  chipLabel.style.cssText = 'overflow:hidden;text-overflow:ellipsis';
+  const chipClear = document.createElement('button');
+  chipClear.setAttribute('aria-label', 'Clear working image');
+  chipClear.title = 'Clear the working image';
+  chipClear.textContent = '✕';
+  chipClear.style.cssText = 'border:none;background:none;color:#8a8ab0;font-size:11px;cursor:pointer;padding:0 0 0 6px';
+  chipClear.addEventListener('click', () => studioState().clear());
+  chip.appendChild(chipLabel);
+  chip.appendChild(chipClear);
+  tabbar.appendChild(chip);
+  const syncChip = d => {
+    if (d.path) {
+      chip.style.display = 'inline-flex';
+      chip.title = `Working image: ${d.name} (${d.origin})`;
+      chipLabel.textContent = `📌 ${d.name}`;
+    } else {
+      chip.style.display = 'none';
+      if (d.reason === 'missing') toast('working image no longer exists — cleared', true);
+    }
+  };
+  studioState().subscribe(syncChip);
+  syncChip(studioState().restore());
   for (const desc of registry) {
     const btn = document.createElement('button');
     btn.className = 'tab';

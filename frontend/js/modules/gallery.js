@@ -9,10 +9,11 @@
 //   'ellieedit:ladder-launch' { detail: { items } }  + activate 'ladder'
 //   'ellieedit:blend-launch' { detail: { items } }   + activate 'ladder'
 //   'ellieedit:facecycle-handoff' { urls, names }    + activate 'facecycle'
-import { registerModule } from '../shell.js';
+import { registerModule, toast } from '../shell.js';
 import { isTypingTarget } from '../key-guards.js';
 import { planFaceCycleHandoff } from '../handoff.js';
 import { createSendMenu } from '../components/send-menu.js';
+import { studioState } from './studio-state.js';
 import { planMarkBatch } from './marking-batch.js';
 import { crumbsFor, joinDir, isBrowsableDir } from './gallery-path.js';
 import { bindViewerZoom } from './zoom-viewer.js';
@@ -214,6 +215,7 @@ function panelHTML() {
     <div class="bar">
       <span class="fname" data-id="viewer-name"></span>
       <button class="ee-btn primary" data-act="viewer-promote" title="Promote to Library (P)">⬆ Promote</button>
+      <button class="ee-btn" data-act="set-working" title="Set as the Studio working image — stays loaded across tabs and reloads">📌 Working</button>
       <button class="ee-btn" data-act="to-update" title="Open in Update tab (version stack)">✎ Update</button>
       <button class="ee-btn danger" data-act="viewer-delete" title="Mark for deletion (Delete key) — nothing is deleted until you confirm in the Deletion view">🗑 Delete</button>
       <button class="ee-btn" data-act="viewer-zoom-out" title="Zoom out">−</button>
@@ -1373,6 +1375,15 @@ export class Gallery {
     act('prev').addEventListener('click', () => this.nav(-1));
     act('next').addEventListener('click', () => this.nav(1));
     act('viewer-promote').addEventListener('click', () => this.promoteFromViewer());
+    // Stage 1 working-image store (design doc §4): loads the lightboxed
+    // image into the store — Update (and later Studio) picks it up. Never
+    // touches Ladder state (decision #4).
+    act('set-working').addEventListener('click', () => {
+      const item = this.items[this.viewIdx];
+      if (!item) return;
+      studioState().set(relOf(item), 'gallery', { name: item.name });
+      toast(`working image: ${item.name}`);
+    });
     act('viewer-delete').addEventListener('click', () => this.armViewerDelete());
     // v1.4 "Send to ▸": Puppet Theater (layer / background) and FoxDen
     // (input image) beside ✎ Update. Single image = the one in the lightbox.
@@ -1401,6 +1412,9 @@ export class Gallery {
     act('to-update').addEventListener('click', () => {
       const item = this.items[this.viewIdx];
       if (!item) return;
+      // Stage 1: send-to-Update now also loads the store — Update may
+      // consume the change from either path; same-path reload is a no-op.
+      studioState().set(relOf(item), 'gallery', { name: item.name });
       window.dispatchEvent(new CustomEvent('ellieedit:open-in-update',
         { detail: { url: this.fileUrl(item), name: item.name, path: relOf(item) } }));
       window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'update' } }));
