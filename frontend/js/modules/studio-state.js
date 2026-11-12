@@ -15,6 +15,33 @@
 // reason 'missing' so the shell can toast. Settings snapshots are copies —
 // they never auto-invalidate.
 
+// Normalize a provenance record (or stored snapshot) into the ReUse recipe
+// shape — the store-driven twin of the viewer's recipeSettings fallback.
+// A record with nothing usable (pre-provenance images) -> null: nothing
+// invented, nothing applied.
+export function recipeFromRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const r = {
+    prompt: typeof record.prompt === 'string' && record.prompt ? record.prompt : null,
+    workflow: typeof record.workflow === 'string' && record.workflow ? record.workflow : null,
+    seed: num(record.seed),
+    steps: num(record.steps),
+    width: num(record.width),
+    height: num(record.height),
+    denoise: num(record.denoise),
+    loras: Array.isArray(record.loras)
+      ? record.loras.filter(l => l && typeof l.name === 'string' && l.name)
+          .map(l => ({ name: l.name,
+                       strength_model: num(l.strength_model) ?? 1.0 }))
+      : [],
+    input_image: typeof record.input_image === 'string' && record.input_image
+      ? record.input_image : null,
+  };
+  const usable = r.prompt || r.workflow || r.seed != null || r.loras.length;
+  return usable ? r : null;
+}
+
 export const WORKING_STORAGE_KEY = 'ellieedit.studio.working';
 
 // Build the jailed gallery file URL from a stored rel path (same shape as
@@ -148,6 +175,22 @@ export function createStudioState({
     get: snapshot,
     // Refresh the provenance record on demand (initial load retries).
     refreshProvenance,
+
+    // Store-driven ReUse (design doc P3 twin): the working image's own
+    // provenance becomes the generation recipe. Async — refetches the
+    // provenance if missing/dirty first. Returns the normalized recipe
+    // (also cached as settingsSnapshot) or null when nothing is usable.
+    async applySettingsTo() {
+      let rec = state.provenance;
+      if (!rec || state.dirty.provenance) rec = await refreshProvenance();
+      const recipe = recipeFromRecord(rec);
+      if (recipe) {
+        state.settingsSnapshot = recipe;
+        persist();
+        emit({ reason: 'settings' });
+      }
+      return recipe;
+    },
 
     // Restore from storage at load time: rehydrate, then validity-check +
     // refetch provenance lazily. Returns the restored snapshot (or empty).

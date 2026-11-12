@@ -152,17 +152,16 @@ def append_record(record: dict) -> bool:
         return False
 
 
-def read_records() -> list[dict]:
-    """All records, oldest first; corrupt lines are skipped, never fatal."""
-    p = provenance_path()
-    if not p.is_file():
-        return []
+# One parse per provenance-log mtime (perf audit finding #2 — the same
+# pattern as dupe.py's _library_lookup). /api/foxden/inputs used to re-read
+# the whole log per request; now a stat decides.
+_records_cache: tuple[str, list] | None = None   # (path:mtime key, records)
+
+
+def _parse_records(text: str) -> list[dict]:
+    """Parse log text -> valid records, oldest first; corrupt lines skipped."""
     out = []
-    try:
-        lines = p.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    for line in lines:
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
@@ -172,6 +171,30 @@ def read_records() -> list[dict]:
             continue
         if isinstance(rec, dict) and rec.get("path"):
             out.append(rec)
+    return out
+
+
+def read_records() -> list[dict]:
+    """All records, oldest first; corrupt lines are skipped, never fatal.
+    Cached on the log's mtime (path in the key: tmp roots must not collide).
+    append_record's write bumps the mtime, so the cache self-invalidates."""
+    global _records_cache
+    p = provenance_path()
+    try:
+        mt = p.stat().st_mtime
+    except OSError:
+        mt = -1.0                    # absent file caches as empty, like dupe.py
+    ck = f"{p}:{mt}"
+    if _records_cache and _records_cache[0] == ck:
+        return _records_cache[1]
+    text = ""
+    if p.is_file():
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+    out = _parse_records(text)
+    _records_cache = (ck, out)
     return out
 
 

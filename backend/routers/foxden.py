@@ -15,6 +15,7 @@ Principles (from the work order):
 """
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -442,6 +443,71 @@ def _node_errors_text(resp: dict) -> str:
             bits.append(f"node {nid} ({ne.get('class_type')}): "
                         f"{e.get('message')} {e.get('details', '')}".strip())
     return "; ".join(bits) or "rejected"
+
+
+class SaveOutputsBody(BaseModel):
+    paths: list[str]
+
+
+@router.post("/save-outputs")
+def save_outputs(body: SaveOutputsBody):
+    """Studio save-all (consolidation decision #2): copy generation outputs
+    into the gallery bank. Nothing auto-saves — the frontend calls this only
+    when the operator's "save all outputs to gallery" checkbox is on. Each
+    path is the provenance-style output path (`subfolder/name`, same shape
+    /provenance is keyed by); the delivered copy under the delivery dir is
+    preferred, with a ComfyUI /view fetch as fallback. Records carry the
+    generation recipe via provenance carry with source_module "studio"."""
+    from .gallery import GALLERY_ROOT
+    saved: list[str] = []
+    for p in body.paths[:50]:
+        parts = str(p).replace("\\", "/").split("/")
+        name = parts[-1] if parts else ""
+        if (not name or name.startswith(".") or len(name) > 255):
+            continue
+        sub = "/".join(parts[:-1])
+        data = None
+        src = delivery_dir() / name
+        if src.is_file():
+            try:
+                data = src.read_bytes()
+            except OSError:
+                data = None
+        if not data:
+            q = urllib.parse.urlencode({"filename": name,
+                                        "subfolder": sub, "type": "output"})
+            try:
+                st, b, _h = _comfy(f"/view?{q}", timeout=60)
+                if st == 200 and b:
+                    data = b
+            except Exception:      # convenience path: never break the batch
+                log.warning("foxden save-outputs fetch failed for %s", p,
+                            exc_info=True)
+        if not data:
+            continue
+        dest_dir = GALLERY_ROOT
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            raise HTTPException(500, "gallery root unavailable")
+        dest = dest_dir / name
+        i = 1
+        while dest.exists():       # never overwrite a gallery image
+            dest = dest_dir / f"{Path(name).stem}-{i}{Path(name).suffix}"
+            i += 1
+            if i > 1000:
+                raise HTTPException(409, "could not find unique destination")
+        try:
+            dest.write_bytes(data)
+        except OSError:
+            raise HTTPException(500, f"could not write {dest.name}")
+        rel = dest.relative_to(GALLERY_ROOT).as_posix()
+        _prov.carry([str(p)], rel, "studio",
+                    sha256=hashlib.sha256(data).hexdigest())
+        saved.append(rel)
+    if not saved and body.paths:
+        raise HTTPException(404, "no output could be saved")
+    return {"ok": True, "saved": saved}
 
 
 @router.post("/generate")

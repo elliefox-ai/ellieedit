@@ -1053,3 +1053,76 @@ def test_stage1_working_image_pins():
     # Shell: visible working-image chip with a clear button, in the tab bar
     assert "working-chip" in shell
     assert "Clear working image" in shell
+
+
+def test_stage2_candidate_strip_pins():
+    """Stage 2 (consolidation decision #2): batch generation produces a
+    candidate strip with explicit promote only — nothing auto-saves; the
+    optional save-all checkbox exists, defaults OFF, and targets the gallery
+    bank (never Library); the next run replaces the strip."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    fx = (mods / "foxden.js").read_text()
+    css = (mods / "foxden.css").read_text()
+    cands = (mods / "studio-candidates.js").read_text()
+    fpy = (HERE.parent / "backend" / "routers" / "foxden.py").read_text()
+
+    # strip module: pure factory, next-run replacement is startRun's contract
+    assert "export function createCandidates" in cands
+    assert "startRun" in cands
+    # render + promote-to-working via the store, origin 'foxden-output'
+    assert "cands.startRun(" in fx
+    assert "studioState().set(" in fx
+    assert "'foxden-output'" in fx
+    # no auto-save: save-all only fires when the checkbox is checked
+    assert "save-all" in fx
+    assert "el['save-all'].checked" in fx
+    assert "if (el['save-all'].checked && runCands.length)" in fx
+    # checkbox tag carries no `checked` attribute — default OFF
+    html = fx[fx.index("fx-saveall"):]
+    at = html.index("<input")
+    input_tag = html[at:html.index(">", at) + 1]
+    assert input_tag == '<input type="checkbox" data-id="save-all">', input_tag
+    assert "save all outputs to gallery" in fx
+    assert "fx-cands" in css
+    # backend save-outputs endpoint: gallery bank, provenance carry, studio module
+    assert "@router.post(\"/save-outputs\")" in fpy
+    assert '"studio"' in fpy
+    assert "GALLERY_ROOT" in fpy
+    assert "from .library" not in fpy  # gallery bank, not Library
+
+
+def test_stage2_reuse_and_ladder_verb_pins():
+    """Stage 2: store-driven ReUse (applySettingsTo consumer) + Ladder's one
+    explicit 'use as working image' verb that never touches ladder state."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    store = (mods / "studio-state.js").read_text()
+    fx = (mods / "foxden.js").read_text()
+    upd = (mods / "update.js").read_text()
+    rv = (mods / "review.js").read_text()
+
+    # store: record -> recipe normalizer + async applySettingsTo
+    assert "export function recipeFromRecord" in store
+    assert "async applySettingsTo()" in store
+    # Update consumes it; FoxDen applies the recipe to its form on the event
+    assert "applySettingsTo()" in upd
+    assert "ellieedit:reuse-settings" in upd and "ellieedit:reuse-settings" in fx
+    # Ladder: explicit per-image verb, store set with origin 'ladder'
+    assert rv.count("Use as working image") == 2  # champion + runner-up
+    assert "studioState().set(" in rv
+    assert "'ladder'" in rv
+
+
+def test_stage2_studio_surface_pins():
+    """Stage 2 supplements: exact verb wiring the broader pins don't pin —
+    the Ladder buttons' data-act names, the origin strings, and the invariant
+    that review.js's ONLY store setter is the explicit verb (decision #5)."""
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    fx = (mods / "foxden.js").read_text()
+    rev = (mods / "review.js").read_text()
+
+    assert "studioState().set(c.path, 'foxden-output'" in fx
+    assert 'data-act="res-champ-working"' in rev
+    assert 'data-act="res-runner-working"' in rev
+    assert "studioState().set(item.path, 'ladder'" in rev
+    assert rev.count("studioState().set(") == 1   # the verb is the only setter
+    assert "pathFromViewUrl(u)" in fx             # candidate identity from view URL

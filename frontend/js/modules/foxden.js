@@ -10,6 +10,8 @@ import { createPins } from './foxden-loras.js';
 import { normalizeState, presetState, debounce, cleanName, nextSeed, sizeFor, rebuildSelectPreserving } from './foxden-state.js';
 import { orderInputs, pageInputs, INPUTS_PAGE } from './foxden-inputs.js';
 import { recipeSettings, recipeLines, copyText } from './foxden-recipe.js';
+import { studioState } from './studio-state.js';
+import { createCandidates, pathFromViewUrl } from './studio-candidates.js';
 
 const API = '/api/foxden';
 const esc = s => String(s).replace(/[&<>"]/g, c =>
@@ -82,6 +84,10 @@ registerModule({
             <div class="fx-loras" data-id="loras"></div></div>
         </div>
         <div class="fx-out" data-id="out"></div>
+        <div class="fx-cands" data-id="cands" hidden aria-label="Candidate outputs of this generation run"></div>
+        <label class="fx-saveall" data-id="saveall-wrap" title="When checked, finished outputs of this run are copied into the gallery bank automatically. Default off — promote candidates explicitly instead.">
+          <input type="checkbox" data-id="save-all"> save all outputs to gallery
+        </label>
       </div>
       <div class="fx-recentwrap" data-id="recentwrap">
         <div class="fx-rbar">
@@ -109,7 +115,7 @@ registerModule({
       'preset-pick', 'preset-lock', 'preset-save', 'preset-del',
       'icount', 'ireceipt', 'ichips', 'iup', 'iclear', 'ifile', 'isort', 'ifilter', 'imore', 'denoise', 'dval', 'go', 'status', 'out', 'recent', 'recentwrap',
       'refresh', 'rtoggle', 'rcount', 'big', 'bigmeta', 'reuse', 'bigclose', 'bigimg', 'recipe',
-      'bigprev', 'bignext'].map(k => [k, $(k)]));
+      'bigprev', 'bignext', 'cands', 'save-all'].map(k => [k, $(k)]));
 
     let aspect = 'landscape';
     let sizeIdx = 1;  // step 1 = pre-existing default size for every aspect
@@ -445,6 +451,14 @@ registerModule({
         if (s.state === 'done') {
           say(`done in ${Math.round((Date.now() - t0) / 1000)}s`, 'ok');
           el.out.innerHTML = '';
+          const runCands = (s.outputs || [])
+            .map(u => ({ url: u, path: pathFromViewUrl(u) }))
+            .filter(c => c.path);
+          cands.startRun(runCands);          // cleanup rule: replaces the strip
+          renderCandidates();
+          if (el['save-all'].checked && runCands.length) {
+            saveAllOutputs(runCands.map(c => c.path));
+          }
           for (const u of s.outputs) el.out.appendChild(thumb(u, false));
           loadRecent();
           return;
@@ -459,6 +473,52 @@ registerModule({
       throw new Error('timed out waiting for ComfyUI');
     }
     el.go.addEventListener('click', generate);
+
+    // ── candidate strip (Stage 2, decision #2): this run's outputs, click
+    // promotes to working image. No auto-save. The strip is replaced
+    // entirely by the NEXT run — unretrieved candidates die there.
+    const cands = createCandidates();
+    function renderCandidates() {
+      const list = cands.get();
+      el.cands.hidden = !list.length;
+      el.cands.innerHTML = '';
+      for (const c of list) {
+        const im = document.createElement('img');
+        im.src = c.url; im.alt = 'candidate';
+        im.className = 'fx-cand';
+        im.title = 'Use as working image';
+        im.addEventListener('click', () => {
+          studioState().set(c.path, 'foxden-output', { name: c.path.split('/').pop() });
+          say(`working image: ${c.path.split('/').pop()}`, 'ok');
+        });
+        el.cands.appendChild(im);
+      }
+    }
+    async function saveAllOutputs(paths) {
+      try {
+        const r = await fetch(`${API}/save-outputs`, { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths }) });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        say(`saved ${j.saved.length} output${j.saved.length === 1 ? '' : 's'} to gallery`, 'ok');
+      } catch (e) { say(`save all failed: ${e.message}`, 'err'); }
+    }
+    // Store-driven ReUse (Stage 2): the working image's provenance drives
+    // the form — the twin of the viewer's ReUse button, same data path the
+    // Update tab's "ReUse working" action uses.
+    window.addEventListener('ellieedit:reuse-settings', e => {
+      const r = e.detail;
+      if (!r) return;
+      if (r.prompt) el.prompt.value = r.prompt;
+      if (r.seed != null) { el.seed.value = r.seed; el['preset-lock'].checked = true; }
+      if (r.workflow && [...el.wf.options].some(o => o.value === r.workflow && !o.disabled)) el.wf.value = r.workflow;
+      pins.restoreFrom(r.loras || [], []);
+      renderLoras();
+      setDenoise(r.denoise ?? 1);
+      setInput(r.input_image || null);
+      say('applied working-image settings', 'ok');
+    });
 
     // ── viewer / recent ──
     // The zoom viewer cycles through a list, not just the tapped image:

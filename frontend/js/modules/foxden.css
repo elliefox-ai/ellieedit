@@ -94,3 +94,11 @@
 .fx-size input[type=range] { width:100%; min-height:44px; accent-color:#7a6aaa; }
 .fx-size [data-id="fx-sizeval"] { font-family:monospace; }
 [data-id="aspects"].dim { opacity:.4; }
+
+/* Stage 2 (2026-11-11): candidate strip + save-all checkbox */
+.fx-cands { display:flex; gap:6px; flex-wrap:wrap; padding:6px 0; }
+.fx-cands[hidden] { display:none; }
+.fx-cands .fx-cand { flex:0 0 auto; width:72px; height:72px; padding:0; border:2px solid #2a2a44;
+  border-radius:8px; background:#12121f; overflow:hidden; cursor:pointer; object-fit:cover; }
+.fx-cands .fx-cand:hover { border-color:#7a6aaa; box-shadow:0 0 0 2px #7a6aaa66; }
+.fx-saveall { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:#9a9ab8; padding:2px 0 6px; }

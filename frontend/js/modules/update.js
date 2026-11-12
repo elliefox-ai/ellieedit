@@ -96,6 +96,9 @@ function panelHTML() {
           <button class="ee-btn primary" data-act="upd-run" id="upd-run" disabled>▶ Run</button>
           <button class="ee-btn" data-act="upd-cancel" id="upd-cancel" disabled>✕ Cancel</button>
         </div>
+        <div class="upd-row">
+          <button class="ee-btn" data-act="upd-reuse-working" title="Apply the working image's generation settings to the FoxDen form (store-driven ReUse)">♻ ReUse working</button>
+        </div>
         <span class="upd-status" id="upd-status">send an image from the Gallery lightbox (✎ Update)</span>
       </section>
       <section class="upd-sec">
@@ -883,6 +886,22 @@ class UpdateView {
     }
     this.panel.querySelector('[data-act="upd-mask-paint"]')
       .addEventListener('click', () => { this.setMaskTool('paint'); });
+    // Store-driven ReUse (Stage 2): the working image's provenance becomes
+    // the recipe; FoxDen's form listens on the same event the viewer's
+    // ReUse data path feeds. No tab-lifecycle coupling — the store carries it.
+    this.panel.querySelector('[data-act="upd-reuse-working"]')
+      .addEventListener('click', async () => {
+        const recipe = await studioState().applySettingsTo();
+        const st = studioState().get();
+        if (!recipe) {
+          this.el.status.textContent = st.path
+            ? 'working image has no usable provenance record'
+            : 'no working image — set one from Gallery, Ladder, or a candidate';
+          return;
+        }
+        window.dispatchEvent(new CustomEvent('ellieedit:reuse-settings', { detail: recipe }));
+        this.el.status.textContent = `applied settings from ${st.name || st.path} — FoxDen form updated`;
+      });
     this.panel.querySelector('[data-act="upd-mask-erase"]')
       .addEventListener('click', () => { this.setMaskTool('erase'); });
     this.panel.querySelector('[data-act="upd-mask-clear"]')

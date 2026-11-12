@@ -833,3 +833,51 @@ def test_provenance_endpoint_returns_latest_recipe(client, env, monkeypatch):
     assert client.get("/api/foxden/provenance",
                       params={"path": "nope.png"}).status_code == 404
     assert client.get("/api/foxden/provenance", params={"path": ""}).status_code in (404, 422)
+
+
+# --------------------------------------------------- Stage 2: save-outputs
+
+def test_save_outputs_prefers_delivery_and_carries_provenance(client, env, monkeypatch):
+    """Stage 2 (decision #2): explicit save-all copies generation outputs into
+    the gallery bank, never overwrites, and records provenance carry with
+    source_module "studio"."""
+    from backend.routers import gallery as gallery_router
+    gal = env / "gallerybank"
+    gal.mkdir()
+    monkeypatch.setattr(gallery_router, "GALLERY_ROOT", gal)
+    (env / "share" / "_FoxDen").mkdir(parents=True, exist_ok=True)
+    (env / "share" / "_FoxDen" / "foxden_00001_.png").write_bytes(b"PNG1")
+    calls = fake_comfy(monkeypatch, {"/view?": (200, b"PNG2")})
+    r = client.post("/api/foxden/save-outputs", json={
+        "paths": ["foxden_00001_.png", "run_02/foxden_00002_.png"]})
+    assert r.status_code == 200
+    saved = r.json()["saved"]
+    assert saved == ["foxden_00001_.png", "foxden_00002_.png"]
+    assert (gal / "foxden_00001_.png").read_bytes() == b"PNG1"   # delivery copy preferred
+    assert (gal / "foxden_00002_.png").read_bytes() == b"PNG2"   # /view fallback
+    assert sum(p.startswith("/view?") for p, *_ in calls) == 1
+    # provenance: new records for both, carry parentage on the subfolder one
+    recs = {r_["path"]: r_ for r_ in _prov.read_records()}
+    assert recs["foxden_00001_.png"]["source_module"] == "studio"
+    assert recs["foxden_00002_.png"]["parent_image"] == "run_02/foxden_00002_.png"
+
+
+def test_save_outputs_never_overwrites_gallery_image(client, env, monkeypatch):
+    from backend.routers import gallery as gallery_router
+    gal = env / "gallerybank"
+    gal.mkdir()
+    monkeypatch.setattr(gallery_router, "GALLERY_ROOT", gal)
+    (env / "share" / "_FoxDen").mkdir(parents=True, exist_ok=True)
+    (env / "share" / "_FoxDen" / "foxden_00001_.png").write_bytes(b"NEW")
+    (gal / "foxden_00001_.png").write_bytes(b"ORIGINAL")
+    fake_comfy(monkeypatch, {})
+    r = client.post("/api/foxden/save-outputs", json={"paths": ["foxden_00001_.png"]})
+    assert r.status_code == 200
+    assert (gal / "foxden_00001_.png").read_bytes() == b"ORIGINAL"  # untouched
+    assert (gal / "foxden_00001_-1.png").read_bytes() == b"NEW"
+
+
+def test_save_outputs_nothing_findable_is_404(client, env, monkeypatch):
+    fake_comfy(monkeypatch, {"/view?": (404, b"nope")})
+    r = client.post("/api/foxden/save-outputs", json={"paths": ["ghost.png"]})
+    assert r.status_code == 404

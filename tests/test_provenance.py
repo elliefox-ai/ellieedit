@@ -53,6 +53,53 @@ def _read_log(p):
     return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
 
 
+# ------------------------------------------------------- mtime cache (Stage 2)
+
+def test_read_records_mtime_cache_invalidates_on_append(prov_path, monkeypatch):
+    """Stage 2 perf fix: read_records caches on the log's mtime, but an
+    appended record (the normal write path) must appear on the next read —
+    the cache may never serve stale history."""
+    monkeypatch.setattr(prov, "_records_cache", None)
+    assert prov.read_records() == []
+    # prime the cache with an empty-file read
+    prov.read_records()
+    prov.append_record(prov.build_record("a.png", "foxden", seed=1))
+    # force a strictly newer mtime: fast writers can land in the same
+    # filesystem timestamp tick as the priming stat
+    st = prov_path.stat()
+    os.utime(prov_path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    recs = prov.read_records()
+    assert len(recs) == 1 and recs[0]["path"] == "a.png"
+    prov.append_record(prov.build_record("b.png", "update", seed=2))
+    st = prov_path.stat()
+    os.utime(prov_path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    recs = prov.read_records()
+    assert [r["path"] for r in recs] == ["a.png", "b.png"]
+
+
+def test_read_records_cache_keeps_result_warm(prov_path, monkeypatch):
+    """The cache actually caches: same path, unchanged mtime, identical list
+    object returned without re-parsing."""
+    monkeypatch.setattr(prov, "_records_cache", None)
+    prov.append_record(prov.build_record("a.png", "foxden"))
+    first = prov.read_records()
+    second = prov.read_records()
+    assert first is second  # identity: no reparse, the cached list itself
+
+
+def test_read_records_cache_scoped_per_path(prov_path, tmp_path, monkeypatch):
+    """The cache key carries the path: two temp roots must not collide."""
+    monkeypatch.setattr(prov, "_records_cache", None)
+    other = tmp_path / "other" / "provenance.jsonl"
+    other.parent.mkdir()
+    prov.append_record(prov.build_record("a.png", "foxden"))
+    first = prov.read_records()
+    monkeypatch.setenv("ELLIEEDIT_PROVENANCE_PATH", str(other))
+    assert prov.read_records() == []
+    monkeypatch.setenv("ELLIEEDIT_PROVENANCE_PATH", str(prov_path))
+    assert [r["path"] for r in prov.read_records()] == ["a.png"]
+
+
 # ------------------------------------------------------------------ helper
 
 def test_build_record_absent_fields_are_none_not_invented():

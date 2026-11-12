@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  createStudioState, galleryFileUrl, WORKING_STORAGE_KEY,
+  createStudioState, galleryFileUrl, WORKING_STORAGE_KEY, recipeFromRecord,
 } from '../../frontend/js/modules/studio-state.js';
 
 function fakeStorage(initial = {}) {
@@ -157,4 +157,47 @@ test('same path set refreshes ts and re-emits (subscribers dedupe if they care)'
 
 test('galleryFileUrl: jailed URL shape matches Gallery.fileUrl primary branch', () => {
   assert.equal(galleryFileUrl('a b/c.png'), '/api/gallery/file?path=' + encodeURIComponent('a b/c.png'));
+});
+
+// ---- Stage 2: recipeFromRecord + applySettingsTo (store-driven ReUse) ----
+
+test('recipeFromRecord: usable record normalizes to the ReUse recipe shape', () => {
+  const r = recipeFromRecord({
+    prompt: 'a fox', workflow: 'klein', seed: 5, steps: 4, width: 1024, height: 1024,
+    denoise: 0.7, loras: [{ name: 'a.safetensors', strength_model: 0.8 }, null, { nope: 1 }],
+    input_image: 'src/x.png',
+  });
+  assert.deepEqual(r, {
+    prompt: 'a fox', workflow: 'klein', seed: 5, steps: 4, width: 1024, height: 1024,
+    denoise: 0.7, loras: [{ name: 'a.safetensors', strength_model: 0.8 }],
+    input_image: 'src/x.png',
+  });
+});
+
+test('recipeFromRecord: nothing usable -> null; junk input -> null', () => {
+  assert.equal(recipeFromRecord(null), null);
+  assert.equal(recipeFromRecord({}), null);
+  assert.equal(recipeFromRecord({ seed: 'x', loras: 'no' }), null);   // nothing numeric/string usable
+});
+
+test('applySettingsTo: refetches dirty provenance, applies and caches the snapshot', async () => {
+  let calls = 0;
+  const rec = { prompt: 'p', seed: 3, loras: [] };
+  const s = createStudioState({ fetchImpl: async () => { calls++; return { ok: true, status: 200, json: async () => rec }; } });
+  s.set('a.png', 'ladder');
+  await new Promise(r => setTimeout(r, 0));           // initial provenance fetch
+  const recipe = await s.applySettingsTo();
+  assert.equal(recipe.prompt, 'p');
+  assert.equal(recipe.seed, 3);
+  assert.deepEqual(recipe.loras, []);
+  assert.equal(s.get().settingsSnapshot.prompt, 'p');  // cached as the snapshot
+  assert.equal(calls, 1);                              // clean record: no extra fetch
+});
+
+test('applySettingsTo: unusable record returns null, snapshot untouched', async () => {
+  const s = createStudioState({ fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }) });
+  s.set('a.png', 'gallery');
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(await s.applySettingsTo(), null);
+  assert.equal(s.get().settingsSnapshot, null);
 });

@@ -11,6 +11,7 @@ import { registerModule } from '../shell.js';
 import { computeEdgeMap, buildRectMask } from '../edge-stop.js';
 import { ChampionLadder } from '../champion-ladder.js';
 import { bindPanZoom, mirrorView, ZOOM_MIN } from './pan-zoom.js';
+import { studioState } from './studio-state.js';
 
 function panelHTML() {
   return `
@@ -153,10 +154,12 @@ function panelHTML() {
           <div class="rr-fig champ">
             <img data-id="res-champ-img" alt="">
             <div class="rr-label" data-id="res-champ-label"></div>
+            <button class="ee-btn" data-act="res-champ-working" title="Load this image into the Studio working-image store. Never changes Ladder state (decision #5).">Use as working image</button>
           </div>
           <div class="rr-fig runner">
             <img data-id="res-runner-img" alt="">
             <div class="rr-label" data-id="res-runner-label"></div>
+            <button class="ee-btn" data-act="res-runner-working" title="Load this image into the Studio working-image store. Never changes Ladder state (decision #5).">Use as working image</button>
           </div>
         </div>
         <div class="rr-summary" data-id="res-summary"></div>
@@ -497,6 +500,15 @@ export class Review {
     this.el.stage.style.display = 'none';
   }
 
+  // Explicit 'use as working image' verb for a ladder result image.
+  useAsWorking(pick) {
+    const l = this.ladder;
+    const item = l && l.done ? pick(l) : null;
+    if (!item) { this.toast('no image to promote', true); return; }
+    studioState().set(item.path, 'ladder', { name: item.name });
+    this.toast(`working image: ${item.name}`);
+  }
+
   // Return to the grid with the champion highlighted so the operator sees
   // what the round decided.
   keepChampionExit() {
@@ -745,6 +757,11 @@ export class Review {
     act('res-keep-exit').addEventListener('click', () => this.keepChampionExit());
     act('res-redo').addEventListener('click', () => this.redoRound());
     act('res-send-pending').addEventListener('click', () => this.sendRejectedToPending());
+    // Explicit per-image verb (consolidation decision #5): Ladder never
+    // auto-sets the working image — only these buttons do, and they leave
+    // the ladder (selections, verdicts, results view) untouched.
+    act('res-champ-working').addEventListener('click', () => this.useAsWorking(l => l.champion));
+    act('res-runner-working').addEventListener('click', () => this.useAsWorking(l => l.runnerUp));
     act('mode-compare').addEventListener('click', () => {
       if (this.ladder) { this.showPair(); return; }
       this.toast('Select images in Gallery, then Ladder N', true);
