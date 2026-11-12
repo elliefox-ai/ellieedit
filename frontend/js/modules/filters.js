@@ -23,6 +23,7 @@
 // PUT /api/filters/last).
 
 import { registerModule, registerReceiver } from '../shell.js';
+import { studioState } from './studio-state.js';
 import { tuneImageData, tunesAreIdentity } from './filters-tunes.js';
 import { bindPanZoom } from './pan-zoom.js';
 
@@ -139,7 +140,7 @@ function panelHTML() {
       <div class="flt-row" style="padding:8px 12px;border-top:1px solid #2a2a44">
         <button class="ee-btn" data-act="view-filtered">Filtered</button>
         <button class="ee-btn" data-act="view-original">Original</button>
-        <button class="ee-btn" data-act="send-update">↗ Send to Update</button>
+        <button class="ee-btn" data-act="set-working" title="Store the filtered result and set it as the Studio working image — output-becomes-working">📌 Set as working image</button>
         <span class="flt-status" data-id="view-label"></span>
       </div>
     </div>
@@ -208,7 +209,7 @@ class Filters {
     act('save').addEventListener('click', () => this.saveToLibrary());
     act('view-filtered').addEventListener('click', () => { this.viewing = 'filtered'; this.renderCanvas(); });
     act('view-original').addEventListener('click', () => { this.viewing = 'original'; this.renderCanvas(); });
-    act('send-update').addEventListener('click', () => this.sendToUpdate());
+    act('set-working').addEventListener('click', () => this.promoteWorking());
     this.bindPanZoomControls();
     act('preset-save').addEventListener('click', () => this.savePreset());
     act('preset-del').addEventListener('click', () => this.deletePreset());
@@ -256,13 +257,14 @@ class Filters {
     if (this.applyPz) this.applyPz();
   }
 
-  // Send the currently filtered image into the Update tab flow: one
-  // bounded store write (same /api/filters/store path as commit, which
-  // now logs provenance for the new path), then the standard cross-tab
-  // send-to route — server url + provenance path, never a data url.
-  async sendToUpdate() {
+  // Stage 3 (P2 unified verb): the filtered output BECOMES the working
+  // image — one bounded store write (same /api/filters/store path as
+  // commit, now attributed to source_module "studio" like other Studio
+  // ops), then a direct store set (origin 'filters'). No Update-tab
+  // handoff: the working image IS the handoff (send-to-Update retired).
+  async promoteWorking() {
     if (!this.source || !this.baseImg) { this.setStatus('No image to send.', true); return; }
-    this.setStatus('Storing for Update…');
+    this.setStatus('Storing result…');
     try {
       this.viewing = 'filtered';
       this.renderCanvas();
@@ -276,16 +278,11 @@ class Filters {
       });
       const r = await fetch('/api/filters/store', { method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_b64: dataUrl }) });
+        body: JSON.stringify({ image_b64: dataUrl, source_module: 'studio' }) });
       if (!r.ok) throw new Error(`store failed: ${r.status}`);
       const { render_path } = await r.json();
-      window.dispatchEvent(new CustomEvent('ellieedit:send-to', { detail: {
-        target: 'update',
-        urls: [`/api/gallery/file?path=${encodeURIComponent(render_path)}`],
-        names: [`filtered ${this.source.name}`],
-        source: 'Filters',
-        provenance: { kind: 'filters', paths: [render_path] } } }));
-      this.setStatus(`Sent to Update: ${render_path}`);
+      studioState().set(render_path, 'filters', { name: `filtered ${this.source.name}` });
+      this.setStatus(`Working image: filtered ${this.source.name} → ${render_path}`);
     } catch (e) {
       this.setStatus(e.message, true);
     }

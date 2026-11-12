@@ -7,10 +7,11 @@
 
 // Bump on every deploy — shown in the job bar so a stale-cache client is
 // instantly visible.
-const BUILD = '2026-11-01c';
+const BUILD = '2026-11-12a';
 
 import { planSend } from './send-to.js';
 import { studioState } from './modules/studio-state.js';
+import { resolveHash } from './modules/studio-tabs.js';
 
 const registry = [];
 const mounted = new Map(); // name -> { panelEl }
@@ -113,7 +114,17 @@ function mountAll() {
     desc.mount(panel, jobbar);
   }
   if (registry.length) activate(registry[0].name);
+  // Deep-link compatibility (Stage 3): #foxden / #update bookmarks land
+  // on Studio; a live #tab-name hash still opens that tab. Re-applied on
+  // every hashchange so pasted links work mid-session.
+  applyHash();
 }
+
+function applyHash() {
+  const target = resolveHash(location.hash, registry.map(d => d.name));
+  if (target) activate(target);
+}
+window.addEventListener('hashchange', applyHash);
 
 // Cross-module tab activation (Gallery → Ladder handoff).
 window.addEventListener('ellieedit:activate', e => {
@@ -138,11 +149,14 @@ Promise.all([
   import(`./modules/facecycle.js?v=${BUILD}`),
   import(`./modules/review.js?v=${BUILD}`),
   import(`./modules/dupe.js?v=${BUILD}`),
-  import(`./modules/foxden.js?v=${BUILD}`),
   import(`./modules/puppet.js?v=${BUILD}`),
   import(`./modules/library.js?v=${BUILD}`),
-  import(`./modules/update.js?v=${BUILD}`),
   import(`./modules/filters.js?v=${BUILD}`),
+  // Stage 3: the merged Studio tab (FoxDen + Update surfaces mounted as
+  // sub-views). foxden.js/update.js stay in the tree unrouted for one
+  // release as the rollback path (design §5) — their exported register
+  // helpers restore the old tabs if ever re-imported.
+  import(`./modules/studio.js?v=${BUILD}`),
 ]).then(() => {
   buildTabs();
   mountAll();

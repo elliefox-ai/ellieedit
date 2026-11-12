@@ -17,12 +17,11 @@ const API = '/api/foxden';
 const esc = s => String(s).replace(/[&<>"]/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
-registerModule({
-  name: 'foxden',
-  label: 'FoxDen',
-  icon: '🦊',
-  order: 20,
-  mount(panel, jobbar) {
+// Stage 3 (Studio consolidation): the FoxDen/Update tabs are unrouted from
+// the shell; Studio mounts this same surface as a sub-view. Registration is
+// kept behind registerFoxdenTab() as the one-release rollback path (design
+// §5) — nothing else in this file changed for that.
+export function mountFoxden(panel, jobbar) {
     const css = document.createElement('link');
     css.rel = 'stylesheet';
     css.href = new URL('./foxden.css', import.meta.url).href;
@@ -456,6 +455,14 @@ registerModule({
             .filter(c => c.path);
           cands.startRun(runCands);          // cleanup rule: replaces the strip
           renderCandidates();
+          // Stage 3 output-becomes-working: a SINGLE-output run auto-promotes
+          // (origin 'foxden-output'). Multi-output runs keep the explicit
+          // candidate-click promote — the chip is governed by explicit action
+          // whenever more than one candidate exists (decision #2).
+          if (runCands.length === 1) {
+            studioState().set(runCands[0].path, 'foxden-output',
+              { name: runCands[0].path.split('/').pop() });
+          }
           if (el['save-all'].checked && runCands.length) {
             saveAllOutputs(runCands.map(c => c.path));
           }
@@ -636,7 +643,6 @@ registerModule({
         { label: '🎭 Puppet Theater — new layer', target: 'puppet', as: 'layer' },
         { label: '🎭 Puppet Theater — as background', target: 'puppet', as: 'background' },
         { label: '🎭 FaceCycle — as subject', target: 'facecycle' },
-        { label: '✎ Update', target: 'update' },
       ],
       getPayload: () => {
         if (!bigUrl) return { error: 'No render open.' };
@@ -781,5 +787,9 @@ registerModule({
       // an in-progress edit.
       if (e.detail?.name === 'foxden') { loadConfig(); loadPresets(); loadInputs(); loadRecent(); reconcile(false); }
     });
-  },
-});
+}
+
+// Rollback path only — Studio (shell.js) routes 'studio' instead.
+export function registerFoxdenTab() {
+  registerModule({ name: 'foxden', label: 'FoxDen', icon: '🦊', order: 20, mount: mountFoxden });
+}

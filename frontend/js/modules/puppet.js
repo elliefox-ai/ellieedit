@@ -1821,16 +1821,19 @@ registerModule({
       } catch (err) { say('Receive failed: ' + err.message, 'err'); }
     });
     el.tofox.addEventListener('click', async () => {
-      setBusy(el.tofox, true, '🦊 Sending…');
+      setBusy(el.tofox, true, '🎨 Sending…');
       try {
         await save();
         if (!projectId) throw new Error('nothing on the stage to send yet');
+        // Stage 3: FoxDen tab is unrouted — the composite goes to Studio as
+        // the working image (routeSend 'studio' → ellieedit:studio-set-
+        // working; Studio uploads url-only payloads via /api/filters/store).
         window.dispatchEvent(new CustomEvent('ellieedit:send-to', { detail: {
-          target: 'foxden',
+          target: 'studio',
           urls: [`${API}/projects/${projectId}/export.png`],
           names: [`puppet-${projectId}.png`],
           source: 'Puppet Theater' } }));
-      } catch (err) { say('Send to FoxDen failed: ' + err.message, 'err'); }
+      } catch (err) { say('Send to Studio failed: ' + err.message, 'err'); }
       finally { setBusy(el.tofox, false); }
     });
 

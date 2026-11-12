@@ -215,6 +215,10 @@ def apply(body: ApplyBody):
 
 class StoreBody(BaseModel):
     image_b64: str = ""
+    # Stage 3: Studio-context callers attribute the stored output to
+    # "studio" (design §3 source_module rule); the default keeps the
+    # pre-Studio "filters" value valid for old callers.
+    source_module: str = "filters"
 
 
 @router.post("/store")
@@ -228,7 +232,8 @@ def store(body: StoreBody):
         # Provenance for every stored filter output (Chunk B: the send-to
         # Update path hands this path to Update's save-family, which then
         # carries it forward). Best-effort, like every provenance write.
-        _prov.record_for_image(f"ellieedit_tmp/filters/{name}", "filters")
+        module = body.source_module if body.source_module in ("filters", "studio") else "filters"
+        _prov.record_for_image(f"ellieedit_tmp/filters/{name}", module)
     except OSError as e:
         log.warning("[filters] store failed: %s", e)
         raise HTTPException(502, f"could not store result: {e}")

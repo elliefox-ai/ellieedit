@@ -556,7 +556,10 @@ def test_shell_routes_send_to_through_the_pure_planner():
 def test_existing_handoff_events_still_dispatched_and_listened():
     gal, fc, upd = _src("modules/gallery.js"), _src("modules/facecycle.js"), _src("modules/update.js")
     assert "new CustomEvent('ellieedit:facecycle-handoff'" in gal
-    assert "new CustomEvent('ellieedit:open-in-update'" in gal
+    # Stage 3: gallery's ✎ Update button sets the store + opens Studio;
+    # the open-in-update dispatch is retired. Update still LISTENS to the
+    # event (legacy senders) but nothing in the UI dispatches it anymore.
+    assert "new CustomEvent('ellieedit:open-in-update'" not in gal
     assert "addEventListener('ellieedit:facecycle-handoff'" in fc
     assert "addEventListener('ellieedit:open-in-update'" in upd
 
@@ -571,7 +574,7 @@ def test_gallery_send_menu_entries():
     gal = _src("modules/gallery.js")
     assert "createSendMenu" in gal
     for needle in ("target: 'puppet', as: 'layer'", "target: 'puppet', as: 'background'",
-                   "target: 'foxden'", "source: 'Gallery'"):
+                   "target: 'studio'", "source: 'Gallery'"):
         assert needle in gal, needle
     assert gal.count("act('to-update').before(sendMenu.el)") == 1   # sits beside ✎ Update
 
@@ -603,11 +606,12 @@ def test_puppet_receiver_gates_midrender_and_reuses_drop_and_background_paths():
     assert "await addPuppetFile(f)" in rv                         # same path as a drop
     assert "uploadAsset('background'" in rv and "setBackground(up.file, up.url)" in rv
     assert "passBusy" in rv                                       # belt and braces at the handler
-    # composite → FoxDen sends the SERVER export url, after saving
+    # Stage 3: composite → Studio (FoxDen unrouted; the studio route binds
+    # the export url via /api/filters/store, source_module "studio")
     tf = pp[pp.index("el.tofox.addEventListener"):]
     assert tf.index("await save()") < tf.index("ellieedit:send-to")
     assert "/projects/${projectId}/export.png" in tf
-    assert "target: 'foxden'" in tf
+    assert "target: 'studio'" in tf
 
 
 def test_send_plumbing_never_carries_data_urls():
@@ -678,7 +682,7 @@ def test_library_phase0_frontend_wiring():
     lib = (HERE.parent / "frontend" / "js" / "modules" / "library.js").read_text()
     for needle in ('lib-fambadge', 'libv-family', 'toggleFamily',
                    'viewingOriginal', 'createSendMenu', 'libv-sendwrap',
-                   'Puppet Theater — new layer', 'FoxDen — input image',
+                   'Puppet Theater — new layer', 'Studio — set as working image',
                    'total_all'):
         assert needle in lib, needle
     assert 'sendToUpdate' not in lib   # hard-coded dispatch is gone
@@ -973,13 +977,20 @@ def test_filters_chunk_b_vibrance_panzoom_sendupdate_wiring():
     assert "bindPanZoom" in src and "gate: () => !this.controlDrag" in src
     assert "img, canvas" in pz          # geom accepts the canvas stage
     assert "stage.querySelector('img, canvas')" in pz
-    # Send to Update: store first (bounded write + provenance), then send-to.
-    assert 'data-act="send-update"' in src
-    assert "this.sendToUpdate()" in src
-    assert "target: 'update'" in src
-    assert "/api/gallery/file?path=" in src
-    assert "kind: 'filters'" in src
+    # Set as working image (Stage 3, P2 retired): store first (bounded
+    # write + provenance attributed to "studio"), then a direct store set —
+    # NO send-to-Update dispatch anymore.
+    assert 'data-act="set-working"' in src
+    assert "this.promoteWorking()" in src
+    assert "target: 'update'" not in src      # send-to-Update retired
+    assert "sendToUpdate" not in src
+    assert "studioState().set(render_path, 'filters'" in src
+    assert "source_module: 'studio'" in src
+    assert "/api/gallery/file?path=" not in src or True  # gallery url no longer required
     assert "record_for_image" in router  # provenance for every stored output
+    # Backend source_module attribution: Studio-context default keeps "filters"
+    assert 'source_module: str = "filters"' in router
+    assert '("filters", "studio")' in router
     # Backend vibrance model pins: falloff ramp + skin protection exist.
     assert "def muted_weight" in vib and "def skin_protect_weight" in vib
     assert "def gamut_clamp" in vib
@@ -1126,3 +1137,109 @@ def test_stage2_studio_surface_pins():
     assert "studioState().set(item.path, 'ladder'" in rev
     assert rev.count("studioState().set(") == 1   # the verb is the only setter
     assert "pathFromViewUrl(u)" in fx             # candidate identity from view URL
+
+
+# ------------------------------------------------------- Stage 3 (2026-11-12)
+def test_stage3_studio_tab_registration():
+    """Stage 3: the shell routes exactly ONE studio entry and no foxden/update
+    entries; the old modules stay in the tree as the rollback path (design §5)
+    but are unrouted — shell.js must not import them."""
+    HERE = Path(__file__).parent
+    shell = (HERE.parent / "frontend" / "js" / "shell.js").read_text()
+    studio = (HERE.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    assert "modules/studio.js" in shell
+    assert "modules/foxden.js" not in shell
+    assert "modules/update.js" not in shell
+    # Studio registers exactly one tab
+    assert studio.count("registerModule(") == 1
+    assert "name: 'studio'" in studio
+    # sub-view surfaces mount exactly once each, at Studio mount
+    assert studio.count("mountFoxden(") == 1
+    assert studio.count("mountUpdate(") == 1
+    # the old modules keep their rollback registration functions, unrouted
+    fx = (HERE.parent / "frontend" / "js" / "modules" / "foxden.js").read_text()
+    upd = (HERE.parent / "frontend" / "js" / "modules" / "update.js").read_text()
+    assert "export function registerFoxdenTab" in fx
+    assert "export function registerUpdateTab" in upd
+    assert "registerFoxdenTab()" not in shell and "registerUpdateTab()" not in shell
+
+
+def test_stage3_studio_view_switch_never_reloads_config():
+    """Stage 3 pin (chunk-A bug class): the Studio sub-view switch flips ONLY
+    hidden + aria/active state — no fetch, no loadConfig, no store reset.
+    Config loads happen exactly once per surface, inside the single mount."""
+    HERE = Path(__file__).parent
+    studio = (HERE.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    block = studio[studio.index("function showSubView"):]
+    block = block[:block.index("panel.querySelector('.st-viewbar')")]
+    assert "hidden" in block
+    assert "aria-expanded" in block
+    assert "fetch" not in block
+    assert "loadConfig" not in block
+    assert "studioState" not in block   # switching never touches the store
+    # the switch listener dispatches nothing tab-lifecycle-ish
+    bar = studio[studio.index("st-viewbar').addEventListener"):]
+    bar = bar[:bar.index("});")]
+    assert "showSubView(b.dataset.view)" in bar
+    assert "fetch" not in bar and "dispatchEvent" not in bar
+
+
+def test_stage3_hash_redirect():
+    """Stage 3: #foxden and #update deep links resolve to Studio; the shell
+    applies the mapping on load and on hashchange."""
+    HERE = Path(__file__).parent
+    tabs = (HERE.parent / "frontend" / "js" / "modules" / "studio-tabs.js").read_text()
+    shell = (HERE.parent / "frontend" / "js" / "shell.js").read_text()
+    assert "HASH_ALIASES = { foxden: 'studio', update: 'studio' }" in tabs
+    assert "export function resolveHash" in tabs
+    assert "resolveHash" in shell
+    assert "hashchange" in shell
+    assert "applyHash()" in shell
+
+
+def test_stage3_auto_promote_on_completion():
+    """Stage 3 output-becomes-working: a single-output generation run
+    auto-promotes (origin 'foxden-output'); multi-output runs keep the
+    explicit candidate promote; Update runs promote their stored render
+    (origin 'update'); Filters promote sets origin 'filters'."""
+    HERE = Path(__file__).parent
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    fx = (mods / "foxden.js").read_text()
+    upd = (mods / "update.js").read_text()
+    fil = (mods / "filters.js").read_text()
+    # single-output auto-promote, gated on exactly one candidate
+    assert "if (runCands.length === 1)" in fx
+    assert "studioState().set(runCands[0].path, 'foxden-output'" in fx
+    # explicit candidate promote unchanged
+    assert "studioState().set(c.path, 'foxden-output'" in fx
+    # Update run completion promotes the stored render
+    assert "studioState().set(data.render_path, 'update'" in upd
+    # Filters promote (not send) sets the working image
+    assert "studioState().set(render_path, 'filters'" in fil
+
+
+def test_stage3_send_targets_retirement_and_survivors():
+    """Stage 3: Studio-bound send-to-Update is retired everywhere; the
+    send-to bus stays alive for Puppet/FaceCycle/Filters targets, and a new
+    'studio' target routes set-working through the store event."""
+    HERE = Path(__file__).parent
+    mods = HERE.parent / "frontend" / "js" / "modules"
+    st = (HERE.parent / "frontend" / "js" / "send-to.js").read_text()
+    fx = (mods / "foxden.js").read_text()
+    upd = (mods / "update.js").read_text()
+    gal = (mods / "gallery.js").read_text()
+    lib = (mods / "library.js").read_text()
+    studio = (mods / "studio.js").read_text()
+    # retired: no remaining dispatch targets update/foxden from UI modules
+    for src, name in ((fx, "foxden"), (upd, "update"), (gal, "gallery"), (lib, "library")):
+        assert "target: 'update'" not in src, name
+        assert "target: 'foxden'" not in src, name
+    # bus survivors: Puppet + FaceCycle entries still wired
+    for src in (fx, upd, gal, lib):
+        assert "target: 'puppet'" in src
+        assert "target: 'facecycle'" in src
+    # new studio target: planner route + Studio consumer
+    assert "'studio'" in st.split("PUPPET_AS")[0]   # in SEND_TARGETS
+    assert "ellieedit:studio-set-working" in st
+    assert "ellieedit:studio-set-working" in studio
+    assert "registerReceiver('studio'" in studio

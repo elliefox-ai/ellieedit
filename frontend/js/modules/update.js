@@ -587,6 +587,13 @@ class UpdateView {
       // user opens Compare deliberately, and it starts closed (100%).
       this.compareOn = false; this.cmpPct = 100;
       this.showCurrent();
+      // Stage 3 output-becomes-working: a completed run auto-promotes its
+      // stored render to the working image (origin 'update'). Unstored
+      // renders (storage failure) cannot address a path — they stay
+      // session-only on the stack.
+      if (data.render_path) {
+        studioState().set(data.render_path, 'update', { name: `render seed=${data.seed}` });
+      }
       this.el.status.textContent = data.render_path
         ? `render done (seed ${data.seed})`
         : `render done (seed ${data.seed}) — warning: render could not be stored, Save is unavailable`;
@@ -979,7 +986,6 @@ class UpdateView {
           { label: '🎛 Filters', target: 'filters' },
           { label: '🎭 Puppet Theater — new layer', target: 'puppet', as: 'layer' },
           { label: '🎭 Puppet Theater — as background', target: 'puppet', as: 'background' },
-          { label: '🦊 FoxDen — input image', target: 'foxden' },
         ],
         getPayload: () => {
           const entry = this.stack && current(this.stack);
@@ -1145,10 +1151,12 @@ class UpdateView {
   }
 }
 
-registerModule({
-  name: 'update',
-  label: 'Update',
-  icon: '✎',
-  order: 0,
-  mount: (panel) => new UpdateView(panel),
-});
+// Stage 3: Studio mounts this same surface as a sub-view; the standalone
+// tab registration moves behind registerUpdateTab() (one-release rollback
+// path, design §5).
+export function mountUpdate(panel) { return new UpdateView(panel); }
+
+// Rollback path only — Studio (shell.js) routes 'studio' instead.
+export function registerUpdateTab() {
+  registerModule({ name: 'update', label: 'Update', icon: '✎', order: 0, mount: (panel) => new UpdateView(panel) });
+}

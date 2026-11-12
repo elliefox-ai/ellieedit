@@ -216,7 +216,7 @@ function panelHTML() {
       <span class="fname" data-id="viewer-name"></span>
       <button class="ee-btn primary" data-act="viewer-promote" title="Promote to Library (P)">⬆ Promote</button>
       <button class="ee-btn" data-act="set-working" title="Set as the Studio working image — stays loaded across tabs and reloads">📌 Working</button>
-      <button class="ee-btn" data-act="to-update" title="Open in Update tab (version stack)">✎ Update</button>
+      <button class="ee-btn" data-act="to-update" title="Set as the Studio working image and open Studio (Refine view)">🎨 Studio</button>
       <button class="ee-btn danger" data-act="viewer-delete" title="Mark for deletion (Delete key) — nothing is deleted until you confirm in the Deletion view">🗑 Delete</button>
       <button class="ee-btn" data-act="viewer-zoom-out" title="Zoom out">−</button>
       <button class="ee-btn" data-act="viewer-zoom-in" title="Zoom in">＋</button>
@@ -1396,7 +1396,7 @@ export class Gallery {
       entries: [
         { label: '🎭 Puppet Theater — new layer', target: 'puppet', as: 'layer' },
         { label: '🎭 Puppet Theater — as background', target: 'puppet', as: 'background' },
-        { label: '🦊 FoxDen — input image', target: 'foxden' },
+        { label: '🎨 Studio — set as working image', target: 'studio' },
         { label: '→ FaceCycle', target: 'facecycle' },
         { label: '🎛 Filters', target: 'filters' },
       ],
@@ -1412,12 +1412,11 @@ export class Gallery {
     act('to-update').addEventListener('click', () => {
       const item = this.items[this.viewIdx];
       if (!item) return;
-      // Stage 1: send-to-Update now also loads the store — Update may
-      // consume the change from either path; same-path reload is a no-op.
+      // Stage 3: the working image IS the Update handoff. Store set, then
+      // open Studio — the refine sub-view consumes the working image via
+      // the store subscription (no per-tab open-in-update reset).
       studioState().set(relOf(item), 'gallery', { name: item.name });
-      window.dispatchEvent(new CustomEvent('ellieedit:open-in-update',
-        { detail: { url: this.fileUrl(item), name: item.name, path: relOf(item) } }));
-      window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'update' } }));
+      window.dispatchEvent(new CustomEvent('ellieedit:activate', { detail: { name: 'studio' } }));
       this.closeViewer();
     });
     this.el.viewerImg.addEventListener('click', e => {

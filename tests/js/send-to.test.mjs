@@ -9,7 +9,7 @@ import { planFaceCycleHandoff } from '../../frontend/js/handoff.js';
 const G = '/api/gallery/file?path=out%2Fa.png';
 
 test('targets: the five tabs the matrix touches (Filters joined 2026-10-31)', () => {
-  assert.deepEqual([...SEND_TARGETS].sort(), ['facecycle', 'filters', 'foxden', 'puppet', 'update']);
+  assert.deepEqual([...SEND_TARGETS].sort(), ['facecycle', 'filters', 'foxden', 'puppet', 'studio', 'update']);
 });
 
 test('refuses unknown targets and empty / junk payloads', () => {

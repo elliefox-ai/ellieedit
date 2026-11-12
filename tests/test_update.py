@@ -529,8 +529,11 @@ def test_update_save_base_mask_send_frontend_wiring():
                    '/api/update/save-new', 'upd-mask-reapply',
                    'Re-apply last mask', 'createSendMenu',
                    "target: 'facecycle'", "target: 'filters'",
-                   "target: 'foxden'", 'upd-forward', 'No base set yet'):
+                   'upd-forward', 'No base set yet'):
         assert needle in upd, needle
+    # Stage 3: the FoxDen send target is retired (Studio-bound handoff died
+    # with the merged tab); Puppet/FaceCycle/Filters entries remain.
+    assert "target: 'foxden'" not in upd
     assert 'data-act="upd-swap"' not in upd
     assert 'no base yet' not in upd
     stack = (REPO / "frontend" / "js" / "modules" / "update-stack.js").read_text()
@@ -546,7 +549,10 @@ def test_update_inpaint_frontend_wiring():
                    'masked-inpaint', 'paint a region to regenerate first'):
         assert needle in upd, needle
     fx = (REPO / "frontend" / "js" / "modules" / "foxden.js").read_text()
-    assert "{ label: '✎ Update', target: 'update' }" in fx
+    # Stage 3: FoxDen's send-to-Update entry is retired (output-becomes-working);
+    # the Puppet/FaceCycle send entries survive on the shared bus.
+    assert "target: 'update'" not in fx
+    assert "target: 'facecycle'" in fx and "target: 'puppet'" in fx
 
 
 # ---------------------------------------------------------------------------

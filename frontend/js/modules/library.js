@@ -1265,17 +1265,16 @@ class LibraryView {
       if (item) this.openMeta([item.path], item.meta || {}, false);
     });
     this.el.vFamily.addEventListener('click', () => this.toggleFamily());
-    // Send to ▸ (Phase 0): replaces the hard-coded ✎ Update dispatch with
-    // the v1.4 shell router — Update stays reachable, Puppet / FoxDen /
-    // FaceCycle join it. The viewer closes on send, as before.
+    // Send to ▸ (Phase 0 → Stage 3): Update's entry is retired — the
+    // Studio entry below IS the handoff (set-working). Puppet /
+    // FaceCycle remain on the shared bus. The viewer closes on send.
     const sendMenu = createSendMenu({
       className: 'ee-btn',
       entries: [
         { label: '🎭 Puppet Theater — new layer', target: 'puppet', as: 'layer' },
         { label: '🎭 Puppet Theater — as background', target: 'puppet', as: 'background' },
-        { label: '🦊 FoxDen — input image', target: 'foxden' },
+        { label: '🎨 Studio — set as working image', target: 'studio' },
         { label: '→ FaceCycle', target: 'facecycle' },
-        { label: '✎ Update', target: 'update' },
       ],
       getPayload: () => {
         const item = this.items[this.viewIdx];

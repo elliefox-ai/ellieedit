@@ -12,7 +12,7 @@
 // Back-compat: facecycle and update keep their original events (and
 // payload shapes); this module only maps onto them.
 
-export const SEND_TARGETS = ['facecycle', 'update', 'puppet', 'foxden', 'filters'];
+export const SEND_TARGETS = ['facecycle', 'update', 'puppet', 'foxden', 'filters', 'studio'];
 
 // Puppet accepts a new puppet layer or the stage background.
 export const PUPPET_AS = ['layer', 'background'];
@@ -107,6 +107,14 @@ export function routeSend(detail) {
     const detail = { urls, names, path: d.path, source: source || 'Gallery' };
     if (recipe) detail.recipe = recipe;
     return { target, label, events: [{ type: 'ellieedit:filters-receive', detail }] };
+  }
+  if (target === 'studio') {
+    // Stage 3 unified verb: "set as working image". First url wins; the
+    // provenance path (a jailed gallery rel path) is what the store keeps.
+    const d = { url: urls[0], name: names[0], source: source || 'Gallery' };
+    if (provenance && Array.isArray(provenance.paths) && provenance.paths[0]) d.path = provenance.paths[0];
+    if (recipe) d.recipe = recipe;
+    return { target, label, events: [{ type: 'ellieedit:studio-set-working', detail: d }] };
   }
   if (target === 'update') {
     // Update holds one source image: first url wins (same as its own handoff).
