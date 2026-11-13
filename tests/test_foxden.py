@@ -288,7 +288,10 @@ def test_config_scans_loras_and_reports_reachability(client, monkeypatch):
     assert c["comfy_reachable"] is True
     assert {w["id"]: w["available"] for w in c["workflows"]} == {
         "klein": True, "krea2": False, "zengorestyle": False, "qwen21": False,
-        "moss": False}  # restyle 2026-10-20, qwen21 2026-10-23, moss 2026-10-26
+        "moss": False, "klein-edit": False}  # restyle 2026-10-20, qwen21 2026-10-23, moss 2026-10-26, klein-edit 2026-11-13 (json lives in data workflows dir, not the test fixture)
+    assert {w["id"]: w["edit"] for w in c["workflows"]} == {
+        "klein": False, "krea2": False, "zengorestyle": False, "qwen21": False,
+        "moss": False, "klein-edit": True}  # edit graphs report themselves
 
 
 def test_config_comfy_unreachable_is_graceful(client, monkeypatch):

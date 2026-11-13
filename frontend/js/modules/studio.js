@@ -436,6 +436,7 @@ export function mountStudio(panel, jobbar) {
   let busy = false;
   let aspect = 'landscape', sizeIdx = 1;
   let allLoras = [];
+  let wfDefs = [];            // config workflow entries ({id, available, edit})
   const pins = createPins();
   const cands = createCandidates();
   let restored = false;
@@ -852,7 +853,17 @@ export function mountStudio(panel, jobbar) {
     const collected = [];
     try {
       const denoise = parseFloat(el.denoise.value) || 1;
-      const useInput = denoise < 1 ? await prepareInput() : null;
+      const wfDef = wfDefs.find(w => w.id === el.wf.value);
+      const isEdit = !!(wfDef && wfDef.edit);
+      const st0 = studioState().get();
+      if (isEdit && !st0.path) {
+        say('edit workflows need a working image — set one from Gallery or a candidate first', true);
+        busy = false; el.runbtn.disabled = false; el.genfab.disabled = false;
+        el.strip.classList.remove('st-running'); setFabProgress(0, '');
+        return;
+      }
+      // edit graphs consume the reference at any denoise — always inject
+      const useInput = (denoise < 1 || isEdit) ? await prepareInput() : null;
       let seed = nextSeed({ locked: el.lock.checked, current: el.seed.value });
       for (let i = 0; i < batch; i++) {
         if (i > 0 && !el.lock.checked) seed = String(Math.floor(Math.random() * 2 ** 31));
@@ -957,6 +968,7 @@ export function mountStudio(panel, jobbar) {
         `<option value="${w.id}" ${w.available ? '' : 'disabled'}>${esc(w.id)}${w.available ? '' : ' (file missing)'}</option>`).join(''),
         c.default_workflow);
       allLoras = c.loras;
+      wfDefs = c.workflows || [];
       renderLoras();
     } catch (e) { say('config failed: ' + e.message, true); }
   }

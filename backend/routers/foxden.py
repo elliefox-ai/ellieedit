@@ -391,11 +391,14 @@ def reachable() -> bool:
         return False
 
 
+EDIT_WORKFLOWS = {"klein-edit"}   # reference-image graphs: always feed the working image
+
 @router.get("/config")
 def config():
     return {
         "workflows": [{"id": k, "file": v,
-                       "available": (workflows_dir() / v).is_file()}
+                       "available": (workflows_dir() / v).is_file(),
+                       "edit": k in EDIT_WORKFLOWS}
                       for k, v in WORKFLOW_FILES.items()],
         "default_workflow": "klein",
         "loras": scan_loras(),
