@@ -891,9 +891,9 @@ export function mountStudio(panel, jobbar) {
       cands.startRun(collected);
       renderCandidates();
       showToast(`Run complete — ${collected.length} candidate${collected.length === 1 ? '' : 's'}`);
-      if (collected.length === 1) {
-        studioState().set(collected[0].path, 'foxden-output', { name: collected[0].path.split('/').pop() });
-      }
+      // No auto-promote (decision §7.2/§10): outputs become the working
+      // image only on explicit candidate selection — otherwise edit chains
+      // silently drift off the user's chosen source image.
       if (el['save-all'].checked && collected.length) await saveAllOutputs(collected.map(c => c.path));
       flashOverlayInImmersive();
       say(`done — ${collected.length} candidate${collected.length === 1 ? '' : 's'}`);
