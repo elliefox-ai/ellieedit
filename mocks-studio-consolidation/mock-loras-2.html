@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LoRAs mock v2 — folder accordion + workflow-default filter</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0d0d18; color: #d8d8ee; font: 14px/1.45 system-ui, sans-serif; }
+  .wrap { max-width: 480px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 15px; color: #b39ae0; margin: 0 0 4px; }
+  .sub { font-size: 11px; color: #6c6c8e; margin-bottom: 14px; }
+  /* workflow context strip */
+  .wfstrip { display: flex; align-items: center; gap: 8px; background: #161628; border: 1px solid #2a2a44;
+             border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; font-size: 12px; }
+  .wfstrip b { color: #b39ae0; }
+  .wfstrip .switch { margin-left: auto; color: #8a8aaa; font-size: 11px; border: 1px solid #4a4a6c;
+                     border-radius: 6px; padding: 4px 8px; cursor: pointer; background: none; }
+  .wfstrip .switch.sel { background: #b39ae033; color: #e6dbff; }
+  /* search */
+  .search { width: 100%; box-sizing: border-box; background: #12121f; border: 1px solid #2a2a44; color: #d8d8ee;
+            border-radius: 8px; padding: 10px 12px; min-height: 20px; font-size: 13px; margin-bottom: 10px; }
+  /* accordion */
+  .acc { border: 1px solid #2a2a44; border-radius: 10px; overflow: hidden; background: #12121f; }
+  .acc-head { display: flex; align-items: center; gap: 8px; padding: 11px 12px; cursor: pointer;
+              border-bottom: 1px solid #1c1c30; user-select: none; }
+  .acc-head:hover { background: #161628; }
+  .acc-head .tw { color: #6c6c8e; font-size: 10px; width: 12px; }
+  .acc-head .name { font-weight: 600; font-size: 13px; }
+  .acc-head .count { color: #6c6c8e; font-size: 11px; }
+  .acc-head .badge { font-size: 10px; background: #b39ae033; color: #e6dbff; border-radius: 4px; padding: 2px 6px; }
+  .acc-head .pins { margin-left: auto; font-size: 11px; color: #b39ae0; }
+  .acc.open .acc-head { background: #161628; }
+  .acc-body { display: none; }
+  .acc.open .acc-body { display: block; }
+  /* sub-filter chips inside open folder */
+  .subs { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 12px 0; }
+  .subs button { background: none; border: 1px solid #4a4a6c; color: #8a8aaa; border-radius: 14px;
+                 font-size: 11px; padding: 4px 10px; min-height: 26px; cursor: pointer; }
+  .subs button.on { background: #b39ae033; color: #e6dbff; border-color: #b39ae0; }
+  /* lora rows */
+  .rows { padding: 8px 12px 12px; }
+  .row { display: flex; align-items: center; gap: 10px; min-height: 44px; border-bottom: 1px solid #1c1c30; }
+  .row:last-child { border-bottom: 0; }
+  .row .rn { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row.parked .rn { color: #6c6c8e; text-decoration: dashed underline; }
+  .row .str { font-size: 11px; color: #b39ae0; background: #161628; border-radius: 4px; padding: 2px 6px; }
+  .row button { background: none; border: 1px solid #4a4a6c; color: #8a8aaa; border-radius: 6px;
+                font-size: 12px; min-width: 40px; min-height: 34px; cursor: pointer; }
+  .row button.pin { color: #e6dbff; }
+  .row .slider { display: none; width: 100%; margin: 6px 0; }
+  .row.exp .slider { display: block; }
+  .rowdet { display: none; padding-bottom: 8px; }
+  .row.exp + .rowdet, .wrapdet { }
+  /* pinned tray summary at bottom */
+  .tray { position: sticky; bottom: 0; background: #161628ee; border: 1px solid #2a2a44; border-radius: 10px;
+          padding: 10px 12px; margin-top: 12px; font-size: 12px; }
+  .tray .warn-amber { color: #e0b34d; }
+  .tray .warn-red { color: #e05a5a; }
+  .note { font-size: 11px; color: #6c6c8e; margin-top: 14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>LoRAs — v2 mock</h1>
+  <div class="sub">folder accordion · workflow-default filter · rough (sample data mirrors real counts, 2026-11-13)</div>
+
+  <div class="wfstrip">
+    <span>Workflow <b id="wfname">Klein 4B</b></span>
+    <span style="color:#6c6c8e">→ defaults to</span>
+    <b id="wffolder" style="color:#b39ae0">_Flux2Klein</b>
+    <button class="switch sel" id="btn-def">Default view</button>
+    <button class="switch" id="btn-all">All folders</button>
+  </div>
+
+  <input class="search" id="q" placeholder="search all 983 loras…">
+
+  <div class="acc" id="acc"></div>
+
+  <div class="tray" id="tray"></div>
+
+  <div class="note">Notes for review: (1) workflow change auto-switches the default folder —
+  klein→_Flux2Klein · krea2→_Krea2 · qwen21→_Qwen21 · moss→moss · zengorestyle→_Flux2Klein.
+  (2) sub-chips come from real second-level folders (Style, Anatomy, Artist, Personal, Tool…).
+  (3) pinned count shown per folder in the header so you can see where your pins live.
+  (4) search always spans every folder.</div>
+</div>
+
+<script>
+// real counts from Megatron object_info, 2026-11-13
+const TREE = {
+  '_Flux2Klein': { def: true, subs: { Style: 26, Sex: 19, Personal: 18, Anatomy: 15, Tool: 9, Apparel: 7, Babe: 6, Function: 5 } },
+  '_Krea2':      { subs: { Style: 74, Anatomy: 57, Artist: 43, Tool: 14, Babes: 7, Personal: 7, Sex: 7, Clothing: 5 } },
+  '_Flux':       { subs: { Artist: 53, Style: 40, Personal: 13, Anatomy: 9, Babe: 1 } },
+  '_XL':         { subs: { Artist: 98, Style: 89, Context: 24, Anatomy: 19, Expression: 17, Composition: 11, Pose: 11, Outfit: 7 } },
+  '_SD15':       { subs: { Artist: 57, Style: 48, Personal: 3, Pose: 1 } },
+  'moss':        { subs: { Style: 60, Anatomy: 3, Babe: 2, Outfit: 1 } },
+  '_ZImageTurbo':{ subs: { Style: 17, Babe: 5, Outfit: 4, Tool: 3, Composition: 2, Personal: 2, Anatomy: 1, Character: 1 } },
+  '_Qwen21':     { subs: { Tools: 4, Style: 1 } },
+};
+const WFDATA = {
+  klein: { label: 'Klein 4B', folder: '_Flux2Klein' },
+  krea2: { label: 'Krea2', folder: '_Krea2' },
+  qwen21:{ label: 'Qwen2.1', folder: '_Qwen21' },
+  moss:  { label: 'MOSS', folder: 'moss' },
+  zengorestyle: { label: 'ZengoRestyle', folder: '_Flux2Klein' },
+};
+const WORKFLOWS = Object.keys(WFDATA);
+let wf = 'klein', defaultOnly = true, openRoot = null, subSel = null;
+const pins = new Map();  // name -> strength
+let expRow = null;
+
+const rootTotal = s => Object.values(s.subs).reduce((a, b) => a + b, 0);
+const rootOrder = () => {
+  const def = WFDATA[wf].folder;
+  const keys = Object.keys(TREE);
+  return [def, ...keys.filter(k => k !== def)];
+};
+
+function sampleName(root, sub, i) { return `${root}/${sub}/lora-sample-${i + 1}.safetensors`; }
+
+function renderAcc() {
+  const acc = document.getElementById('acc');
+  acc.innerHTML = '';
+  for (const root of rootOrder()) {
+    const info = TREE[root];
+    const defFolder = root === WFDATA[wf].folder;
+    if (defaultOnly && !defFolder) continue;
+    const el = document.createElement('div');
+    el.className = 'acc' + (openRoot === root ? ' open' : '');
+    const pinned = [...pins.keys()].filter(n => n.startsWith(root + '/')).length;
+    const head = document.createElement('div');
+    head.className = 'acc-head';
+    head.innerHTML = `<span class="tw">${openRoot === root ? '▼' : '►'}</span>
+      <span class="name">${root}</span>
+      ${defFolder ? '<span class="badge">this workflow</span>' : ''}
+      <span class="count">${rootTotal(info)} loras</span>
+      ${pinned ? `<span class="pins">📌 ${pinned}</span>` : ''}`;
+    head.addEventListener('click', () => { openRoot = openRoot === root ? null : root; subSel = null; renderAcc(); });
+    el.appendChild(head);
+    const body = document.createElement('div');
+    body.className = 'acc-body';
+    const subs = document.createElement('div');
+    subs.className = 'subs';
+    const allBtn = document.createElement('button');
+    allBtn.textContent = `all (${rootTotal(info)})`;
+    allBtn.className = !subSel ? 'on' : '';
+    allBtn.addEventListener('click', () => { subSel = null; renderAcc(); });
+    subs.appendChild(allBtn);
+    for (const [sub, count] of Object.entries(info.subs)) {
+      const b = document.createElement('button');
+      b.textContent = `${sub} (${count})`;
+      b.className = subSel === sub ? 'on' : '';
+      b.addEventListener('click', () => { subSel = sub; renderAcc(); });
+      subs.appendChild(b);
+    }
+    body.appendChild(subs);
+    const rows = document.createElement('div');
+    rows.className = 'rows';
+    const showSubs = subSel ? [subSel] : Object.keys(info.subs);
+    let shown = 0;
+    for (const sub of showSubs) {
+      for (let i = 0; i < 3; i++) {   // 3 sample rows per sub — rough mock
+        const name = sampleName(root, sub, i);
+        const row = document.createElement('div');
+        const isParked = pins.get(name) === 'parked';
+        row.className = 'row' + (isParked ? ' parked' : '') + (expRow === name ? ' exp' : '');
+        const rn = document.createElement('span');
+        rn.className = 'rn'; rn.textContent = `${sub}/lora-sample-${i + 1}`;
+        rn.addEventListener('click', () => { expRow = expRow === name ? null : name; renderAcc(); });
+        row.appendChild(rn);
+        const st = pins.get(name);
+        if (typeof st === 'number') {
+          const tag = document.createElement('span');
+          tag.className = 'str'; tag.textContent = '×' + st.toFixed(2);
+          row.appendChild(tag);
+        }
+        const btn = document.createElement('button');
+        btn.className = 'pin';
+        btn.textContent = st === undefined ? '＋' : (isParked ? '▶' : '⏸');
+        btn.title = st === undefined ? 'pin at 1.0' : (isParked ? 'restore' : 'suspend');
+        btn.addEventListener('click', () => {
+          if (st === undefined) pins.set(name, 1.0);
+          else if (isParked) pins.set(name, 1.0);
+          else pins.set(name, 'parked');
+          renderAcc(); renderTray();
+        });
+        row.appendChild(btn);
+        rows.appendChild(row);
+        if (expRow === name) {
+          const det = document.createElement('div');
+          det.className = 'rowdet';
+          const sl = document.createElement('input');
+          sl.type = 'range'; sl.min = -1; sl.max = 2; sl.step = 0.05;
+          sl.value = typeof st === 'number' ? st : 1;
+          sl.className = 'slider'; sl.style.display = 'block';
+          const lab = document.createElement('div');
+          lab.style.cssText = 'font-size:11px;color:#8a8aaa';
+          lab.textContent = `strength ${(+sl.value).toFixed(2)} (−1…+2)`;
+          sl.addEventListener('input', () => { pins.set(name, +sl.value); lab.textContent = `strength ${(+sl.value).toFixed(2)} (−1…+2)`; renderTray(); });
+          det.append(lab, sl);
+          rows.appendChild(det);
+        }
+        shown++;
+      }
+    }
+    body.appendChild(rows);
+    el.appendChild(body);
+    acc.appendChild(el);
+    if (shown === 0 && subSel) {
+      const empty = document.createElement('div');
+      empty.style.cssText = 'padding:8px 12px 12px;color:#6c6c8e;font-size:12px';
+      empty.textContent = 'no sample rows for this filter (mock)';
+      body.appendChild(empty);
+    }
+  }
+}
+
+function renderTray() {
+  const tray = document.getElementById('tray');
+  const active = [...pins.entries()].filter(([, v]) => typeof v === 'number');
+  const total = active.reduce((a, [, v]) => a + v, 0);
+  const heavy = active.filter(([, v]) => v > 0.8).length;
+  let cls = '', msg = '';
+  if (heavy >= 3) { cls = 'warn-red'; msg = ' — too many heavy stacks'; }
+  else if (heavy >= 2 || total > 2.5) { cls = 'warn-amber'; msg = ' — getting heavy'; }
+  tray.innerHTML = `<b>${active.length} pinned</b> · total weight <span class="${cls}"><b>${total.toFixed(2)}</b>${msg}</span>` +
+    (active.length ? '<br>' + active.map(([n, v]) => `${n.split('/').slice(-2).join('/')} ×${v.toFixed(2)}`).join(' · ') : '');
+}
+
+// workflow strip
+function renderWf() {
+  document.getElementById('wfname').textContent = WFDATA[wf].label;
+  document.getElementById('wffolder').textContent = WFDATA[wf].folder;
+}
+document.getElementById('btn-def').addEventListener('click', () => {
+  defaultOnly = true;
+  document.getElementById('btn-def').classList.add('sel');
+  document.getElementById('btn-all').classList.remove('sel');
+  openRoot = WFDATA[wf].folder; subSel = null; renderAcc();
+});
+document.getElementById('btn-all').addEventListener('click', () => {
+  defaultOnly = false;
+  document.getElementById('btn-all').classList.add('sel');
+  document.getElementById('btn-def').classList.remove('sel');
+  renderAcc();
+});
+// workflow switcher cycles for the mock
+document.getElementById('wfname').addEventListener('click', () => {
+  wf = WORKFLOWS[(WORKFLOWS.indexOf(wf) + 1) % WORKFLOWS.length];
+  openRoot = WFDATA[wf].folder; subSel = null;
+  renderWf(); renderAcc();
+});
+document.getElementById('wfname').title = 'tap to cycle workflows (mock)';
+document.getElementById('q').addEventListener('input', e => {
+  // search spans all folders in the real build; mock just visual hint
+  e.target.style.borderColor = e.target.value ? '#b39ae0' : '#2a2a44';
+});
+
+openRoot = WFDATA[wf].folder;
+renderWf(); renderAcc(); renderTray();
+</script>
+</body>
+</html>
