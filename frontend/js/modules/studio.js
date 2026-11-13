@@ -96,6 +96,36 @@ function panelHTML() {
     .st-striphead h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8a8aaa; margin: 0; }
     .st-striphead .note { font-size: 11px; color: #6c6c8e; }
     .st-striphead .note em { color: #b39ae0; font-style: normal; }
+    .st-loraui { display: flex; flex-direction: column; gap: 8px; }
+    .st-lsec { border: 1px solid #2a2a44; border-radius: 8px; background: #12121f; overflow: hidden; }
+    .st-lsec-h { display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer;
+      font-size: 11px; letter-spacing: .1em; color: #8a8aaa; user-select: none; }
+    .st-lsec-h .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .st-lsec-h .n { color: #d8d8ee; }
+    .st-lsec-b { display: none; border-top: 1px solid #1c1c30; }
+    .st-lsec.open .st-lsec-b { display: block; }
+    .st-lrow { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border-bottom: 1px solid #1c1c30; }
+    .st-lrow:last-child { border-bottom: 0; }
+    .st-lrow .rn { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+    .st-lrow.parked .rn { color: #c9b97a; }
+    .st-lrow .str { font-size: 11px; color: #b39ae0; background: #161628; border-radius: 4px; padding: 2px 6px; }
+    .st-lrow .where { font-size: 10px; color: #6c6c8e; }
+    .st-lrow button { background: none; border: 1px solid #4a4a6c; color: #8a8aaa; border-radius: 6px;
+      font-size: 12px; min-width: 38px; min-height: 34px; cursor: pointer; }
+    .st-lslider { width: 100%; margin: 4px 0 8px; }
+    .st-lroots { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+    .st-lroots button { background: none; border: 1px solid #4a4a6c; color: #8a8aaa; border-radius: 14px;
+      font-size: 11px; padding: 4px 10px; min-height: 30px; cursor: pointer; white-space: nowrap; }
+    .st-lroots button.on { background: #b39ae033; color: #e6dbff; border-color: #b39ae0; }
+    .st-lsubs { display: flex; gap: 6px; flex-wrap: wrap; }
+    .st-lsubs button { background: none; border: 1px solid #4a4a6c; color: #8a8aaa; border-radius: 14px;
+      font-size: 11px; padding: 4px 10px; min-height: 30px; cursor: pointer; }
+    .st-lsubs button.on { background: #b39ae033; color: #e6dbff; border-color: #b39ae0; }
+    .st-lq { width: 100%; box-sizing: border-box; background: #12121f; border: 1px solid #2a2a44; color: #d8d8ee;
+      border-radius: 8px; padding: 9px 12px; font-size: 13px; }
+    .st-lwarn { font-size: 11px; padding: 6px 10px; border-radius: 6px; }
+    .st-lwarn.amber { color: #e0b34d; background: #2a2410; }
+    .st-lwarn.red { color: #e05a5a; background: #2a1414; }
     .st-segrow { display: flex; align-items: center; gap: 8px; margin: 6px 0 10px; flex-wrap: wrap; }
     .st-seglab { font-size: 11px; color: #8a8aaa; letter-spacing: .08em; }
     .st-seg { display: inline-flex; border: 1px solid #4a4a6c; border-radius: 8px; overflow: hidden; }
@@ -320,9 +350,7 @@ function panelHTML() {
             </div>
             <span class="st-hintline">drag across the pips · batch = <b data-id="batchval">1</b></span>
             <label>LoRAs <span data-id="lcount"></span></label>
-            <div class="st-chips" data-id="pins"></div>
-            <input type="text" data-id="lfilter" placeholder="filter loras…" style="margin-top:6px">
-            <div class="st-chips" data-id="loras"></div>
+            <div class="st-loraui" data-id="loraui"></div>
             <label>Presets</label>
             <select data-id="preset-pick"><option value="">Presets…</option></select>
             <div class="st-row2" style="margin-top:6px">
@@ -445,7 +473,7 @@ export function mountStudio(panel, jobbar) {
   const el = Object.fromEntries(['chip', 'chip-name', 'chip-chain', 'clear', 'imm',
     'canvasarea', 'frame', 'badge', 'img-a', 'wrap-b', 'img-b', 'cmpbar',
     'strip', 'cands', 'wf', 'segrow', 'seg-model', 'seg-edit', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
-    'denoise', 'dval', 'pips', 'batchval', 'lcount', 'lfilter', 'pins', 'loras',
+    'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui',
     'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all',
     'rpreset', 'rprompt', 'rseed', 'rrandom', 'rdenoise-lbl', 'rdenoise', 'rdenoise-val',
     'mask', 'mask-paint', 'mask-erase', 'brush', 'mask-clear', 'mask-undo',
@@ -1146,33 +1174,221 @@ export function mountStudio(panel, jobbar) {
       renderLoras();
     } catch (e) { say('config failed: ' + e.message, true); }
   }
-  function chip(n, strength, parked) {
-    const c = document.createElement('span');
-    c.className = 'st-chip' + (parked ? '' : ' on');
-    c.title = parked ? 'suspended — tap to restore' : 'tap to remove';
-    c.textContent = `${parked ? '▶ ' : '✕ '}${n} ×${Number(strength).toFixed(2)}`;
-    c.addEventListener('click', () => {
-      if (parked) pins.restore(n); else pins.remove(n);
+  // ── LoRA section (§10 review 13:51): ACTIVE / PAUSED accordion drawers
+  // plus a folder-accordion library. Folders ARE the tags (real tree:
+  // _Flux2Klein/Style/…). Workflow sets the default folder; pins stay in
+  // place in the library marked 📌/⏸. pins API unchanged (payload same).
+  const LORA_WF_FOLDER = { klein: '_Flux2Klein', krea2: '_Krea2', qwen21: '_Qwen21',
+                           moss: 'moss', zengorestyle: '_Flux2Klein' };
+  const loraUI = { q: '', auto: true, root: null, sub: null, openRoot: null,
+                   openActive: true, openPaused: false, expRow: null };
+  const loraRootOf = n => (/[\\/]/.test(n) ? n.replace(/\\/g, '/').split('/')[0] : '(root)');
+  const loraSubOf = n => { const p = n.replace(/\\/g, '/').split('/'); return p.length > 2 ? p[1] : null; };
+  const loraDefFolder = () => LORA_WF_FOLDER[el.wf.value] || null;
+
+  function loraRow(name, st, parked, box) {
+    const row = document.createElement('div');
+    row.className = 'st-lrow' + (parked ? ' parked' : '');
+    const rn = document.createElement('span');
+    rn.className = 'rn';
+    rn.textContent = name.split('/').pop().replace(/\.safetensors$/i, '');
+    rn.title = name;
+    rn.addEventListener('click', () => {
+      loraUI.expRow = loraUI.expRow === name ? null : name; renderLoras();
+    });
+    row.appendChild(rn);
+    const where = document.createElement('span');
+    where.className = 'where'; where.textContent = name.replace(/\\/g, '/').split('/').slice(0, -1).join('/');
+    row.appendChild(where);
+    if (!parked) {
+      const tag = document.createElement('span');
+      tag.className = 'str'; tag.textContent = '×' + st.toFixed(2);
+      row.appendChild(tag);
+    }
+    const tog = document.createElement('button');
+    tog.textContent = parked ? '▶' : '⏸';
+    tog.title = parked ? 'restore' : 'suspend';
+    tog.addEventListener('click', () => {
+      if (parked) pins.restore(name); else pins.suspend(name);
       renderLoras();
     });
-    return c;
+    const del = document.createElement('button');
+    del.textContent = '✕'; del.title = 'unpin';
+    del.addEventListener('click', () => { pins.remove(name); renderLoras(); });
+    row.append(tog, del);
+    box.appendChild(row);
+    if (loraUI.expRow === name && !parked) {
+      const sl = document.createElement('input');
+      sl.type = 'range'; sl.className = 'st-lslider'; sl.min = -1; sl.max = 2; sl.step = 0.05;
+      sl.value = st;
+      sl.addEventListener('input', () => { pins.setStrength(name, +sl.value); renderLoras(); });
+      box.appendChild(sl);
+    }
   }
+
+  function loraSection(label, dotColor, open, onToggle, fill) {
+    const sec = document.createElement('div');
+    sec.className = 'st-lsec' + (open ? ' open' : '');
+    const h = document.createElement('div');
+    h.className = 'st-lsec-h';
+    h.innerHTML = `<span class="dot" style="background:${dotColor}"></span>${label}`;
+    h.addEventListener('click', onToggle);
+    const b = document.createElement('div');
+    b.className = 'st-lsec-b';
+    fill(b);
+    sec.append(h, b);
+    return sec;
+  }
+
   function renderLoras() {
     el.lcount.textContent = pins.count() ? `(${pins.count()} on)` : '';
-    el.pins.innerHTML = '';
-    for (const [n, st] of pins.active) el.pins.appendChild(chip(n, st, false));
-    for (const [n, st] of pins.suspended) el.pins.appendChild(chip(n, st, true));
-    el.loras.innerHTML = '';
-    const q = el.lfilter.value.trim().toLowerCase();
-    for (const n of allLoras.filter(n => !q || n.toLowerCase().includes(q)).slice(0, 24)) {
-      const b = document.createElement('button');
-      b.className = 'st-chip'; b.textContent = `＋ ${n}`;
-      b.addEventListener('click', () => { pins.pin(n, 1.0); renderLoras(); });
-      el.loras.appendChild(b);
+    el.loraui.innerHTML = '';
+    const act = [...pins.active], pau = [...pins.suspended];
+
+    // weight warning
+    const heavy = [...act].filter(([, v]) => v > 0.8).length;
+    const total = act.reduce((a, [, v]) => a + v, 0);
+    if (heavy >= 3 || total > 4) {
+      const w = document.createElement('div');
+      w.className = 'st-lwarn red';
+      w.textContent = `heavy stack: ${heavy} strong / total ×${total.toFixed(2)}`;
+      el.loraui.appendChild(w);
+    } else if (heavy >= 2 || total > 2.5) {
+      const w = document.createElement('div');
+      w.className = 'st-lwarn amber';
+      w.textContent = `getting heavy: ${heavy} strong / total ×${total.toFixed(2)}`;
+      el.loraui.appendChild(w);
     }
-    if (!el.loras.children.length) el.loras.innerHTML = '<span class="st-hintline">no LoRAs found</span>';
+
+    el.loraui.appendChild(loraSection(
+      `ACTIVE (${act.length})`, '#7ee0a0', loraUI.openActive,
+      () => { loraUI.openActive = !loraUI.openActive; renderLoras(); },
+      b => {
+        if (!act.length) { b.innerHTML = '<div class="st-hintline" style="padding:8px 12px">nothing pinned — ＋ in the library</div>'; return; }
+        for (const [n, v] of act) loraRow(n, v, false, b);
+      }));
+
+    el.loraui.appendChild(loraSection(
+      `PAUSED (${pau.length})`, '#e0b34d', loraUI.openPaused,
+      () => { loraUI.openPaused = !loraUI.openPaused; renderLoras(); },
+      b => {
+        if (!pau.length) { b.innerHTML = '<div class="st-hintline" style="padding:8px 12px">nothing paused — ⏸ parks a pin</div>'; return; }
+        for (const [n, v] of pau) loraRow(n, v, true, b);
+      }));
+
+    const q = document.createElement('input');
+    q.className = 'st-lq'; q.placeholder = 'search all loras…'; q.value = loraUI.q;
+    q.addEventListener('input', () => { loraUI.q = q.value; renderLoras(); });
+    el.loraui.appendChild(q);
+
+    // folder chips: auto (workflow default) + every root present
+    const roots = [...new Set(allLoras.map(loraRootOf))];
+    const defF = loraDefFolder();
+    const chips = document.createElement('div');
+    chips.className = 'st-lroots';
+    const autoBtn = document.createElement('button');
+    autoBtn.textContent = defF ? `auto: ${defF}` : 'all';
+    autoBtn.className = loraUI.auto ? 'on' : '';
+    autoBtn.title = 'follow the selected workflow';
+    autoBtn.addEventListener('click', () => { loraUI.auto = true; loraUI.root = null; loraUI.sub = null; renderLoras(); });
+    chips.appendChild(autoBtn);
+    for (const r of roots.filter(r => r !== defF)) {
+      const b = document.createElement('button');
+      const cnt = allLoras.filter(n => loraRootOf(n) === r).length;
+      b.textContent = `${r} (${cnt})`;
+      b.className = (!loraUI.auto && loraUI.root === r) ? 'on' : '';
+      b.addEventListener('click', () => { loraUI.auto = false; loraUI.root = r; loraUI.sub = null; loraUI.openRoot = r; renderLoras(); });
+      chips.appendChild(b);
+    }
+    el.loraui.appendChild(chips);
+
+    // library accordion: folders of the focused root (auto → default folder)
+    const focus = loraUI.auto ? defF : loraUI.root;
+    const folders = focus ? [focus] : roots;
+    for (const f of folders) {
+      const inF = allLoras.filter(n => loraRootOf(n) === f &&
+        (!loraUI.q || n.toLowerCase().includes(loraUI.q.toLowerCase())));
+      const pinsInF = inF.filter(n => pins.active.has(n) || pins.suspended.has(n)).length;
+      const sec = document.createElement('div');
+      sec.className = 'st-lsec' + (loraUI.openRoot === f ? ' open' : '');
+      const h = document.createElement('div');
+      h.className = 'st-lsec-h';
+      h.innerHTML = `<span class="dot" style="background:#4a4a6c"></span><span class="n">${f}</span>` +
+        `<span style="color:#6c6c8e">${inF.length} loras</span>` +
+        (pinsInF ? `<span style="margin-left:auto;color:#b39ae0">📌 ${pinsInF}</span>` : '');
+      h.addEventListener('click', () => { loraUI.openRoot = loraUI.openRoot === f ? null : f; renderLoras(); });
+      sec.appendChild(h);
+      const body = document.createElement('div');
+      body.className = 'st-lsec-b';
+      // sub-chips (second-level folders)
+      const subs = [...new Set(inF.map(loraSubOf).filter(Boolean))].sort();
+      if (subs.length) {
+        const subRow = document.createElement('div');
+        subRow.className = 'st-lsubs';
+        const all = document.createElement('button');
+        all.textContent = `all (${inF.length})`;
+        all.className = !loraUI.sub ? 'on' : '';
+        all.addEventListener('click', () => { loraUI.sub = null; renderLoras(); });
+        subRow.appendChild(all);
+        for (const s of subs) {
+          const b = document.createElement('button');
+          const cnt = inF.filter(n => loraSubOf(n) === s).length;
+          b.textContent = `${s} (${cnt})`;
+          b.className = loraUI.sub === s ? 'on' : '';
+          b.addEventListener('click', () => { loraUI.sub = loraUI.sub === s ? null : s; renderLoras(); });
+          subRow.appendChild(b);
+        }
+        body.appendChild(subRow);
+      }
+      const list = inF.filter(n => !loraUI.sub || loraSubOf(n) === loraUI.sub);
+      for (const n of list.slice(0, 60)) {
+        const row = document.createElement('div');
+        row.className = 'st-lrow';
+        const pinnedA = pins.active.get(n), pinnedS = pins.suspended.has(n);
+        const rn = document.createElement('span');
+        rn.className = 'rn';
+        rn.textContent = (pinnedA !== undefined ? '📌 ' : pinnedS ? '⏸ ' : '') +
+          n.replace(/\\/g, '/').split('/').slice(1).join('/') || n;
+        rn.title = n;
+        rn.addEventListener('click', () => { loraUI.expRow = loraUI.expRow === n ? null : n; renderLoras(); });
+        row.appendChild(rn);
+        if (pinnedA !== undefined) {
+          const tag = document.createElement('span');
+          tag.className = 'str'; tag.textContent = '×' + pinnedA.toFixed(2);
+          row.appendChild(tag);
+        }
+        const btn = document.createElement('button');
+        btn.textContent = pinnedA !== undefined || pinnedS ? (pinnedS ? '▶' : '⏸') : '＋';
+        btn.title = pinnedA !== undefined ? 'suspend' : pinnedS ? 'restore' : 'pin at 1.0';
+        btn.addEventListener('click', () => {
+          if (pinnedA !== undefined) pins.suspend(n);
+          else if (pinnedS) pins.restore(n);
+          else pins.pin(n, 1.0);
+          renderLoras();
+        });
+        row.appendChild(btn);
+        body.appendChild(row);
+        if (loraUI.expRow === n && pinnedA !== undefined) {
+          const sl = document.createElement('input');
+          sl.type = 'range'; sl.className = 'st-lslider'; sl.min = -1; sl.max = 2; sl.step = 0.05;
+          sl.value = pinnedA;
+          sl.addEventListener('input', () => { pins.setStrength(n, +sl.value); renderLoras(); });
+          body.appendChild(sl);
+        }
+      }
+      if (list.length > 60) {
+        const more = document.createElement('div');
+        more.className = 'st-hintline'; more.style.padding = '8px 12px';
+        more.textContent = `+${list.length - 60} more — use search or sub-filters`;
+        body.appendChild(more);
+      }
+      if (!list.length) body.innerHTML = '<div class="st-hintline" style="padding:8px 12px">no LoRAs match</div>';
+      sec.appendChild(body);
+      el.loraui.appendChild(sec);
+    }
   }
-  el.lfilter.addEventListener('input', renderLoras);
+  // workflow switch re-aims the default folder (auto mode follows)
+  el.wf.addEventListener('change', () => { if (loraUI.auto) { loraUI.openRoot = null; } renderLoras(); });
   el.aspects.addEventListener('click', e => {
     const b = e.target.closest('[data-a]');
     if (!b) return;
@@ -1264,7 +1480,7 @@ export function mountStudio(panel, jobbar) {
   for (const ev of ['input', 'change', 'click']) {
     panel.addEventListener(ev, e => {
       if (!e.target.closest('[data-panel="generate"]')) return;
-      if (e.target.closest('.st-verbswitch, [data-id="pips"], [data-id="lfilter"]')) return;
+      if (e.target.closest('.st-verbswitch, [data-id="pips"], .st-loraui')) return;
       scheduleSave();
     });
   }
