@@ -76,8 +76,9 @@ function panelHTML() {
     .st-frame { position: relative; border: 1px solid #4a4a6c; border-radius: 8px; overflow: hidden;
       box-shadow: 0 8px 40px rgba(0,0,0,.5); touch-action: none; user-select: none; -webkit-user-select: none; transform-origin: center; }
     .st-frame img { display: block; max-width: min(100%, 1100px); max-height: 60vh; object-fit: contain; pointer-events: none; }
+    .st-frame .st-imgb img { object-fit: contain; }
     .st-frame .st-imgb { position: absolute; inset: 0; overflow: hidden; }
-    .st-frame .st-imgb img { max-width: none; max-height: none; width: 100%; height: 100%; position: absolute; inset: 0; }
+    .st-frame .st-imgb img { max-width: none; max-height: none; width: 100%; height: 100%; object-fit: contain; position: absolute; inset: 0; }
     .st-badge { position: absolute; top: 10px; left: 10px; z-index: 6; background: rgba(15,15,26,.85);
       border: 1px solid #4a4a6c; border-radius: 5px; padding: 3px 10px; font-size: 11px; color: #b39ae0; pointer-events: none; }
     .st-cmpbar { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 6; display: none;
@@ -107,9 +108,10 @@ function panelHTML() {
     .st-cand.sel .pick { opacity: 1; }
     .st-cand.empty { display: grid; place-items: center; height: 86px; color: #6c6c8e; font-size: 11px;
       border: 2px dashed #2a2a44; background: transparent; cursor: default; }
-    .st-src{position:relative;flex:0 0 auto;display:grid;place-items:center;min-height:64px;min-width:64px;border:1px dashed #4a4a6c;border-radius:8px;color:#8a8aaa;font-size:12px;cursor:pointer;overflow:hidden}
+    .st-src{position:relative;flex:0 0 auto;margin-left:auto;display:grid;place-items:center;min-height:64px;min-width:64px;border:1px dashed #4a4a6c;border-radius:8px;color:#8a8aaa;font-size:12px;cursor:pointer;overflow:hidden}
     .st-src.has{border-style:solid}
     .st-src.has img{width:64px;height:64px;object-fit:cover;display:block}
+    .st-src-dn,.st-src-up{position:absolute;top:2px;left:2px;width:20px;height:20px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:12px;color:#b39ae0}
     .st-src-x{position:absolute;top:2px;right:2px;width:18px;height:18px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:11px;color:#fff}
     /* ---- right rail ---- */
     .st-rail { flex: 0 0 330px; background: #12121f; border-left: 1px solid #2a2a44; display: flex; flex-direction: column; min-height: 0; }
@@ -445,6 +447,7 @@ export function mountStudio(panel, jobbar) {
   const cands = createCandidates();
   let restored = false;
   let previewUrl = null;       // filters live-preview overrides the canvas display
+  let previewed = null;        // candidate currently viewed (⬇ promotes it)
   let maskCanvas = null, maskMode = 'paint', maskPainted = false, maskUndoStack = [];
   let _maskLastPt = null;
 
@@ -831,10 +834,16 @@ export function mountStudio(panel, jobbar) {
             [...t.children].forEach(x2 => x2.classList.toggle('sel', x2.querySelector('img')?.src === c.url));
           }
           d.classList.add('sel');
-          // Explicit selection ONLY (decision §7.2): the candidate becomes
-          // the working image; nothing auto-saves.
-          studioState().set(c.path, 'foxden-output', { name: c.path.split('/').pop() });
-          say(`working image: ${c.path.split('/').pop()}`);
+          // Viewing ONLY (§7.2/§10 review 12:23): a candidate tap previews it
+          // on the canvas; becoming the working image is the explicit
+          // down-arrow on the source slot.
+          previewed = c;
+          previewUrl = c.url;
+          if (!compareOn) {
+            el['img-a'].src = previewUrl;
+            el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
+          }
+          say(`viewing ${c.path.split('/').pop()} — tap ⬇ on source to use it`);
         });
         target.appendChild(d);
       });
@@ -844,11 +853,23 @@ export function mountStudio(panel, jobbar) {
         d.textContent = `slot ${i + 1}`;
         target.appendChild(d);
       }
-      // source slot (right-aligned): the current working image with an X,
-      // or an upload affordance when empty (decision §10 review, 2026-11-13)
+      // source slot: pinned to the row's right edge, visually separate
+      // from candidates (§10 review 12:23). Down-arrow promotes the canvas
+      // image; ✕ clears; upload when empty.
       const st = studioState().get();
       const src = document.createElement('span');
       src.className = 'st-src' + (st.path ? ' has' : '');
+      if (previewed) {
+        const dn = document.createElement('span');
+        dn.className = 'st-src-dn'; dn.textContent = '⬇';
+        dn.title = `Use viewed image (${previewed.path.split('/').pop()}) as source`;
+        dn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          studioState().set(previewed.path, 'foxden-output', { name: previewed.path.split('/').pop() });
+          say(`working image: ${previewed.path.split('/').pop()}`);
+        });
+        src.appendChild(dn);
+      }
       if (st.path) {
         const im = document.createElement('img');
         im.src = galleryFileUrl(st.path); im.alt = 'source image';
@@ -859,11 +880,13 @@ export function mountStudio(panel, jobbar) {
         x.addEventListener('click', (e) => {
           e.stopPropagation(); studioState().clear(); say('working image cleared');
         });
-        src.append(im, x);
+        src.appendChild(im); src.appendChild(x);
       } else {
-        src.textContent = '＋ source';
-        src.title = 'Upload an image as the working image';
-        src.addEventListener('click', () => pickSource());
+        const up = document.createElement('span');
+        up.className = 'st-src-up'; up.textContent = '＋';
+        up.title = 'Upload an image as the working image';
+        up.addEventListener('click', (e) => { e.stopPropagation(); pickSource(); });
+        src.appendChild(up);
       }
       target.appendChild(src);
     }
@@ -948,7 +971,10 @@ export function mountStudio(panel, jobbar) {
       // showCurrent() on the next working-image change or run.
       if (collected.length) {
         previewUrl = collected[0].url;
-        if (!compareOn) el['img-a'].src = previewUrl;
+        if (!compareOn) {
+          el['img-a'].src = previewUrl;
+          el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
+        }
       }
       // No auto-promote (decision §7.2/§10): outputs become the working
       // image only on explicit candidate selection — otherwise edit chains
@@ -1008,12 +1034,25 @@ export function mountStudio(panel, jobbar) {
     el.batchval.textContent = String(batch);
     setRunLabel();
   }
+  // rocker: hold ~350ms to arm, then drag changes the count — a scroll
+  // across the control can no longer bump it by accident (§10 review 12:23)
+  let rockerArmed = null;
   el.pips.addEventListener('pointerdown', e => {
     el.pips.setPointerCapture(e.pointerId);
-    setBatch(batchFromPointer(e.clientX, el.pips.getBoundingClientRect()));
+    if (rockerArmed) return;
+    rockerArmed = setTimeout(() => { rockerArmed = true; }, 350);
+  });
+  el.pips.addEventListener('pointerup', () => {
+    if (rockerArmed && rockerArmed !== true) clearTimeout(rockerArmed);
+    rockerArmed = null;
+  });
+  el.pips.addEventListener('pointercancel', () => {
+    if (rockerArmed && rockerArmed !== true) clearTimeout(rockerArmed);
+    rockerArmed = null;
   });
   el.pips.addEventListener('pointermove', e => {
-    if (e.buttons > 0 || e.pressure > 0) setBatch(batchFromPointer(e.clientX, el.pips.getBoundingClientRect()));
+    if (rockerArmed === true && (e.buttons > 0 || e.pressure > 0))
+      setBatch(batchFromPointer(e.clientX, el.pips.getBoundingClientRect()));
   });
   el.pips.querySelectorAll('.st-pip').forEach(p =>
     p.addEventListener('click', e => { e.stopPropagation(); setBatch(+p.dataset.v); }));
