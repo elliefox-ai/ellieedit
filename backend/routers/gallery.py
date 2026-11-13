@@ -624,7 +624,18 @@ async def upload(file: UploadFile = File(...)):
 
 @router.get("/file")
 def file(path: str = Query(...), bank: str = "primary"):
-    src = bank_jailed(bank, path) if bank != "primary" else resolve_flex(path)
+    try:
+        src = bank_jailed(bank, path) if bank != "primary" else resolve_flex(path)
+    except HTTPException as e:
+        # foxden outputs live outside the gallery/dupe roots; candidate
+        # promote and prepareInput fetch them through here, so resolve
+        # their delivered copy (mirrors update.resolve_source, §7.1)
+        if not (bank == "primary" and e.status_code == 404):
+            raise
+        from .foxden import delivery_dir
+        src = delivery_dir() / Path(path).name
+        if not src.is_file():
+            raise
     if not src.is_file() or src.suffix.lower() not in EXTS:
         raise HTTPException(404, "not an image")
     media = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
