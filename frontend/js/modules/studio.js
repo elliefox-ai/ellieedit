@@ -541,7 +541,11 @@ export function mountStudio(panel, jobbar) {
     if (!path) return;
     if (stack && stack.entries.some(en => en.path === path)) return;
     try {
-      const r = await fetch(galleryFileUrl(path));
+      const r0 = await fetch(galleryFileUrl(path));
+      // foxden outputs live outside the gallery jail — fall back to the
+      // candidate's own view URL (strip thumbnails prove it serves fine)
+      const r = r0.ok ? r0 : await (cands.find(path)
+        ? fetch(cands.find(path).url) : Promise.resolve(r0));
       if (!r.ok) throw new Error(r.status);
       const blob = await r.blob();
       stack = createStack({ url: URL.createObjectURL(blob), name: name || path.split('/').pop(), path });
