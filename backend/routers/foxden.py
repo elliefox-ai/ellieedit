@@ -40,6 +40,7 @@ log = logging.getLogger("ellieedit.foxden")
 router = APIRouter(prefix="/api/foxden", tags=["foxden"])
 
 WORKFLOW_FILES = {"klein": "klein_gen_basic.json",
+                  "klein-edit": "klein_edit_basic.json",
                   "krea2": "krea2_gen_basic.json",
                   "zengorestyle": "zengostyle_restyle_f2k4b_mkl.json",
                   "qwen21": "qwen21_gen_basic.json",
