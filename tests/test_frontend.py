@@ -1140,10 +1140,13 @@ def test_stage2_studio_surface_pins():
 
 
 # ------------------------------------------------------- Stage 3 (2026-11-12)
-def test_stage3_studio_tab_registration():
-    """Stage 3: the shell routes exactly ONE studio entry and no foxden/update
-    entries; the old modules stay in the tree as the rollback path (design §5)
-    but are unrouted — shell.js must not import them."""
+# ------------------------------------------------------- Stage 4 (2026-11-13)
+def test_stage4_studio_layout_contract():
+    """Stage 4 (settled mock-1b layout): the shell routes exactly ONE studio
+    entry and no foxden/update entries; Studio NO LONGER mounts the Stage 3
+    sub-tab surfaces (mountFoxden/mountUpdate) — the sub-tab stacking IS
+    what Stage 4 removes. The old modules stay in the tree as the rollback
+    path (design §5) with their register helpers, unrouted."""
     HERE = Path(__file__).parent
     shell = (HERE.parent / "frontend" / "js" / "shell.js").read_text()
     studio = (HERE.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
@@ -1153,9 +1156,12 @@ def test_stage3_studio_tab_registration():
     # Studio registers exactly one tab
     assert studio.count("registerModule(") == 1
     assert "name: 'studio'" in studio
-    # sub-view surfaces mount exactly once each, at Studio mount
-    assert studio.count("mountFoxden(") == 1
-    assert studio.count("mountUpdate(") == 1
+    # Stage 4 REMOVAL pin: the sub-tab stacking is gone
+    assert "mountFoxden" not in studio
+    assert "mountUpdate" not in studio
+    # settled rail: three tabs, never stacked sub-views
+    for verb in ("generate", "refine", "provenance"):
+        assert f'data-verb="{verb}"' in studio
     # the old modules keep their rollback registration functions, unrouted
     fx = (HERE.parent / "frontend" / "js" / "modules" / "foxden.js").read_text()
     upd = (HERE.parent / "frontend" / "js" / "modules" / "update.js").read_text()
@@ -1164,24 +1170,112 @@ def test_stage3_studio_tab_registration():
     assert "registerFoxdenTab()" not in shell and "registerUpdateTab()" not in shell
 
 
-def test_stage3_studio_view_switch_never_reloads_config():
-    """Stage 3 pin (chunk-A bug class): the Studio sub-view switch flips ONLY
-    hidden + aria/active state — no fetch, no loadConfig, no store reset.
-    Config loads happen exactly once per surface, inside the single mount."""
-    HERE = Path(__file__).parent
-    studio = (HERE.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
-    block = studio[studio.index("function showSubView"):]
-    block = block[:block.index("panel.querySelector('.st-viewbar')")]
-    assert "hidden" in block
-    assert "aria-expanded" in block
-    assert "fetch" not in block
-    assert "loadConfig" not in block
-    assert "studioState" not in block   # switching never touches the store
-    # the switch listener dispatches nothing tab-lifecycle-ish
-    bar = studio[studio.index("st-viewbar').addEventListener"):]
-    bar = bar[:bar.index("});")]
-    assert "showSubView(b.dataset.view)" in bar
-    assert "fetch" not in bar and "dispatchEvent" not in bar
+def test_stage4_fullscreen_chrome_pins():
+    """Stage 4 fullscreen (mock-1b): one toggle in the Studio header; the
+    immersive mode hides header/rail/strip; the RAIL edge tab (top-right)
+    is the only way back; a Generate FAB (bottom-right) fires the same
+    generate action with a progress ring; a bottom handle opens the
+    candidate overlay carrying the save module; completion toast. Touch
+    targets >= 44px — no hover/keyboard dependency."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    assert 'data-id="imm"' in studio and "⛶ Fullscreen" in studio
+    assert "st-immersive" in studio
+    assert 'data-id="edgetab"' in studio and "RAIL ▸" in studio
+    assert 'data-id="genfab"' in studio and "conic-gradient" in studio   # progress ring
+    assert "setFabProgress" in studio
+    assert "el.genfab.addEventListener('click'" in studio                 # FAB fires generate
+    assert 'data-id="bottomhandle"' in studio and "CANDIDATES ▴" in studio
+    assert 'data-id="candoverlay"' in studio
+    assert "showToast" in studio
+    assert "flashOverlayInImmersive" in studio                            # overlay auto-opens on completion
+    # immersive hides chrome (head/rail/strip) via CSS, never JS removal
+    assert ".st-root.st-immersive .st-head" in studio
+    assert ".st-root.st-immersive .st-rail" in studio
+    assert ".st-root.st-immersive .st-strip" in studio
+    # the way back is touch-first: min-height 44px on the edge tab
+    assert "min-height: 44px" in studio
+
+
+def test_stage4_save_module_pins():
+    """Stage 4 (decision §7.1): ONE comprehensive save component — three
+    targets (save over original / save as new file / save to Library) —
+    wired once and present in BOTH the expanded rail and the fullscreen
+    overlay. Endpoints are the existing save-back / save-new / save-family
+    trio; no new backend routes."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    assert ".st-savebar" in studio
+    assert studio.count('data-save="over"') == 2      # rail + overlay
+    assert studio.count('data-save="new"') == 2
+    assert studio.count('data-save="library"') == 2
+    assert "/api/update/save-back" in studio
+    assert "/api/update/save-new" in studio
+    assert "/api/update/save-family" in studio
+    assert "wireSaveBars" in studio                    # one wiring, many mounts
+
+
+def test_stage4_batch_and_candidate_pins():
+    """Stage 4: batch count = drag pips 1-4 default 1 (pure math module,
+    pointer capture + touch-action none + aria slider); candidates are an
+    explicit triage surface — selection sets the working image, nothing
+    auto-saves, the next run replaces the strip; optional save-all
+    checkbox targets Gallery, default OFF."""
+    mods = Path(__file__).parent.parent / "frontend" / "js" / "modules"
+    pips = (mods / "studio-pips.js").read_text()
+    studio = (mods / "studio.js").read_text()
+    assert "BATCH_MIN = 1" in pips and "BATCH_MAX = 4" in pips
+    assert "export function batchFromPointer" in pips
+    assert "batchFromPointer" in studio and "clampBatch" in studio
+    assert "setPointerCapture" in studio
+    assert "touch-action: none" in studio          # pips never scroll the page while dragging
+    assert 'role="slider"' in studio and "aria-valuemin" in studio
+    assert "setBatch(1)" in studio                 # default 1
+    # explicit candidate promote only (decision §7.2)
+    assert "studioState().set(c.path, 'foxden-output'" in studio
+    assert "cands.startRun(collected)" in studio   # next run replaces the strip
+    html = studio[studio.index('<input type="checkbox" data-id="save-all"'):]
+    at = html.index("<input")
+    input_tag = html[at:html.index(">", at) + 1]
+    assert input_tag == '<input type="checkbox" data-id="save-all" style="width:auto">', input_tag
+    assert "save all outputs to gallery" in studio
+
+
+def test_stage4_refine_and_provenance_pins():
+    """Stage 4: Refine runs Update's preset runner on the working image
+    (run-async / inpaint-async on the store path) with the comparer in the
+    canvas; filters live INSIDE Refine as a collapsible section reusing
+    /api/filters/*; Provenance is fed by GET /api/foxden/provenance?path=.
+    img2img comes from the working image when denoise < 1 (upload +
+    parent_image)."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    # refine = Update runner endpoints on the working image
+    assert "/api/update/run-async" in studio
+    assert "/api/update/inpaint-async" in studio
+    assert "/api/update/jobs/" in studio
+    assert "__masked_inpaint" in studio
+    # comparer lives in the canvas
+    assert 'data-id="cmpbar"' in studio and "comparing" in studio
+    # filters inside Refine, reusing the filters endpoints
+    assert "details.collapse" in studio
+    assert "/api/filters/apply" in studio and "/api/filters/store" in studio
+    assert "tuneImageData" in studio
+    assert "studioState().set(render_path, 'filters'" in studio
+    # provenance tab fed by the foxden provenance endpoint
+    assert "/provenance?path=" in studio
+    assert "parentchain" in studio or "parent_image" in studio
+    # img2img off the working image when denoise < 1, with parent link
+    assert "prepareInput" in studio
+    assert "body.parent_image = inputParent" in studio
+    assert "denoise >= 1" in studio
+
+
+def test_stage4_studio_activation_never_reloads_config():
+    """Stage 4 pin (chunk-A bug class, carried from Stage 3): Studio has NO
+    ellieedit:tab-activated listener that fetches config — everything
+    configures exactly once, inside the single mount."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    assert "loadConfig" in studio          # exists, called once at mount
+    assert studio.count("await loadConfig()") == 1
+    assert "tab-activated" not in studio   # no activation reload path at all
 
 
 def test_stage3_hash_redirect():
