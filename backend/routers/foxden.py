@@ -56,6 +56,8 @@ WORKFLOW_FAMILIES = {
                    "4b": {"gen": "klein-4b", "edit": "klein-4b-edit"}},
     },
 }
+# legacy ids that resolve into a family variant (kept for old clients/recent.jsonl)
+WORKFLOW_FAMILY_ALIASES = {"klein-edit": "klein-4b-edit"}
 LORA_EXTS = {".safetensors", ".pt", ".ckpt", ".pth"}
 UPLOAD_MAX = 25 * 1024 * 1024
 RECENT_MAX = 200
@@ -411,7 +413,8 @@ def config():
                        "available": (workflows_dir() / v).is_file(),
                        "edit": k in EDIT_WORKFLOWS,
                        "family": next((f for f, fd in WORKFLOW_FAMILIES.items()
-                                       if any(k in mv.values() for mv in fd["models"].values())),
+                                       if any((WORKFLOW_FAMILY_ALIASES.get(k, k)) in mv.values()
+                                              for mv in fd["models"].values())),
                                       k)}
                       for k, v in WORKFLOW_FILES.items()],
         "families": WORKFLOW_FAMILIES,
