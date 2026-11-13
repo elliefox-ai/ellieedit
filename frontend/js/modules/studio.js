@@ -350,10 +350,17 @@ function panelHTML() {
                 <label>Line darkness <input type="range" data-id="ch-val" min="0.3" max="1" step="0.01" value="0.72"></label>
                 <label>Fill smoothing <input type="range" data-id="ch-smooth" min="0" max="5" step="1" value="3"></label>
                 <label>Line smoothing <input type="range" data-id="ch-sigma" min="0" max="2" step="0.1" value="0"></label>
+                <label>Max stroke width <input type="range" data-id="gate-maxw" min="1" max="12" step="1" value="6"></label>
+                <label>Gate sensitivity <input type="range" data-id="gate-bh" min="0.02" max="0.2" step="0.01" value="0.06"></label>
+                <label>Gate strength <input type="range" data-id="gate-strength" min="0" max="100" step="1" value="100"></label>
                 <label>Vibrance <input type="range" data-id="vib-strength" min="0" max="100" step="1" value="0"></label>
+                <label>Vibrance falloff <input type="range" data-id="vib-falloff" min="0.05" max="0.6" step="0.01" value="0.25"></label>
+                <label>Skin protection <input type="range" data-id="vib-protect" min="0" max="100" step="1" value="50"></label>
                 <label>Saturation <input type="range" data-id="tn-sat" min="0" max="2" step="0.05" value="1"></label>
                 <label>Brightness <input type="range" data-id="tn-bri" min="-0.5" max="0.5" step="0.01" value="0"></label>
                 <label>Contrast <input type="range" data-id="tn-con" min="0" max="2" step="0.05" value="1"></label>
+                <label>Lift blacks <input type="range" data-id="tn-lift" min="0" max="0.3" step="0.01" value="0"></label>
+                <label>Lift edge <input type="range" data-id="tn-edge" min="0" max="0.5" step="0.01" value="0"></label>
                 <label>Effect strength <input type="range" data-id="strength" min="0" max="100" step="1" value="100"></label>
                 <span class="st-hintline">Preview renders here on the canvas; Filters act on the working image, and the applied output re-promotes with fresh provenance.</span>
                 <button class="primary" style="width:100%;margin-top:14px" data-id="fapply">Apply filter stack</button>
