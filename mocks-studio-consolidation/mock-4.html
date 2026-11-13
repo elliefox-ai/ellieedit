@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio Mock 4 — Immersive Stage + Floating Dock</title>
+<style>
+:root{
+  --bg:#0f0f1a; --panel:#12121f; --panel2:#161628; --panel3:#1d1d33;
+  --border:#2a2a44; --border2:#4a4a6c; --txt:#d4d4e0; --dim:#8a8aaa; --faint:#6c6c8e;
+  --accent:#5b4a8a; --accent2:#7a6aaa; --lav:#b39ae0;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0a0a12;color:var(--txt);font:14px/1.45 system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+button{font:inherit;color:inherit;background:rgba(29,29,51,.92);border:1px solid var(--border2);border-radius:8px;padding:9px 14px;cursor:pointer;min-height:44px;backdrop-filter:blur(4px)}
+button:hover{background:#4a4a6c}
+button.primary{background:var(--accent);border-color:var(--accent2);color:#fff}
+input,textarea,select{font:inherit;background:var(--panel2);color:var(--txt);border:1px solid var(--border2);border-radius:6px;padding:10px;width:100%}
+label{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;display:block;margin:10px 0 4px}
+
+.mock-banner{background:#241a3a;border-bottom:1px solid var(--border2);padding:8px 16px;font-size:12.5px;color:var(--lav);flex:0 0 auto}
+.mock-banner b{color:#fff}
+.mock-banner span{color:var(--dim)}
+
+/* the whole page is the canvas; chrome floats over it */
+.stage{flex:1;position:relative;min-height:0;overflow:hidden;display:grid;place-items:center}
+.stage img.bg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.28;filter:blur(6px)}
+.canvas-frame{position:relative;z-index:2;border:1px solid var(--border2);border-radius:10px;overflow:hidden;box-shadow:0 12px 60px rgba(0,0,0,.7)}
+.canvas-frame img{display:block;max-width:min(78vw,960px);max-height:58vh;object-fit:contain}
+.canvas-frame.comparing img{filter:brightness(1.12) saturate(1.15)}
+.split-divider{position:absolute;top:0;bottom:0;left:50%;width:2px;background:var(--lav);display:none}
+.canvas-frame.comparing .split-divider{display:block}
+
+/* floating chrome */
+.chip-prov{position:absolute;top:14px;left:14px;z-index:5;display:flex;align-items:center;gap:9px;background:rgba(15,15,26,.88);border:1px solid var(--border2);border-radius:22px;padding:6px 16px 6px 8px;font-size:12px;color:var(--dim);max-width:min(60vw,480px);backdrop-filter:blur(6px)}
+.chip-prov .dot{width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#5b4a8a,#b39ae0);display:grid;place-items:center;font-size:13px;flex:0 0 auto}
+.chip-prov b{color:var(--txt);font-weight:500}
+.chip-prov .clear{margin-left:6px;color:var(--faint);cursor:pointer}
+
+.view-tools{position:absolute;top:14px;right:14px;z-index:5;display:flex;gap:6px}
+.view-tools button{width:44px;padding:0;font-size:17px;border-radius:10px}
+.view-tools button.on{background:var(--accent);border-color:var(--accent2);color:#fff}
+
+.dock{position:absolute;left:50%;transform:translateX(-50%);z-index:5;display:flex;gap:4px;background:rgba(15,15,26,.92);border:1px solid var(--border2);border-radius:14px;padding:5px;backdrop-filter:blur(6px)}
+.dock-top{top:14px}
+.dock-bottom{bottom:calc(78px + 12px)}
+.dock button{border:0;background:transparent;border-radius:9px;min-height:42px;color:var(--dim);white-space:nowrap}
+.dock button.on{background:var(--accent);color:#fff}
+
+/* flyout panel attached above the dock */
+.flyout{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(78px + 66px);z-index:6;width:min(560px,92vw);max-height:44vh;overflow-y:auto;background:rgba(18,18,31,.96);border:1px solid var(--border2);border-radius:14px;padding:14px 18px;box-shadow:0 20px 60px rgba(0,0,0,.7);backdrop-filter:blur(8px)}
+.flyout[hidden]{display:none}
+.flyout .row2{display:flex;gap:8px}.flyout .row2>*{flex:1}
+.flyout .go{display:flex;gap:8px;margin-top:12px}
+.flyout .go .primary{flex:1}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font-size:11px;padding:4px 10px;border-radius:12px;border:1px solid var(--border2);color:var(--dim);cursor:pointer}
+.chip.on{background:var(--accent);border-color:var(--accent2);color:#fff}
+.hintline{font-size:11px;color:var(--faint);margin-top:4px}
+
+/* candidate filmstrip: bottom-left overlay */
+.filmstrip{position:absolute;left:14px;bottom:14px;z-index:5;display:flex;gap:8px;align-items:flex-end;max-width:52vw}
+.cand{flex:0 0 104px;border:2px solid transparent;border-radius:8px;overflow:hidden;position:relative;cursor:pointer;background:rgba(22,22,40,.9)}
+.cand img{display:block;width:100%;height:66px;object-fit:cover}
+.cand .tag{position:absolute;top:3px;left:3px;font-size:10px;background:rgba(15,15,26,.85);border-radius:4px;padding:1px 6px;color:var(--lav)}
+.cand.sel{border-color:var(--lav)}
+.cand.empty{display:grid;place-items:center;height:66px;color:var(--faint);font-size:11px;border-style:dashed}
+.filmstrip .note{font-size:10.5px;color:var(--faint);writing-mode:vertical-rl;max-height:80px}
+
+/* save card: bottom-right overlay */
+.save-card{position:absolute;right:14px;bottom:14px;z-index:5;background:rgba(18,18,31,.94);border:1px solid var(--border2);border-radius:12px;padding:10px;backdrop-filter:blur(6px)}
+.save-card .row{display:flex;gap:6px}
+.save-card button{font-size:12px;min-height:40px}
+.save-card .note{font-size:10px;color:var(--faint);text-align:center;margin-top:6px}
+
+@media (max-width: 900px){
+  body{overflow:auto;height:auto;min-height:100vh}
+  .stage{min-height:64vh}
+  .canvas-frame img{max-width:94vw;max-height:44vh}
+  .chip-prov{max-width:calc(100vw - 90px)}
+  .flyout{width:94vw;max-height:50vh;bottom:auto;position:static;transform:none;margin:0 8px;border-radius:0}
+  /* stacked fallback: dock becomes a static bar, flyout flows below */
+  body.stackmode .stage{display:block}
+  body.stackmode .dock{position:static;transform:none;margin:8px;justify-content:center;flex-wrap:wrap}
+  body.stackmode .flyout{position:static;transform:none;margin:0 8px 8px}
+  body.stackmode .filmstrip{position:static;margin:8px;max-width:none;overflow-x:auto}
+  body.stackmode .save-card{position:static;margin:8px}
+  body.stackmode .stage{display:flex;flex-direction:column;overflow:visible}
+  button{min-height:44px}
+}
+</style>
+</head>
+<body>
+<div class="mock-banner"><b>Mock 4 — Immersive Stage + Floating Dock (my own take).</b> <span>The entire page is the canvas; provenance chip, verb dock, flyout panel, candidate filmstrip and save card all float over it like camera chrome. Zero permanent panels → maximum image. Tradeoff: least conventional — floating chrome can overlap the image on small screens, and long forms live in a transient flyout. On iPad portrait it stacks via the <code>stackmode</code> class.</span></div>
+
+<div class="stage">
+  <img class="bg" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1216' height='832'%3E%3Cdefs%3E%3ClinearGradient id='s' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%233a2a5a'/%3E%3Cstop offset='.6' stop-color='%23b39ae0'/%3E%3Cstop offset='1' stop-color='%23e8d0b0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='1216' height='832' fill='url(%23s)'/%3E%3Ccircle cx='880' cy='240' r='70' fill='%23f5e6bc'/%3E%3Cpath d='M0 560 L300 380 L520 560 L760 420 L1000 600 L1216 480 L1216 832 L0 832 Z' fill='%232a2a44'/%3E%3Cpath d='M0 660 L250 560 L500 680 L800 580 L1216 700 L1216 832 L0 832 Z' fill='%231d1d33'/%3E%3C/svg%3E" alt="" aria-hidden="true">
+
+  <div class="chip-prov">
+    <div class="dot">📌</div>
+    <div><b>ridge-dusk-041.png</b><div style="font-size:11px;color:var(--faint)">generate · krea-t2i → refine (dusk-grade) · parent: ridge-dusk-040</div></div>
+    <span class="clear" title="clear working image">✕</span>
+  </div>
+
+  <div class="view-tools">
+    <button title="Pan/zoom">⤢</button>
+    <button id="cmpbtn" title="Before/after compare">⇔</button>
+    <button title="Inspect provenance">ⓘ</button>
+  </div>
+
+  <div class="canvas-frame" id="frame">
+    <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1216' height='832'%3E%3Cdefs%3E%3ClinearGradient id='s' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%233a2a5a'/%3E%3Cstop offset='.6' stop-color='%23b39ae0'/%3E%3Cstop offset='1' stop-color='%23e8d0b0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='1216' height='832' fill='url(%23s)'/%3E%3Ccircle cx='880' cy='240' r='70' fill='%23f5e6bc'/%3E%3Cpath d='M0 560 L300 380 L520 560 L760 420 L1000 600 L1216 480 L1216 832 L0 832 Z' fill='%232a2a44'/%3E%3Cpath d='M0 660 L250 560 L500 680 L800 580 L1216 700 L1216 832 L0 832 Z' fill='%231d1d33'/%3E%3C/svg%3E" alt="working image · 1216×832 · seed 812744">
+    <div class="split-divider"></div>
+  </div>
+
+  <div class="dock dock-top" id="dock">
+    <button class="on" data-v="generate">⚡ Generate</button>
+    <button data-v="refine">✎ Refine</button>
+    <button data-v="filters">🎛 Filters</button>
+  </div>
+
+  <div class="flyout" id="flyout" data-p="generate">
+    <label>Workflow</label>
+    <select><option>krea-t2i</option><option>krea-img2img</option><option>minimax-edit</option></select>
+    <label>Prompt</label>
+    <textarea rows="2">dusk over a mountain ridge, warm haze, painterly</textarea>
+    <div class="row2">
+      <div><label>Denoise</label><input value="0.65"><span class="hintline">&lt;1 → img2img from working image</span></div>
+      <div><label>Seed</label><input value="812744"></div>
+    </div>
+    <label>LoRAs</label>
+    <div class="chips"><span class="chip on">painterly ×0.8</span><span class="chip on">dusk-pal ×0.5</span><span class="chip">+ add</span></div>
+    <div class="go"><button class="primary" id="runbtn">⚡ Generate 4 candidates</button><button>↺ reuse working settings</button></div>
+  </div>
+
+  <div class="flyout" id="flyout-refine" data-p="refine" hidden>
+    <label>Preset</label>
+    <select><option>dusk-grade</option><option>face-restore</option><option>upscale-2x</option><option>inpaint-mask</option></select>
+    <div class="row2">
+      <div><label>Denoise</label><input value="0.35"></div>
+      <div><label>Seed</label><input value="auto"></div>
+    </div>
+    <span class="hintline">Result re-promotes to working; the ⇔ tool toggles before/after (split drag line in the real build). Mask presets paint directly on the stage.</span>
+    <div class="go"><button class="primary">✎ Run preset</button></div>
+  </div>
+
+  <div class="flyout" id="flyout-filters" data-p="filters" hidden>
+    <label>Toolset</label>
+    <div class="chips"><span class="chip on">vibrance</span><span class="chip on">warmth +12</span><span class="chip">sharpen</span><span class="chip">grain</span></div>
+    <label>Vibrance</label><input type="range" value="30" style="padding:0">
+    <label>Warmth</label><input type="range" value="12" style="padding:0">
+    <span class="hintline">In-place toolset on the working image; apply re-promotes with carried provenance.</span>
+    <div class="go"><button class="primary">🎛 Apply filter stack</button></div>
+  </div>
+
+  <div class="filmstrip">
+    <div class="cand sel"><span class="tag">c1</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='208' height='132'%3E%3Crect width='208' height='132' fill='%235b4a8a'/%3E%3Ccircle cx='155' cy='38' r='16' fill='%23f5e6bc'/%3E%3Cpath d='M0 85 L65 48 L112 85 L168 62 L208 92 L208 132 L0 132 Z' fill='%232a2a44'/%3E%3C/svg%3E"></div>
+    <div class="cand"><span class="tag">c2</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='208' height='132'%3E%3Crect width='208' height='132' fill='%234a3a7a'/%3E%3Ccircle cx='55' cy='42' r='14' fill='%23f5e6bc'/%3E%3Cpath d='M0 90 L72 52 L122 90 L178 66 L208 96 L208 132 L0 132 Z' fill='%232a2a44'/%3E%3C/svg%3E"></div>
+    <div class="cand"><span class="tag">c3</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='208' height='132'%3E%3Crect width='208' height='132' fill='%233a2a5a'/%3E%3Ccircle cx='120' cy='28' r='17' fill='%23f5e6bc'/%3E%3Cpath d='M0 78 L80 42 L140 86 L208 56 L208 132 L0 132 Z' fill='%231d1d33'/%3E%3C/svg%3E"></div>
+    <div class="cand empty">slot 4</div>
+    <div class="note">candidates · nothing auto-saves · next run overwrites</div>
+  </div>
+
+  <div class="save-card">
+    <div class="row">
+      <button title="Save over original">Save over</button>
+      <button title="Save new">Save new</button>
+      <button title="Save to Library">📚</button>
+    </div>
+    <div class="note">explicit save only</div>
+  </div>
+</div>
+
+<script>
+const dockBtns = document.querySelectorAll('#dock button');
+function showVerb(v){
+  dockBtns.forEach(b => b.classList.toggle('on', b.dataset.v === v));
+  ['generate','refine','filters'].forEach(k => {
+    document.getElementById(k === 'generate' ? 'flyout' : 'flyout-' + k).hidden = (k !== v);
+  });
+  document.getElementById('runbtn').textContent = v==='generate' ? '⚡ Generate 4 candidates' : v==='refine' ? '✎ Run preset' : '🎛 Apply filter stack';
+}
+dockBtns.forEach(b => b.addEventListener('click', () => showVerb(b.dataset.v)));
+document.querySelectorAll('.cand').forEach(c => c.addEventListener('click', () => {
+  document.querySelectorAll('.cand').forEach(x => x.classList.remove('sel')); c.classList.add('sel');
+}));
+const frame = document.getElementById('frame'), cmp = document.getElementById('cmpbtn');
+cmp.addEventListener('click', () => {
+  const on = frame.classList.toggle('comparing');
+  cmp.classList.toggle('on', on);
+});
+// stacked mode toggle for preview: visit with ?stacked=1
+if (new URLSearchParams(location.search).has('stacked')) document.body.classList.add('stackmode');
+</script>
+</body>
+</html>

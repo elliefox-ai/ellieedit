@@ -15,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Response as FResponse
+from fastapi import APIRouter, File, HTTPException, Query, Response as FResponse, UploadFile
 from fastapi.responses import FileResponse, Response
 from PIL import Image
 
@@ -592,6 +592,34 @@ def thumbnail(path: str = Query(...), bank: str = "primary"):
         raise HTTPException(500, f"thumbnail failed: {e}")
     return FileResponse(tp, media_type="image/webp",
                         headers={"Cache-Control": "public, max-age=86400"})
+
+
+
+@router.post("/upload")
+async def upload(file: UploadFile = File(...)):
+    """Save an uploaded image into the gallery root (Studio source slot).
+    Jail-safe: name is flattened to its basename, ext checked, size capped,
+    collisions get -N suffixes. Returns the gallery-relative path."""
+    import shutil as _shutil
+    if not file.filename:
+        raise HTTPException(400, "empty filename")
+    name = os.path.basename(file.filename.replace("\\", "/")).strip()
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in EXTS:
+        raise HTTPException(400, f"unsupported file type {ext!r}")
+    data = await file.read()
+    if not data or len(data) > 25 * 1024 * 1024:
+        raise HTTPException(400, "empty or oversized upload (25MB max)")
+    GALLERY_ROOT.mkdir(parents=True, exist_ok=True)
+    dest = GALLERY_ROOT / name
+    i = 1
+    while dest.exists():
+        dest = GALLERY_ROOT / f"{os.path.splitext(name)[0]}-{i}{ext}"
+        i += 1
+    dest.write_bytes(data)
+    rel = dest.relative_to(GALLERY_ROOT).as_posix()
+    log.info("gallery upload %s (%d bytes)", rel, len(data))
+    return {"ok": True, "path": rel}
 
 
 @router.get("/file")

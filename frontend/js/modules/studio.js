@@ -107,6 +107,10 @@ function panelHTML() {
     .st-cand.sel .pick { opacity: 1; }
     .st-cand.empty { display: grid; place-items: center; height: 86px; color: #6c6c8e; font-size: 11px;
       border: 2px dashed #2a2a44; background: transparent; cursor: default; }
+    .st-src{position:relative;flex:0 0 auto;display:grid;place-items:center;min-height:64px;min-width:64px;border:1px dashed #4a4a6c;border-radius:8px;color:#8a8aaa;font-size:12px;cursor:pointer;overflow:hidden}
+    .st-src.has{border-style:solid}
+    .st-src.has img{width:64px;height:64px;object-fit:cover;display:block}
+    .st-src-x{position:absolute;top:2px;right:2px;width:18px;height:18px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:11px;color:#fff}
     /* ---- right rail ---- */
     .st-rail { flex: 0 0 330px; background: #12121f; border-left: 1px solid #2a2a44; display: flex; flex-direction: column; min-height: 0; }
     .st-verbswitch { display: flex; margin: 12px; background: #161628; border: 1px solid #4a4a6c; border-radius: 8px; overflow: hidden; }
@@ -561,6 +565,7 @@ export function mountStudio(panel, jobbar) {
   }
   studioState().subscribe(d => {
     syncChip(d);
+    renderCandidates();
     if (!d.path) return;
     openWorking(d.path, d.name);
     if (verb === 'provenance') renderProvenance();
@@ -777,6 +782,31 @@ export function mountStudio(panel, jobbar) {
   wireSaveBars();
 
   // ── candidate strip: docked + fullscreen overlay share one renderer ──
+  let filePick = null;
+  function pickSource() {
+    if (!filePick) {
+      filePick = document.createElement('input');
+      filePick.type = 'file'; filePick.accept = 'image/*';
+      filePick.style.display = 'none';
+      filePick.addEventListener('change', async () => {
+        const f = filePick.files && filePick.files[0];
+        if (!f) return;
+        say('uploading source…');
+        const fd = new FormData();
+        fd.append('file', f, f.name);
+        try {
+          const r = await fetch('/api/gallery/upload', { method: 'POST', body: fd });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.detail || r.status);
+          studioState().set(d.path, 'gallery-upload', { name: d.path.split('/').pop() });
+          say(`working image: ${d.path}`);
+        } catch (err) { say(`upload failed: ${err.message}`, true); }
+        filePick.value = '';
+      });
+      panel.appendChild(filePick);
+    }
+    filePick.click();
+  }
   function renderCandidates() {
     const list = cands.get();
     let selPath = null;
@@ -814,6 +844,28 @@ export function mountStudio(panel, jobbar) {
         d.textContent = `slot ${i + 1}`;
         target.appendChild(d);
       }
+      // source slot (right-aligned): the current working image with an X,
+      // or an upload affordance when empty (decision §10 review, 2026-11-13)
+      const st = studioState().get();
+      const src = document.createElement('span');
+      src.className = 'st-src' + (st.path ? ' has' : '');
+      if (st.path) {
+        const im = document.createElement('img');
+        im.src = galleryFileUrl(st.path); im.alt = 'source image';
+        im.title = `source: ${st.path.split('/').pop()}`;
+        const x = document.createElement('span');
+        x.className = 'st-src-x'; x.textContent = '✕';
+        x.title = 'Clear working image';
+        x.addEventListener('click', (e) => {
+          e.stopPropagation(); studioState().clear(); say('working image cleared');
+        });
+        src.append(im, x);
+      } else {
+        src.textContent = '＋ source';
+        src.title = 'Upload an image as the working image';
+        src.addEventListener('click', () => pickSource());
+      }
+      target.appendChild(src);
     }
     el.strip.classList.toggle('st-running', busy);
     void selPath;
@@ -891,6 +943,13 @@ export function mountStudio(panel, jobbar) {
       cands.startRun(collected);
       renderCandidates();
       showToast(`Run complete — ${collected.length} candidate${collected.length === 1 ? '' : 's'}`);
+      // Canvas previews the leading candidate without promoting (§7.2/§10
+      // review: see results without changing the working image). Cleared by
+      // showCurrent() on the next working-image change or run.
+      if (collected.length) {
+        previewUrl = collected[0].url;
+        if (!compareOn) el['img-a'].src = previewUrl;
+      }
       // No auto-promote (decision §7.2/§10): outputs become the working
       // image only on explicit candidate selection — otherwise edit chains
       // silently drift off the user's chosen source image.

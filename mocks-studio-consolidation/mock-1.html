@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio Mock 1 — Canvas + Right Control Rail</title>
+<style>
+:root{
+  --bg:#0f0f1a; --panel:#12121f; --panel2:#161628; --panel3:#1d1d33;
+  --border:#2a2a44; --border2:#4a4a6c; --txt:#d4d4e0; --dim:#8a8aaa; --faint:#6c6c8e;
+  --accent:#5b4a8a; --accent2:#7a6aaa; --lav:#b39ae0; --ok:#7de08a; --err:#e87a7a;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+button{font:inherit;color:inherit;background:var(--panel3);border:1px solid var(--border2);border-radius:6px;padding:8px 14px;cursor:pointer;min-height:36px}
+button:hover{background:#4a4a6c}
+button.primary{background:var(--accent);border-color:var(--accent2);color:#fff}
+input,textarea,select{font:inherit;background:var(--panel2);color:var(--txt);border:1px solid var(--border2);border-radius:6px;padding:8px;width:100%}
+label{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;display:block;margin:10px 0 4px}
+
+.mock-banner{background:#241a3a;border-bottom:1px solid var(--border2);padding:8px 16px;font-size:12.5px;color:var(--lav);flex:0 0 auto}
+.mock-banner b{color:#fff}
+.mock-banner span{color:var(--dim)}
+
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--border);flex:0 0 auto}
+header h1{font-size:15px;font-weight:600}
+.prov-chip{display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--border2);border-radius:20px;padding:4px 12px 4px 6px;font-size:12px;color:var(--dim);max-width:420px}
+.prov-chip .dot{width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,#5b4a8a,#b39ae0);flex:0 0 auto;display:grid;place-items:center;font-size:12px}
+.prov-chip b{color:var(--txt);font-weight:500}
+.prov-chain{color:var(--faint);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+header .spacer{flex:1}
+
+.main{flex:1;display:flex;min-height:0}
+
+/* ---- canvas column ---- */
+.stage{flex:1;display:flex;flex-direction:column;min-width:0;background:#0a0a12}
+.canvas-area{flex:1;display:grid;place-items:center;padding:20px;min-height:0}
+.canvas-frame{position:relative;max-width:100%;max-height:100%;border:1px solid var(--border2);border-radius:8px;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.5)}
+.canvas-frame img{display:block;max-width:min(100%,900px);max-height:56vh;object-fit:contain}
+.canvas-badge{position:absolute;top:10px;left:10px;background:rgba(15,15,26,.85);border:1px solid var(--border2);border-radius:5px;padding:3px 10px;font-size:11px;color:var(--lav)}
+.compare-bar{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);display:none;gap:0;background:rgba(15,15,26,.9);border:1px solid var(--border2);border-radius:8px;overflow:hidden}
+.canvas-frame.comparing .compare-bar{display:flex}
+.compare-bar button{border:0;border-radius:0;background:transparent;min-height:32px;font-size:12px;color:var(--dim)}
+.compare-bar button.on{background:var(--accent);color:#fff}
+.canvas-frame.comparing img{filter:brightness(1.12) saturate(1.15)}
+
+/* candidate strip */
+.strip{flex:0 0 auto;padding:10px 20px 14px;border-top:1px solid var(--border);background:var(--panel)}
+.strip-head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+.strip-head h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)}
+.strip-head .note{font-size:11px;color:var(--faint)}
+.strip-head .note em{color:var(--lav);font-style:normal}
+.cands{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px}
+.cand{flex:0 0 128px;border:2px solid transparent;border-radius:8px;overflow:hidden;position:relative;cursor:pointer;background:var(--panel2)}
+.cand img{display:block;width:100%;height:86px;object-fit:cover}
+.cand .tag{position:absolute;top:4px;left:4px;font-size:10px;background:rgba(15,15,26,.85);border-radius:4px;padding:1px 6px;color:var(--lav)}
+.cand.sel{border-color:var(--lav)}
+.cand .pick{position:absolute;bottom:4px;right:4px;font-size:10px;background:var(--accent);color:#fff;border-radius:4px;padding:2px 7px;opacity:0}
+.cand.sel .pick{opacity:1}
+.cand.empty{display:grid;place-items:center;height:86px;color:var(--faint);font-size:11px;border-style:dashed}
+
+/* ---- right rail ---- */
+.rail{flex:0 0 320px;background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+.verb-switch{display:flex;margin:12px;background:var(--panel2);border:1px solid var(--border2);border-radius:8px;overflow:hidden}
+.verb-switch button{flex:1;border:0;border-radius:0;background:transparent;color:var(--dim);min-height:44px;font-size:13px}
+.verb-switch button.on{background:var(--accent);color:#fff}
+.rail-body{flex:1;overflow-y:auto;padding:0 16px 16px;min-height:0}
+.verb-panel[hidden]{display:none}
+.rail-actions{flex:0 0 auto;padding:12px 16px;border-top:1px solid var(--border);background:var(--panel2)}
+.rail-actions .row{display:flex;gap:8px}
+.rail-actions .row+.row{margin-top:8px}
+.rail-actions button{flex:1;font-size:12.5px}
+.save-note{font-size:11px;color:var(--faint);margin-top:8px;text-align:center}
+
+.row2{display:flex;gap:8px}
+.row2>*{flex:1}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font-size:11px;padding:3px 9px;border-radius:12px;border:1px solid var(--border2);color:var(--dim);cursor:pointer}
+.chip.on{background:var(--accent);border-color:var(--accent2);color:#fff}
+.hintline{font-size:11px;color:var(--faint);margin-top:4px}
+.btn-ghost{background:transparent}
+
+/* iPad / mobile */
+@media (max-width: 900px){
+  body{overflow:auto;height:auto;min-height:100vh}
+  .main{flex-direction:column}
+  .rail{flex:0 0 auto;border-left:0;border-top:1px solid var(--border);order:2}
+  .stage{order:1}
+  .canvas-frame img{max-height:44vh}
+  .verb-switch{position:sticky;top:0;z-index:5;margin:0;border-radius:0;border-left:0;border-right:0;background:var(--panel)}
+  .rail-body{padding-bottom:24px}
+  button{min-height:44px}
+  .cand{flex-basis:110px}
+  .cand img{height:72px}
+}
+</style>
+</head>
+<body>
+<div class="mock-banner"><b>Mock 1 — Canvas + Right Control Rail.</b> <span>The working image never leaves the screen; every verb lives in a docked rail on the right, switched by one segmented control (Generate · Refine · Filters). Tradeoff: rails get tall — form density wins, but narrow screens push the rail below the canvas.</span></div>
+
+<header>
+  <h1>Studio</h1>
+  <div class="prov-chip" title="Working image provenance">
+    <div class="dot">📌</div>
+    <div><b>ridge-dusk-041.png</b><div class="prov-chain">generate · krea-t2i → refine (preset: dusk-grade) · parent: ridge-dusk-040</div></div>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn-ghost" title="Clear working image">✕ clear</button>
+</header>
+
+<div class="main">
+  <section class="stage">
+    <div class="canvas-area">
+      <div class="canvas-frame" id="frame">
+        <div class="canvas-badge">working image · 1216×832 · seed 812744</div>
+        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1216' height='832'%3E%3Cdefs%3E%3ClinearGradient id='s' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%233a2a5a'/%3E%3Cstop offset='.6' stop-color='%23b39ae0'/%3E%3Cstop offset='1' stop-color='%23e8d0b0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='1216' height='832' fill='url(%23s)'/%3E%3Ccircle cx='880' cy='240' r='70' fill='%23f5e6bc'/%3E%3Cpath d='M0 560 L300 380 L520 560 L760 420 L1000 600 L1216 480 L1216 832 L0 832 Z' fill='%232a2a44'/%3E%3Cpath d='M0 660 L250 560 L500 680 L800 580 L1216 700 L1216 832 L0 832 Z' fill='%231d1d33'/%3E%3C/svg%3E" alt="working image">
+        <div class="compare-bar" id="cmpbar">
+          <button class="on" data-c="after">Result</button>
+          <button data-c="before">Before</button>
+          <button data-c="split">Split</button>
+        </div>
+      </div>
+    </div>
+    <div class="strip">
+      <div class="strip-head">
+        <h2>Candidates</h2>
+        <span class="note">nothing auto-saves — <em>next run overwrites unretrieved candidates</em></span>
+        <label style="margin:0 0 0 auto;text-transform:none;letter-spacing:0;display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim)"><input type="checkbox" style="width:auto"> save all outputs to gallery</label>
+      </div>
+      <div class="cands">
+        <div class="cand sel"><span class="tag">c1</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='172'%3E%3Crect width='256' height='172' fill='%235b4a8a'/%3E%3Ccircle cx='190' cy='50' r='22' fill='%23f5e6bc'/%3E%3Cpath d='M0 110 L80 60 L140 110 L200 80 L256 120 L256 172 L0 172 Z' fill='%232a2a44'/%3E%3C/svg%3E"><span class="pick">promote</span></div>
+        <div class="cand"><span class="tag">c2</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='172'%3E%3Crect width='256' height='172' fill='%234a3a7a'/%3E%3Ccircle cx='70' cy='60' r='20' fill='%23f5e6bc'/%3E%3Cpath d='M0 120 L90 70 L160 120 L220 90 L256 130 L256 172 L0 172 Z' fill='%232a2a44'/%3E%3C/svg%3E"><span class="pick">promote</span></div>
+        <div class="cand"><span class="tag">c3</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='172'%3E%3Crect width='256' height='172' fill='%233a2a5a'/%3E%3Ccircle cx='150' cy='40' r='24' fill='%23f5e6bc'/%3E%3Cpath d='M0 100 L100 50 L180 110 L256 70 L256 172 L0 172 Z' fill='%231d1d33'/%3E%3C/svg%3E"><span class="pick">promote</span></div>
+        <div class="cand empty">slot 4</div>
+      </div>
+    </div>
+  </section>
+
+  <aside class="rail">
+    <div class="verb-switch" role="tablist">
+      <button class="on" data-verb="generate" role="tab" aria-selected="true">⚡ Generate</button>
+      <button data-verb="refine" role="tab" aria-selected="false">✎ Refine</button>
+      <button data-verb="filters" role="tab" aria-selected="false">🎛 Filters</button>
+    </div>
+
+    <div class="rail-body">
+      <div class="verb-panel" data-panel="generate">
+        <label>Workflow</label>
+        <select><option>krea-t2i</option><option>krea-img2img</option><option>minimax-edit</option></select>
+        <label>Prompt</label>
+        <textarea rows="3">dusk over a mountain ridge, warm haze, painterly</textarea>
+        <div class="row2">
+          <div><label>Aspect</label><select><option>3:2 · 1216×832</option><option>1:1 · 1024×1024</option></select></div>
+          <div><label>Seed</label><input value="812744"></div>
+        </div>
+        <div class="row2">
+          <div><label>Denoise</label><input value="0.65"><span class="hintline">&lt;1 uses working image as input</span></div>
+          <div><label>Steps</label><input value="28"></div>
+        </div>
+        <label>LoRAs</label>
+        <div class="chips"><span class="chip on">painterly ×0.8</span><span class="chip on">dusk-pal ×0.5</span><span class="chip">+ add</span></div>
+        <label style="margin-top:14px">Composition</label>
+        <button class="btn-ghost" style="width:100%">↺ Load settings from working image</button>
+      </div>
+
+      <div class="verb-panel" data-panel="refine" hidden>
+        <label>Preset</label>
+        <select><option>dusk-grade</option><option>face-restore</option><option>upscale-2x</option><option>inpaint-mask</option></select>
+        <label>Prompt override</label>
+        <input value="(library: warm cinematic grade)">
+        <div class="row2">
+          <div><label>Denoise</label><input value="0.35"></div>
+          <div><label>Seed</label><input value="auto"></div>
+        </div>
+        <label>Mask (inpaint presets only)</label>
+        <button class="btn-ghost" style="width:100%">🖌 Paint mask on canvas</button>
+        <span class="hintline">Comparer appears in the canvas overlay while a refine result is on the working image.</span>
+      </div>
+
+      <div class="verb-panel" data-panel="filters" hidden>
+        <label>Toolset</label>
+        <div class="chips"><span class="chip on">vibrance</span><span class="chip on">warmth +12</span><span class="chip">sharpen</span><span class="chip">grain</span></div>
+        <label>Vibrance</label><input type="range" min="0" max="100" value="30" style="padding:0">
+        <label>Warmth</label><input type="range" min="-50" max="50" value="12" style="padding:0">
+        <span class="hintline">Filters act in-place on the working image; output re-promotes with fresh provenance.</span>
+        <button class="primary" style="width:100%;margin-top:14px">Apply filter stack</button>
+      </div>
+    </div>
+
+    <div class="rail-actions">
+      <div class="row"><button class="primary" id="runbtn">⚡ Generate 4 candidates</button></div>
+      <div class="row">
+        <button title="Save over the original file">Save over</button>
+        <button title="Save as a new file">Save new</button>
+        <button title="Save to Library">📚 Library</button>
+      </div>
+      <div class="save-note">explicit save only — candidates die on the next run unless saved</div>
+    </div>
+  </aside>
+</div>
+
+<script>
+// verb switching
+const sw = document.querySelectorAll('.verb-switch button');
+sw.forEach(b => b.addEventListener('click', () => {
+  sw.forEach(x => { x.classList.toggle('on', x===b); x.setAttribute('aria-selected', x===b); });
+  document.querySelectorAll('.verb-panel').forEach(p => p.hidden = p.dataset.panel !== b.dataset.verb);
+  document.getElementById('runbtn').textContent =
+    b.dataset.verb==='generate' ? '⚡ Generate 4 candidates' :
+    b.dataset.verb==='refine' ? '✎ Run preset' : '🎛 Apply filter stack';
+}));
+// candidate select (demo)
+document.querySelectorAll('.cand:not(.empty)').forEach(c => c.addEventListener('click', () => {
+  document.querySelectorAll('.cand').forEach(x => x.classList.remove('sel')); c.classList.add('sel');
+}));
+// comparer demo
+const frame = document.getElementById('frame');
+document.querySelectorAll('#cmpbar button').forEach(b => b.addEventListener('click', e => {
+  e.stopPropagation();
+  document.querySelectorAll('#cmpbar button').forEach(x => x.classList.remove('on')); b.classList.add('on');
+  frame.classList.toggle('comparing', b.dataset.c !== 'after');
+}));
+frame.addEventListener('dblclick', () => {
+  const on = !frame.classList.contains('comparing');
+  frame.classList.toggle('comparing', on);
+  document.querySelector('#cmpbar [data-c="before"]').classList.toggle('on', on);
+  document.querySelector('#cmpbar [data-c="after"]').classList.toggle('on', !on);
+});
+</script>
+</body>
+</html>

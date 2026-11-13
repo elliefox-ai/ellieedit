@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio Mock 3 — Verb-Switched Workspace (rail left)</title>
+<style>
+:root{
+  --bg:#0f0f1a; --panel:#12121f; --panel2:#161628; --panel3:#1d1d33;
+  --border:#2a2a44; --border2:#4a4a6c; --txt:#d4d4e0; --dim:#8a8aaa; --faint:#6c6c8e;
+  --accent:#5b4a8a; --accent2:#7a6aaa; --lav:#b39ae0;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+button{font:inherit;color:inherit;background:var(--panel3);border:1px solid var(--border2);border-radius:6px;padding:8px 14px;cursor:pointer;min-height:36px}
+button:hover{background:#4a4a6c}
+button.primary{background:var(--accent);border-color:var(--accent2);color:#fff}
+input,textarea,select{font:inherit;background:var(--panel2);color:var(--txt);border:1px solid var(--border2);border-radius:6px;padding:8px;width:100%}
+label{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;display:block;margin:10px 0 4px}
+
+.mock-banner{background:#241a3a;border-bottom:1px solid var(--border2);padding:8px 16px;font-size:12.5px;color:var(--lav);flex:0 0 auto}
+.mock-banner b{color:#fff}
+.mock-banner span{color:var(--dim)}
+
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--border);flex:0 0 auto}
+header h1{font-size:15px;font-weight:600}
+.prov-chip{display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--border2);border-radius:20px;padding:5px 12px 5px 7px;font-size:12px;color:var(--dim);max-width:460px}
+.prov-chip .dot{width:24px;height:24px;border-radius:50%;background:linear-gradient(135deg,#5b4a8a,#b39ae0);display:grid;place-items:center;font-size:12px;flex:0 0 auto}
+.prov-chip b{color:var(--txt);font-weight:500}
+header .spacer{flex:1}
+
+.main{flex:1;display:flex;min-height:0}
+
+/* left rail — Lightroom-style verb modules */
+.rail{flex:0 0 300px;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+.rail-verbs{padding:10px;display:flex;flex-direction:column;gap:4px;border-bottom:1px solid var(--border)}
+.rail-verbs button{text-align:left;border:0;background:transparent;border-radius:6px;min-height:44px;display:flex;gap:10px;align-items:center;color:var(--dim)}
+.rail-verbs button.on{background:var(--accent);color:#fff}
+.rail-body{flex:1;overflow-y:auto;padding:12px 16px;min-height:0}
+.rail-panel[hidden]{display:none}
+.rail-footer{flex:0 0 auto;padding:12px 16px;border-top:1px solid var(--border);background:var(--panel2)}
+.rail-footer button{width:100%;margin-bottom:8px;font-size:13px}
+.save-note{font-size:11px;color:var(--faint);text-align:center}
+.row2{display:flex;gap:8px}.row2>*{flex:1}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font-size:11px;padding:4px 10px;border-radius:12px;border:1px solid var(--border2);color:var(--dim);cursor:pointer}
+.chip.on{background:var(--accent);border-color:var(--accent2);color:#fff}
+.hintline{font-size:11px;color:var(--faint);margin-top:4px}
+.btn-ghost{background:transparent;width:100%}
+
+/* right workspace */
+.workspace{flex:1;display:flex;flex-direction:column;min-width:0;background:#0a0a12}
+.ws-head{display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1px solid var(--border);background:var(--panel);font-size:12px;color:var(--dim)}
+.ws-head b{color:var(--txt)}
+.compare-toggle{margin-left:auto;display:flex;border:1px solid var(--border2);border-radius:8px;overflow:hidden}
+.compare-toggle button{border:0;border-radius:0;background:transparent;min-height:32px;font-size:12px;color:var(--dim)}
+.compare-toggle button.on{background:var(--accent);color:#fff}
+.ws-canvas{flex:1;display:grid;place-items:center;padding:20px;min-height:0;position:relative;overflow:hidden}
+.canvas-frame{position:relative;border:1px solid var(--border2);border-radius:8px;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.5)}
+.canvas-frame img{display:block;max-width:min(100%,860px);max-height:54vh;object-fit:contain}
+.canvas-frame.comparing img{filter:brightness(1.12) saturate(1.15)}
+.canvas-badge{position:absolute;top:10px;left:10px;background:rgba(15,15,26,.85);border:1px solid var(--border2);border-radius:5px;padding:3px 10px;font-size:11px;color:var(--lav)}
+.split-divider{position:absolute;top:0;bottom:0;width:2px;background:var(--lav);display:none}
+.canvas-frame.comparing .split-divider{display:block;left:50%}
+
+/* bottom strip spans the workspace only */
+.ws-strip{flex:0 0 auto;border-top:1px solid var(--border);background:var(--panel);padding:10px 16px 14px}
+.ws-strip .head{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
+.ws-strip h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)}
+.ws-strip .note{font-size:11px;color:var(--faint)}
+.cands{display:flex;gap:10px;overflow-x:auto}
+.cand{flex:0 0 120px;border:2px solid transparent;border-radius:8px;overflow:hidden;position:relative;cursor:pointer;background:var(--panel2)}
+.cand img{display:block;width:100%;height:80px;object-fit:cover}
+.cand .tag{position:absolute;top:4px;left:4px;font-size:10px;background:rgba(15,15,26,.85);border-radius:4px;padding:1px 6px;color:var(--lav)}
+.cand.sel{border-color:var(--lav)}
+.cand.empty{display:grid;place-items:center;height:80px;color:var(--faint);font-size:11px;border-style:dashed}
+
+@media (max-width: 900px){
+  body{overflow:auto;height:auto}
+  .main{flex-direction:column}
+  .rail{flex:0 0 auto;order:2;border-right:0;border-top:1px solid var(--border)}
+  .rail-verbs{flex-direction:row;overflow-x:auto;border-bottom:0}
+  .rail-verbs button{white-space:nowrap;flex:0 0 auto}
+  .workspace{order:1}
+  .canvas-frame img{max-height:42vh}
+  button{min-height:44px}
+}
+</style>
+</head>
+<body>
+<div class="mock-banner"><b>Mock 3 — Verb-Switched Workspace (rail left, Lightroom-style).</b> <span>Verbs are tall stacked modules on the left; the right side is a dedicated viewer with its own comparer toggle and candidate strip. Tradeoff: most familiar photo-app metaphor and room for verbose panels, but the verb list adds a navigation layer and the two-column split gives the canvas less width than Mock 1.</span></div>
+
+<header>
+  <h1>Studio</h1>
+  <div class="prov-chip">
+    <div class="dot">📌</div>
+    <div><b>ridge-dusk-041.png</b><div style="font-size:11px;color:var(--faint)">generate · krea-t2i → refine (dusk-grade) · parent: ridge-dusk-040</div></div>
+  </div>
+  <div class="spacer"></div>
+  <button style="min-height:36px">✕ clear</button>
+</header>
+
+<div class="main">
+  <aside class="rail">
+    <nav class="rail-verbs" role="tablist" aria-orientation="vertical">
+      <button class="on" data-v="generate" role="tab" aria-selected="true">⚡ <span>Generate</span></button>
+      <button data-v="refine" role="tab" aria-selected="false">✎ <span>Refine preset</span></button>
+      <button data-v="filters" role="tab" aria-selected="false">🎛 <span>Filters toolset</span></button>
+      <button data-v="inspect" role="tab" aria-selected="false">ⓘ <span>Inspect provenance</span></button>
+    </nav>
+
+    <div class="rail-body">
+      <div class="rail-panel" data-p="generate">
+        <label>Workflow</label>
+        <select><option>krea-t2i</option><option>krea-img2img</option><option>minimax-edit</option></select>
+        <label>Prompt</label>
+        <textarea rows="4">dusk over a mountain ridge, warm haze, painterly</textarea>
+        <div class="row2"><div><label>Aspect</label><select><option>3:2 · 1216×832</option></select></div><div><label>Seed</label><input value="812744"></div></div>
+        <div class="row2"><div><label>Denoise</label><input value="0.65"><span class="hintline">&lt;1 → img2img from working image</span></div><div><label>Steps</label><input value="28"></div></div>
+        <label>LoRAs</label>
+        <div class="chips"><span class="chip on">painterly ×0.8</span><span class="chip on">dusk-pal ×0.5</span><span class="chip">+ add</span></div>
+        <label style="margin-top:12px">Composition</label>
+        <button class="btn-ghost">↺ Load settings from working image</button>
+      </div>
+
+      <div class="rail-panel" data-p="refine" hidden>
+        <label>Preset</label>
+        <select><option>dusk-grade</option><option>face-restore</option><option>upscale-2x</option><option>inpaint-mask</option></select>
+        <label>Prompt override</label><input value="(library: warm cinematic grade)">
+        <div class="row2"><div><label>Denoise</label><input value="0.35"></div><div><label>Seed</label><input value="auto"></div></div>
+        <label>Mask</label>
+        <button class="btn-ghost">🖌 Paint mask on the viewer</button>
+        <span class="hintline">Runs land on the viewer; use the Before/Split toggle above the canvas.</span>
+      </div>
+
+      <div class="rail-panel" data-p="filters" hidden>
+        <label>Toolset</label>
+        <div class="chips"><span class="chip on">vibrance</span><span class="chip on">warmth +12</span><span class="chip">sharpen</span><span class="chip">grain</span></div>
+        <label>Vibrance</label><input type="range" value="30" style="padding:0">
+        <label>Warmth</label><input type="range" value="12" style="padding:0">
+        <span class="hintline">In-place on the working image; output re-promotes with carried provenance.</span>
+      </div>
+
+      <div class="rail-panel" data-p="inspect" hidden>
+        <label>Provenance</label>
+        <div style="font-size:12.5px;color:var(--dim);line-height:1.6">
+          <b style="color:var(--txt)">ridge-dusk-041.png</b><br>
+          1. generate · krea-t2i · seed 812744 · painterly×0.8, dusk-pal×0.5<br>
+          2. refine · dusk-grade · denoise 0.35<br>
+          parent: ridge-dusk-040.png<br>
+          1216×832 · <span style="color:var(--lav)">in-session (not saved)</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="rail-footer">
+      <button class="primary" id="runbtn">⚡ Generate 4 candidates</button>
+      <div class="row2">
+        <button title="Save over original">Save over</button>
+        <button title="Save new">Save new</button>
+      </div>
+      <button title="Save to Library">📚 Save to Library</button>
+      <div class="save-note">explicit save only · candidates die on next run</div>
+    </div>
+  </aside>
+
+  <section class="workspace">
+    <div class="ws-head">
+      <b>Working image</b> · 1216×832 · seed 812744
+      <div class="compare-toggle">
+        <button class="on" data-c="after">Result</button>
+        <button data-c="before">Before</button>
+        <button data-c="split">Split ⇔</button>
+      </div>
+    </div>
+    <div class="ws-canvas">
+      <div class="canvas-frame" id="frame">
+        <div class="canvas-badge">📌 working image</div>
+        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1216' height='832'%3E%3Cdefs%3E%3ClinearGradient id='s' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%233a2a5a'/%3E%3Cstop offset='.6' stop-color='%23b39ae0'/%3E%3Cstop offset='1' stop-color='%23e8d0b0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='1216' height='832' fill='url(%23s)'/%3E%3Ccircle cx='880' cy='240' r='70' fill='%23f5e6bc'/%3E%3Cpath d='M0 560 L300 380 L520 560 L760 420 L1000 600 L1216 480 L1216 832 L0 832 Z' fill='%232a2a44'/%3E%3Cpath d='M0 660 L250 560 L500 680 L800 580 L1216 700 L1216 832 L0 832 Z' fill='%231d1d33'/%3E%3C/svg%3E" alt="working image">
+        <div class="split-divider"></div>
+      </div>
+    </div>
+    <div class="ws-strip">
+      <div class="head"><h2>Candidates</h2><span class="note">nothing auto-saves — next run overwrites unretrieved · <u>☐ save all outputs to gallery (default OFF)</u></span></div>
+      <div class="cands">
+        <div class="cand sel"><span class="tag">c1</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='160'%3E%3Crect width='240' height='160' fill='%235b4a8a'/%3E%3Ccircle cx='180' cy='45' r='20' fill='%23f5e6bc'/%3E%3Cpath d='M0 100 L75 55 L130 100 L185 75 L240 110 L240 160 L0 160 Z' fill='%232a2a44'/%3E%3C/svg%3E"></div>
+        <div class="cand"><span class="tag">c2</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='160'%3E%3Crect width='240' height='160' fill='%234a3a7a'/%3E%3Ccircle cx='60' cy='50' r='18' fill='%23f5e6bc'/%3E%3Cpath d='M0 105 L80 60 L140 105 L200 78 L240 115 L240 160 L0 160 Z' fill='%232a2a44'/%3E%3C/svg%3E"></div>
+        <div class="cand"><span class="tag">c3</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='160'%3E%3Crect width='240' height='160' fill='%233a2a5a'/%3E%3Ccircle cx='140' cy='35' r='21' fill='%23f5e6bc'/%3E%3Cpath d='M0 90 L90 48 L160 95 L240 62 L240 160 L0 160 Z' fill='%231d1d33'/%3E%3C/svg%3E"></div>
+        <div class="cand empty">slot 4</div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+const vb = document.querySelectorAll('.rail-verbs button');
+vb.forEach(b => b.addEventListener('click', () => {
+  vb.forEach(x => { x.classList.toggle('on', x===b); x.setAttribute('aria-selected', x===b); });
+  document.querySelectorAll('.rail-panel').forEach(p => p.hidden = p.dataset.p !== b.dataset.v);
+  document.getElementById('runbtn').textContent =
+    b.dataset.v==='generate' ? '⚡ Generate 4 candidates' :
+    b.dataset.v==='refine' ? '✎ Run preset' : b.dataset.v==='filters' ? '🎛 Apply filter stack' : 'ⓘ Inspect';
+}));
+document.querySelectorAll('.cand').forEach(c => c.addEventListener('click', () => {
+  document.querySelectorAll('.cand').forEach(x => x.classList.remove('sel')); c.classList.add('sel');
+}));
+const frame = document.getElementById('frame');
+document.querySelectorAll('.compare-toggle button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.compare-toggle button').forEach(x => x.classList.remove('on')); b.classList.add('on');
+  frame.classList.toggle('comparing', b.dataset.c !== 'after');
+}));
+</script>
+</body>
+</html>

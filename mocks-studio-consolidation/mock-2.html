@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio Mock 2 — Canvas + Bottom Sheet</title>
+<style>
+:root{
+  --bg:#0f0f1a; --panel:#12121f; --panel2:#161628; --panel3:#1d1d33;
+  --border:#2a2a44; --border2:#4a4a6c; --txt:#d4d4e0; --dim:#8a8aaa; --faint:#6c6c8e;
+  --accent:#5b4a8a; --accent2:#7a6aaa; --lav:#b39ae0;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+button{font:inherit;color:inherit;background:var(--panel3);border:1px solid var(--border2);border-radius:6px;padding:8px 14px;cursor:pointer;min-height:44px}
+button:hover{background:#4a4a6c}
+button.primary{background:var(--accent);border-color:var(--accent2);color:#fff}
+input,textarea,select{font:inherit;background:var(--panel2);color:var(--txt);border:1px solid var(--border2);border-radius:6px;padding:10px;width:100%}
+label{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;display:block;margin:12px 0 5px}
+
+.mock-banner{background:#241a3a;border-bottom:1px solid var(--border2);padding:8px 16px;font-size:12.5px;color:var(--lav);flex:0 0 auto}
+.mock-banner b{color:#fff}
+.mock-banner span{color:var(--dim)}
+
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--border);flex:0 0 auto}
+header h1{font-size:15px;font-weight:600}
+.prov-chip{display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--border2);border-radius:20px;padding:5px 12px 5px 7px;font-size:12px;color:var(--dim);max-width:440px}
+.prov-chip .dot{width:24px;height:24px;border-radius:50%;background:linear-gradient(135deg,#5b4a8a,#b39ae0);display:grid;place-items:center;font-size:12px;flex:0 0 auto}
+.prov-chip b{color:var(--txt);font-weight:500}
+header .spacer{flex:1}
+
+/* pinned canvas fills everything above the sheet */
+.stage{flex:1;display:flex;flex-direction:column;min-height:0;position:relative;background:#0a0a12}
+.canvas-area{flex:1;display:grid;place-items:center;padding:16px;min-height:0;overflow:hidden}
+.canvas-frame{position:relative;border:1px solid var(--border2);border-radius:8px;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.5)}
+.canvas-frame img{display:block;max-width:min(100%,880px);max-height:52vh;object-fit:contain}
+.canvas-badge{position:absolute;top:10px;left:10px;background:rgba(15,15,26,.85);border:1px solid var(--border2);border-radius:5px;padding:3px 10px;font-size:11px;color:var(--lav)}
+.side-fab{position:absolute;top:14px;right:14px;display:flex;flex-direction:column;gap:8px}
+.side-fab button{width:44px;padding:0;font-size:17px;border-radius:10px;opacity:.92}
+
+/* bottom sheet */
+.sheet{flex:0 0 auto;background:var(--panel);border-top:1px solid var(--border2);box-shadow:0 -12px 40px rgba(0,0,0,.55);transition:height .25s ease;display:flex;flex-direction:column}
+.sheet.grab{display:flex;align-items:center;justify-content:center;padding:0;height:14px;cursor:ns-resize;flex:0 0 auto;background:var(--panel)}
+.sheet.grab::before{content:"";width:44px;height:4px;border-radius:2px;background:var(--border2)}
+.sheet-verbs{display:flex;gap:8px;padding:8px 16px;border-bottom:1px solid var(--border);overflow-x:auto}
+.sheet-verbs button{white-space:nowrap;border-radius:20px;font-size:13px;color:var(--dim)}
+.sheet-verbs button.on{background:var(--accent);border-color:var(--accent2);color:#fff}
+.sheet-body{padding:4px 16px 12px;overflow-y:auto}
+.sheet-panel[hidden]{display:none}
+.gen-grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px}
+.gen-grid .full{grid-column:1/-1}
+.ref-grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px;align-items:end}
+.filters-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;align-items:center}
+.hintline{font-size:11px;color:var(--faint)}
+
+/* candidate strip lives INSIDE the sheet, above the verb body */
+.cand-row{display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1px solid var(--border);overflow-x:auto}
+.cand{flex:0 0 96px;border:2px solid transparent;border-radius:8px;overflow:hidden;position:relative;cursor:pointer}
+.cand img{display:block;width:100%;height:62px;object-fit:cover}
+.cand .tag{position:absolute;top:3px;left:3px;font-size:10px;background:rgba(15,15,26,.85);border-radius:4px;padding:1px 6px;color:var(--lav)}
+.cand.sel{border-color:var(--lav)}
+.cand.empty{display:grid;place-items:center;height:62px;color:var(--faint);font-size:11px;border-style:dashed;background:var(--panel2)}
+.cand-note{font-size:11px;color:var(--faint);white-space:nowrap}
+.run-row{display:flex;gap:10px;padding:10px 16px;border-top:1px solid var(--border);background:var(--panel2)}
+.run-row .primary{flex:1;max-width:260px}
+.run-row .save{display:flex;gap:8px;margin-left:auto}
+.run-row .save button{font-size:12px}
+
+@media (max-width: 900px){
+  .gen-grid,.ref-grid{grid-template-columns:1fr 1fr}
+  .gen-grid .full{grid-column:1/-1}
+  .filters-grid{grid-template-columns:1fr 1fr}
+  .canvas-frame img{max-height:40vh}
+  .run-row{flex-wrap:wrap}
+}
+</style>
+</head>
+<body>
+<div class="mock-banner"><b>Mock 2 — Canvas + Bottom Sheet.</b> <span>Image is pinned and dominant; verb panels slide up from a bottom sheet with the candidate strip and save row living in the sheet's fixed header/footer. Tradeoff: maximal image focus, but heavy forms mean scrolling inside the sheet — worst on short laptop screens, best on iPad landscape.</span></div>
+
+<header>
+  <h1>Studio</h1>
+  <div class="prov-chip">
+    <div class="dot">📌</div>
+    <div><b>ridge-dusk-041.png</b><div style="font-size:11px;color:var(--faint)">generate · krea-t2i → refine (dusk-grade)</div></div>
+  </div>
+  <div class="spacer"></div>
+  <button style="min-height:36px">✕ clear working</button>
+</header>
+
+<div class="stage">
+  <div class="canvas-area">
+    <div class="canvas-frame">
+      <div class="canvas-badge">working image · 1216×832 · seed 812744</div>
+      <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1216' height='832'%3E%3Cdefs%3E%3ClinearGradient id='s' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%233a2a5a'/%3E%3Cstop offset='.6' stop-color='%23b39ae0'/%3E%3Cstop offset='1' stop-color='%23e8d0b0'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='1216' height='832' fill='url(%23s)'/%3E%3Ccircle cx='880' cy='240' r='70' fill='%23f5e6bc'/%3E%3Cpath d='M0 560 L300 380 L520 560 L760 420 L1000 600 L1216 480 L1216 832 L0 832 Z' fill='%232a2a44'/%3E%3Cpath d='M0 660 L250 560 L500 680 L800 580 L1216 700 L1216 832 L0 832 Z' fill='%231d1d33'/%3E%3C/svg%3E" alt="working image">
+    </div>
+  </div>
+  <div class="side-fab">
+    <button title="Pan/zoom">⤢</button>
+    <button title="Compare with parent">⇔</button>
+    <button title="Inspect provenance">ⓘ</button>
+  </div>
+</div>
+
+<div class="cand-row">
+  <span class="cand-note">candidates · nothing auto-saves</span>
+  <div class="cand sel"><span class="tag">c1</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='192' height='124'%3E%3Crect width='192' height='124' fill='%235b4a8a'/%3E%3Ccircle cx='140' cy='40' r='16' fill='%23f5e6bc'/%3E%3Cpath d='M0 80 L60 45 L105 80 L150 60 L192 90 L192 124 L0 124 Z' fill='%232a2a44'/%3E%3C/svg%3E"></div>
+  <div class="cand"><span class="tag">c2</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='192' height='124'%3E%3Crect width='192' height='124' fill='%234a3a7a'/%3E%3Ccircle cx='50' cy='45' r='14' fill='%23f5e6bc'/%3E%3Cpath d='M0 90 L70 50 L120 90 L170 65 L192 95 L192 124 L0 124 Z' fill='%232a2a44'/%3E%3C/svg%3E"></div>
+  <div class="cand"><span class="tag">c3</span><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='192' height='124'%3E%3Crect width='192' height='124' fill='%233a2a5a'/%3E%3Ccircle cx='110' cy='30' r='17' fill='%23f5e6bc'/%3E%3Cpath d='M0 75 L75 40 L135 82 L192 55 L192 124 L0 124 Z' fill='%231d1d33'/%3E%3C/svg%3E"></div>
+  <div class="cand empty">slot 4</div>
+  <span class="cand-note">⟲ next run overwrites unretrieved</span>
+</div>
+
+<div class="sheet">
+  <div class="sheet-verbs" role="tablist">
+    <button class="on" data-v="generate" role="tab" aria-selected="true">⚡ Generate</button>
+    <button data-v="refine" role="tab" aria-selected="false">✎ Refine preset</button>
+    <button data-v="filters" role="tab" aria-selected="false">🎛 Filters</button>
+    <button data-v="inspect" role="tab" aria-selected="false">ⓘ Inspect</button>
+  </div>
+
+  <div class="sheet-body">
+    <div class="sheet-panel" data-p="generate">
+      <div class="gen-grid">
+        <div class="full"><label style="margin-top:8px">Prompt</label><textarea rows="2">dusk over a mountain ridge, warm haze, painterly</textarea></div>
+        <div><label>Workflow</label><select><option>krea-t2i</option><option>krea-img2img</option><option>minimax-edit</option></select></div>
+        <div><label>Seed</label><input value="812744"></div>
+        <div><label>Denoise</label><input value="0.65"></div>
+        <div><label>Aspect</label><select><option>3:2 · 1216×832</option></select></div>
+        <div><label>Steps</label><input value="28"></div>
+        <div class="full hintline" style="margin-top:6px">LoRAs: painterly ×0.8 · dusk-pal ×0.5 &nbsp;·&nbsp; <u>↺ reuse settings from working image</u> &nbsp;·&nbsp; denoise &lt; 1 uses the working image as img2img input</div>
+      </div>
+    </div>
+
+    <div class="sheet-panel" data-p="refine" hidden>
+      <div class="ref-grid">
+        <div><label style="margin-top:8px">Preset</label><select><option>dusk-grade</option><option>face-restore</option><option>upscale-2x</option></select></div>
+        <div><label>Denoise</label><input value="0.35"></div>
+        <div><label>Seed</label><input value="auto"></div>
+        <div class="full hintline" style="margin-top:6px">Result lands on the canvas with a ⇔ before/after comparer in the corner FABs. Mask inpaint: paint directly on the pinned canvas.</div>
+      </div>
+    </div>
+
+    <div class="sheet-panel" data-p="filters" hidden>
+      <div class="filters-grid">
+        <div><label style="margin-top:8px">Vibrance</label><input type="range" value="30" style="padding:0"></div>
+        <div><label>Warmth</label><input type="range" value="12" style="padding:0"></div>
+        <div><label>Sharpen</label><input type="range" value="0" style="padding:0"></div>
+        <div style="align-self:end"><button class="primary" style="width:100%">Apply stack</button></div>
+      </div>
+    </div>
+
+    <div class="sheet-panel" data-p="inspect" hidden>
+      <div class="hintline" style="padding:10px 0">
+        <b style="color:var(--txt)">ridge-dusk-041.png</b> · generate (krea-t2i, seed 812744, painterly×0.8 + dusk-pal×0.5)
+        → refine (dusk-grade, denoise 0.35) · parent: ridge-dusk-040.png · 1216×832 · saved: no (in-session)
+      </div>
+    </div>
+  </div>
+
+  <div class="run-row">
+    <button class="primary" id="runbtn">⚡ Generate 4 candidates</button>
+    <div class="save">
+      <button title="Save over original">Save over</button>
+      <button title="Save as new file">Save new</button>
+      <button title="Save to Library">📚 Library</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const vb = document.querySelectorAll('.sheet-verbs button');
+vb.forEach(b => b.addEventListener('click', () => {
+  vb.forEach(x => { x.classList.toggle('on', x===b); x.setAttribute('aria-selected', x===b); });
+  document.querySelectorAll('.sheet-panel').forEach(p => p.hidden = p.dataset.p !== b.dataset.v);
+  document.getElementById('runbtn').textContent =
+    b.dataset.v==='generate' ? '⚡ Generate 4 candidates' :
+    b.dataset.v==='refine' ? '✎ Run preset' : b.dataset.v==='filters' ? '🎛 Apply stack' : 'ⓘ Inspect';
+}));
+document.querySelectorAll('.cand').forEach(c => c.addEventListener('click', () => {
+  document.querySelectorAll('.cand').forEach(x => x.classList.remove('sel')); c.classList.add('sel');
+}));
+</script>
+</body>
+</html>

@@ -516,6 +516,10 @@ def save_outputs(body: SaveOutputsBody):
 
 @router.post("/generate")
 def generate(body: GenerateBody):
+    log.info("generate: workflow=%s denoise=%s input_image=%s parent_image=%s",
+             body.workflow, body.denoise,
+             "<set>" if body.input_image else None,
+             "<set>" if body.parent_image else None)
     if not body.prompt.strip():
         raise HTTPException(400, "prompt is empty")
     if body.steps is not None and not (1 <= body.steps <= 150):
