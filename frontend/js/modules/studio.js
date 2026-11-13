@@ -526,7 +526,10 @@ export function mountStudio(panel, jobbar) {
     const s = stack;
     const compare = !!(compareOn && s && s.idx > 0);
     el.frame.classList.toggle('comparing', compare);
-    el['wrap-b'].style.clipPath = compare ? `inset(0 ${100 - cmpPct}% 0 0)` : 'inset(0 0 0 0)';
+    // img-b paints over img-a: while a candidate preview is up, clip it
+    // away entirely so the preview is visible (§10 review 12:34)
+    el['wrap-b'].style.clipPath = compare ? `inset(0 ${100 - cmpPct}% 0 0)`
+      : (previewUrl ? 'inset(0 100% 0 0)' : 'inset(0 0 0 0)');
     for (const b of el.cmpbar.querySelectorAll('button')) {
       const mode = b.dataset.c;
       const on = (mode === 'after' && !compare) || (mode === 'split' && compare && cmpPct < 100) || (mode === 'before' && compare && cmpPct <= 0);
@@ -744,7 +747,10 @@ export function mountStudio(panel, jobbar) {
   async function saveAs(kind) {
     const s = stack;
     if (!s || !saveable(s)) { say('nothing saveable on the canvas — run or promote first', true); return; }
-    const entry = current(s), orig = s.entries[0];
+    // Save acts on what the canvas shows (§10 review 12:34): a viewed
+    // candidate if one is up, else the stack top.
+    const entry = previewed ? { path: previewed.path, name: previewed.path.split('/').pop() } : current(s);
+    const orig = s.entries[0];
     if (!orig.path) { say('original source has no server path', true); return; }
     try {
       if (kind === 'over') {
@@ -843,11 +849,13 @@ export function mountStudio(panel, jobbar) {
             el['img-a'].src = previewUrl;
             el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
           }
+          syncComparer();
+          renderCandidates();
           say(`viewing ${c.path.split('/').pop()} — tap ⬇ on source to use it`);
         });
         target.appendChild(d);
       });
-      for (let i = list.length; i < Math.max(0, 4 - list.length); i++) {
+      for (let i = list.length; i < 4; i++) {
         const d = document.createElement('span');
         d.className = 'st-cand empty';
         d.textContent = `slot ${i + 1}`;
@@ -975,6 +983,7 @@ export function mountStudio(panel, jobbar) {
           el['img-a'].src = previewUrl;
           el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
         }
+        syncComparer();
       }
       // No auto-promote (decision §7.2/§10): outputs become the working
       // image only on explicit candidate selection — otherwise edit chains
