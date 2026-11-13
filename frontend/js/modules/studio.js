@@ -102,7 +102,7 @@ function panelHTML() {
       font-size: 11px; letter-spacing: .1em; color: #8a8aaa; user-select: none; }
     .st-lsec-h .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
     .st-lsec-h .n { color: #d8d8ee; }
-    .st-lsec-b { display: none; border-top: 1px solid #1c1c30; }
+    .st-lsec-b { display: none; border-top: 1px solid #1c1c30; max-height: 40vh; overflow-y: auto; }
     .st-lsec.open .st-lsec-b { display: block; }
     .st-lrow { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border-bottom: 1px solid #1c1c30; }
     .st-lrow:last-child { border-bottom: 0; }
