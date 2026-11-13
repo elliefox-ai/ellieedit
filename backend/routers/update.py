@@ -236,6 +236,17 @@ def comfy_fetch_image(im: dict) -> bytes:
 # Source resolution + save-family
 # ---------------------------------------------------------------------------
 
+def _foxden_output_path(rel: str):
+    """Resolve a foxden/Comfy output rel (``subfolder/name`` or bare name)
+    to its delivered copy under the foxden delivery dir (foxden delivers
+    every render there). Returns None when no delivered copy exists —
+    never a blind fetch, so truly-missing sources still 404."""
+    from .foxden import delivery_dir
+    name = rel.split('/')[-1]
+    p = delivery_dir() / name
+    return p if p.is_file() else None
+
+
 def resolve_source(rel: str) -> Path:
     """Jail a client path against gallery, then dupe, then library roots."""
     p = _gallery_mod.jailed(rel)
@@ -251,6 +262,11 @@ def resolve_source(rel: str) -> Path:
             return p
     except HTTPException:
         pass
+    # foxden outputs live outside all three roots (decision §7.1: the
+    # save module must work on fresh Studio generations with no source)
+    p = _foxden_output_path(rel)
+    if p is not None:
+        return p
     raise HTTPException(404, "source not found under gallery/dupe/library roots")
 
 
@@ -329,7 +345,15 @@ def save_new(render_rel: str, source_rel: str) -> dict:
     accepts absolute paths under member roots, so that value resolves).
     """
     render_src = resolve_source(render_rel)
-    root_name, source_dest = _root_of(source_rel)
+    try:
+        root_name, source_dest = _root_of(source_rel)
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise
+        # standalone save (decision §7.1): the render has no gallery
+        # source — "save as new" lands a fresh file in the gallery root
+        root_name = "gallery"
+        source_dest = _gallery_mod.GALLERY_ROOT / Path(source_rel).name
     dest_dir = source_dest.parent if root_name != "library" else _gallery_mod.GALLERY_ROOT
     dest = _unique_dest(dest_dir, f"{source_dest.stem}-update{source_dest.suffix}")
     shutil.copyfile(render_src, dest)
