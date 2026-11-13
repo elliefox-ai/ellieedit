@@ -39,12 +39,23 @@ log = logging.getLogger("ellieedit.foxden")
 
 router = APIRouter(prefix="/api/foxden", tags=["foxden"])
 
-WORKFLOW_FILES = {"klein": "klein_gen_basic.json",
-                  "klein-edit": "klein_edit_basic.json",
+WORKFLOW_FILES = {"klein": "klein_gen_basic.json",           # Klein 9B generate
+                  "klein-4b": "klein_4b_gen_basic.json",     # Klein 4B generate
+                  "klein-edit": "klein_edit_basic.json",     # Klein 4B edit (legacy id)
+                  "klein-4b-edit": "klein_edit_basic.json",  # Klein 4B edit
                   "krea2": "krea2_gen_basic.json",
                   "zengorestyle": "zengostyle_restyle_f2k4b_mkl.json",
                   "qwen21": "qwen21_gen_basic.json",
                   "moss": "moss_gen_basic.json"}
+# Model/edit variants per family (§10 review 12:44): the workflow list stays
+# short — the UI offers a model toggle + edit toggle for families that have
+# them, and composes the concrete workflow id from the selection.
+WORKFLOW_FAMILIES = {
+    "klein": {
+        "models": {"9b": {"gen": "klein", "edit": None},
+                   "4b": {"gen": "klein-4b", "edit": "klein-4b-edit"}},
+    },
+}
 LORA_EXTS = {".safetensors", ".pt", ".ckpt", ".pth"}
 UPLOAD_MAX = 25 * 1024 * 1024
 RECENT_MAX = 200
@@ -391,15 +402,19 @@ def reachable() -> bool:
         return False
 
 
-EDIT_WORKFLOWS = {"klein-edit"}   # reference-image graphs: always feed the working image
+EDIT_WORKFLOWS = {"klein-edit", "klein-4b-edit"}   # reference-image graphs: always feed the working image
 
 @router.get("/config")
 def config():
     return {
         "workflows": [{"id": k, "file": v,
                        "available": (workflows_dir() / v).is_file(),
-                       "edit": k in EDIT_WORKFLOWS}
+                       "edit": k in EDIT_WORKFLOWS,
+                       "family": next((f for f, fd in WORKFLOW_FAMILIES.items()
+                                       if any(k in mv.values() for mv in fd["models"].values())),
+                                      k)}
                       for k, v in WORKFLOW_FILES.items()],
+        "families": WORKFLOW_FAMILIES,
         "default_workflow": "klein",
         "loras": scan_loras(),
         "loras_dir": str(loras_dir()),

@@ -96,6 +96,13 @@ function panelHTML() {
     .st-striphead h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8a8aaa; margin: 0; }
     .st-striphead .note { font-size: 11px; color: #6c6c8e; }
     .st-striphead .note em { color: #b39ae0; font-style: normal; }
+    .st-segrow { display: flex; align-items: center; gap: 8px; margin: 6px 0 10px; flex-wrap: wrap; }
+    .st-seglab { font-size: 11px; color: #8a8aaa; letter-spacing: .08em; }
+    .st-seg { display: inline-flex; border: 1px solid #4a4a6c; border-radius: 8px; overflow: hidden; }
+    .st-seg button { border: 0; border-radius: 0; background: transparent; min-height: 40px; min-width: 48px;
+      font-size: 12px; color: #8a8aaa; padding: 0 12px; }
+    .st-seg button.on { background: #b39ae033; color: #e6dbff; }
+    .st-seg button:disabled { opacity: .35; }
     .st-cands { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; min-height: 90px; align-items: center; }
     .st-cand { flex: 0 0 128px; border: 2px solid transparent; border-radius: 8px; overflow: hidden;
       position: relative; cursor: pointer; background: #161628; padding: 0; min-height: 0 !important; }
@@ -269,6 +276,18 @@ function panelHTML() {
           <!-- GENERATE -->
           <div class="st-verbpanel" data-panel="generate">
             <label>Workflow</label><select data-id="wf"></select>
+            <div class="st-segrow" data-id="segrow" hidden>
+              <span class="st-seglab">Model</span>
+              <span class="st-seg" data-id="seg-model">
+                <button type="button" data-m="9b">9B</button>
+                <button type="button" data-m="4b">4B</button>
+              </span>
+              <span class="st-seglab">Mode</span>
+              <span class="st-seg" data-id="seg-edit">
+                <button type="button" data-e="0">Generate</button>
+                <button type="button" data-e="1">Edit</button>
+              </span>
+            </div>
             <label>Prompt</label><textarea data-id="prompt" rows="3" placeholder="describe the image…"></textarea>
             <div class="st-row2">
               <div><label>Aspect</label>
@@ -425,7 +444,7 @@ export function mountStudio(panel, jobbar) {
   const $ = id => panel.querySelector(`[data-id="${id}"]`);
   const el = Object.fromEntries(['chip', 'chip-name', 'chip-chain', 'clear', 'imm',
     'canvasarea', 'frame', 'badge', 'img-a', 'wrap-b', 'img-b', 'cmpbar',
-    'strip', 'cands', 'wf', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
+    'strip', 'cands', 'wf', 'segrow', 'seg-model', 'seg-edit', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
     'denoise', 'dval', 'pips', 'batchval', 'lcount', 'lfilter', 'pins', 'loras',
     'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all',
     'rpreset', 'rprompt', 'rseed', 'rrandom', 'rdenoise-lbl', 'rdenoise', 'rdenoise-val',
@@ -936,7 +955,8 @@ export function mountStudio(panel, jobbar) {
     const collected = [];
     try {
       const denoise = parseFloat(el.denoise.value) || 1;
-      const wfDef = wfDefs.find(w => w.id === el.wf.value);
+      const wfId = composeWorkflow();
+      const wfDef = wfDefs.find(w => w.id === wfId);
       const isEdit = !!(wfDef && wfDef.edit);
       const st0 = studioState().get();
       if (isEdit && !st0.path) {
@@ -954,7 +974,7 @@ export function mountStudio(panel, jobbar) {
         let [width, height] = sizeFor(aspect, sizeIdx);
         if (useInput && inputDims) [width, height] = inputDims;
         const body = {
-          workflow: el.wf.value, prompt: promptText, width, height,
+          workflow: wfId, prompt: promptText, width, height,
           loras: pins.payload(), suspended_loras: pins.suspendedPayload(),
           denoise, seed,
         };
@@ -1068,14 +1088,61 @@ export function mountStudio(panel, jobbar) {
   setBatch(1);
 
   // ── generate form: config / loras / aspects / presets / _last ──
+  // Model+mode toggles (§10 review 12:44): families with variants offer a
+  // model segmented control and an edit toggle; the concrete workflow id is
+  // composed from the selection so the backend registry stays flat.
+  const KLEIN_MODELS = {
+    '9b': { gen: 'klein', edit: null },          // no 9B edit graph on Megatron
+    '4b': { gen: 'klein-4b', edit: 'klein-4b-edit' },
+  };
+  let wfModel = '9b', wfEdit = false;
+  function composeWorkflow() {
+    if (el.wf.value !== 'klein') return el.wf.value;
+    const v = KLEIN_MODELS[wfModel];
+    return (wfEdit && v.edit) ? v.edit : v.gen;
+  }
+  function renderVariants() {
+    const isKlein = el.wf.value === 'klein';
+    el.segrow.hidden = !isKlein;
+    if (!isKlein) return;
+    for (const b of el['seg-model'].querySelectorAll('button'))
+      b.classList.toggle('on', b.dataset.m === wfModel);
+    const editId = KLEIN_MODELS[wfModel].edit;
+    const editOk = !!editId && wfDefs.some(w => w.id === editId && w.available);
+    for (const b of el['seg-edit'].querySelectorAll('button')) {
+      b.disabled = !editOk && b.dataset.e === '1';
+      b.title = editOk ? '' : 'no edit graph for this model (files missing)';
+      b.classList.toggle('on', wfEdit === (b.dataset.e === '1'));
+    }
+    if (!editOk) wfEdit = false;
+  }
+  el['seg-model'].addEventListener('click', e => {
+    const b = e.target.closest('button[data-m]');
+    if (!b) return;
+    wfModel = b.dataset.m;
+    const editId = KLEIN_MODELS[wfModel].edit;
+    if (!editId || !wfDefs.some(w => w.id === editId && w.available)) wfEdit = false;
+    renderVariants();
+  });
+  el['seg-edit'].addEventListener('click', e => {
+    const b = e.target.closest('button[data-e]');
+    if (!b || b.disabled) return;
+    wfEdit = b.dataset.e === '1';
+    renderVariants();
+    say(wfEdit ? 'edit mode — working image will be used as the source'
+               : 'generate mode — fresh t2i');
+  });
   async function loadConfig() {
     try {
       const c = await api('/config');
-      rebuildSelectPreserving(el.wf, c.workflows.map(w =>
-        `<option value="${w.id}" ${w.available ? '' : 'disabled'}>${esc(w.id)}${w.available ? '' : ' (file missing)'}</option>`).join(''),
-        c.default_workflow);
+      const fams = [...new Set(c.workflows.map(w => w.family || w.id))];
+      rebuildSelectPreserving(el.wf, fams.map(f => {
+        const anyAvail = c.workflows.some(w => (w.family || w.id) === f && w.available);
+        return `<option value="${f}" ${anyAvail ? '' : 'disabled'}>${esc(f)}${anyAvail ? '' : ' (file missing)'}</option>`;
+      }).join(''), c.families && c.families[c.default_workflow] ? c.default_workflow.split('-')[0] === 'klein' ? 'klein' : (c.default_workflow || 'klein') : 'klein');
       allLoras = c.loras;
       wfDefs = c.workflows || [];
+      renderVariants();
       renderLoras();
     } catch (e) { say('config failed: ' + e.message, true); }
   }

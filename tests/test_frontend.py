@@ -1230,7 +1230,8 @@ def test_stage4_batch_and_candidate_pins():
     assert 'role="slider"' in studio and "aria-valuemin" in studio
     assert "setBatch(1)" in studio                 # default 1
     # explicit candidate promote only (decision §7.2)
-    assert "studioState().set(c.path, 'foxden-output'" in studio
+    # candidate promote moved to the explicit ⬇ on the source slot (§7.2/§10 review 2026-11-13)
+    assert "studioState().set(previewed.path, 'foxden-output'" in studio
     assert "cands.startRun(collected)" in studio   # next run replaces the strip
     html = studio[studio.index('<input type="checkbox" data-id="save-all"'):]
     at = html.index("<input")
@@ -1265,7 +1266,8 @@ def test_stage4_refine_and_provenance_pins():
     # img2img off the working image when denoise < 1, with parent link
     assert "prepareInput" in studio
     assert "body.parent_image = inputParent" in studio
-    assert "denoise >= 1" in studio
+    # prepareInput no longer bails on denoise>=1 — edit graphs always inject (2026-11-13)
+    assert "denoise gating lives in generate()" in studio
 
 
 def test_stage4_studio_activation_never_reloads_config():

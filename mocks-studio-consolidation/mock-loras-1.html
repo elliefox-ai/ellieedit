@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio Mock — LoRAs section redesign (rough)</title>
+<style>
+:root{
+  --bg:#0f0f1a; --panel:#12121f; --panel2:#161628; --panel3:#1d1d33;
+  --border:#2a2a44; --border2:#4a4a6c; --txt:#d4d4e0; --dim:#8a8aaa; --faint:#6c6c8e;
+  --accent:#5b4a8a; --accent2:#7a6aaa; --lav:#b39ae0; --ok:#7de08a; --warn:#e8b87a; --err:#e87a7a;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,sans-serif;min-height:100vh;padding:16px}
+button{font:inherit;color:inherit;background:var(--panel3);border:1px solid var(--border2);border-radius:6px;padding:8px 14px;cursor:pointer;min-height:44px;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+button:hover{background:#4a4a6c}
+input{font:inherit;background:var(--panel2);color:var(--txt);border:1px solid var(--border2);border-radius:6px;padding:10px;width:100%}
+
+.mock-banner{background:#241a3a;border:1px solid var(--border2);border-radius:8px;padding:10px 16px;font-size:12.5px;color:var(--lav);margin-bottom:16px}
+.mock-banner b{color:#fff} .mock-banner span{color:var(--dim)}
+
+/* simulate just the generate-rail LoRAs section */
+.section{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px;max-width:400px}
+.sec-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.sec-head h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);flex:1}
+.count-pill{font-size:11px;color:var(--lav);border:1px solid var(--accent2);border-radius:12px;padding:2px 10px;background:var(--panel2)}
+
+/* ---- active LoRA rows ---- */
+.active-list{display:flex;flex-direction:column;gap:6px}
+.lora-row{background:var(--panel2);border:1px solid var(--border2);border-radius:8px;overflow:hidden}
+.lora-row.on{border-color:var(--accent2)}
+.lora-row.suspended{opacity:.55;border-style:dashed}
+.lora-head{display:flex;align-items:center;gap:8px;padding:8px 10px;min-height:44px;cursor:pointer}
+.lora-head:active{background:var(--panel3)}
+.lora-name{flex:1;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lora-strength-tag{font-size:11px;font-family:ui-monospace,monospace;color:var(--lav);background:var(--panel3);border-radius:4px;padding:2px 7px}
+.lora-row.suspended .lora-strength-tag{color:var(--dim)}
+.sus-btn{border:0;background:transparent;color:var(--faint);font-size:15px;padding:6px;min-height:36px;min-width:36px}
+.sus-btn:hover{color:var(--lav)}
+/* weight meter: horizontal bar sized by |strength| relative to 2.0 cap */
+.strength{display:none;padding:2px 10px 12px}
+.lora-row.open .strength{display:block}
+.strength input[type=range]{width:100%;accent-color:var(--lav);height:32px}
+.strength .sl-meta{display:flex;justify-content:space-between;font-size:10.5px;color:var(--faint);margin-top:-2px}
+.rm-btn{margin-top:6px;width:100%;font-size:12px;color:var(--err);background:transparent;border-color:var(--border)}
+.suspend-note{font-size:10.5px;color:var(--dim);padding:0 10px 8px;font-style:italic}
+
+/* ---- weight warning ---- */
+.total-bar{margin-top:10px;font-size:11.5px;padding:8px 10px;border-radius:6px;display:none;align-items:center;gap:8px}
+.total-bar.show{display:flex}
+.total-bar.warn{background:rgba(232,184,122,.08);border:1px solid rgba(232,184,122,.4);color:var(--warn)}
+.total-bar.err{background:rgba(232,122,122,.08);border:1px solid rgba(232,122,122,.4);color:var(--err)}
+
+/* ---- add flow: filter + library ---- */
+.add-row{display:flex;gap:8px;margin-top:10px}
+.add-row input{flex:1}
+.add-btn{flex:0 0 auto;background:var(--accent);border-color:var(--accent2);color:#fff;font-size:13px}
+.lib{margin-top:8px;border:1px solid var(--border);border-radius:8px;max-height:190px;overflow-y:auto;background:var(--bg)}
+.lib-item{display:flex;align-items:center;gap:8px;padding:8px 10px;min-height:44px;cursor:pointer;border-bottom:1px solid var(--border);font-size:13px}
+.lib-item:last-child{border-bottom:0}
+.lib-item:hover{background:var(--panel2)}
+.lib-item .cat{margin-left:auto;font-size:10px;color:var(--faint);border:1px solid var(--border);border-radius:10px;padding:1px 8px}
+.lib-hint{padding:10px;font-size:11.5px;color:var(--faint);text-align:center}
+.cat-filter{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.cat-chip{font-size:11px;padding:3px 10px;border-radius:12px;border:1px solid var(--border2);color:var(--dim);cursor:pointer;background:transparent;min-height:28px}
+.cat-chip.on{background:var(--accent);border-color:var(--accent2);color:#fff}
+</style>
+</head>
+<body>
+
+<div class="mock-banner">
+  <b>ROUGH MOCK — LoRAs section redesign</b> <span>· tap a row to expand strength · weight meter, suspend tray, category filter, total-weight warning. Values are hardcoded demo data; no backend.</span>
+</div>
+
+<div class="section">
+  <div class="sec-head">
+    <h2>LoRAs</h2>
+    <span class="count-pill" id="count">3 active · 1 parked</span>
+  </div>
+
+  <!-- active LoRAs (tap to expand strength) -->
+  <div class="active-list" id="list"></div>
+
+  <!-- total weight warning -->
+  <div class="total-bar warn show" id="total">
+    ⚠️ Total weight <b id="totalv">3.4</b> — 3 LoRAs above 0.8 each. Output may drift / burn contrast.
+  </div>
+
+  <!-- add flow -->
+  <div class="add-row">
+    <input id="filter" placeholder="search library…" oninput="renderLib()">
+    <button class="add-btn" onclick="alert('mock: opens library browse sheet on mobile')">Browse</button>
+  </div>
+  <div class="cat-filter" id="cats"></div>
+  <div class="lib" id="lib"></div>
+</div>
+
+<script>
+// ---- demo data (names resemble a real library) ----
+const LIB = [
+  {name:'detail_tweaker_xl', cat:'detail'},
+  {name:'film_grain_35mm', cat:'style'},
+  {name:'anime_lineart_v2', cat:'style'},
+  {name:'face_restore_fidelity', cat:'face'},
+  {name:' hands_fix_v3', cat:'anatomy'},
+  {name:'civ_lora_portrait_light', cat:'face'},
+  {name:'darkfantasy_texture', cat:'style'},
+  {name:'sketch_ink_loose', cat:'style'},
+];
+let active = new Map([
+  ['detail_tweaker_xl', 1.0],
+  ['film_grain_35mm', 1.2],
+  ['civ_lora_portrait_light', 1.2],
+]);
+let suspended = new Map([['hands_fix_v3', 0.8]]);
+let openRow = null;
+let catSel = 'all';
+const clamp = v => Math.min(2, Math.max(-1, v));
+
+function render() {
+  const list = document.getElementById('list');
+  list.innerHTML = '';
+  const row = (name, st, isSus) => {
+    const d = document.createElement('div');
+    d.className = 'lora-row' + (openRow===name?' open':'') + (isSus?' suspended':' on');
+    d.innerHTML = `
+      <div class="lora-head" data-n="${name}">
+        <span class="lora-name">${name}</span>
+        <span class="lora-strength-tag">${isSus?'parked ':''}${st.toFixed(2)}</span>
+        <button class="sus-btn" title="${isSus?'restore':'suspend (A/B without losing value)'}">${isSus?'▶':'⏸'}</button>
+      </div>
+      <div class="strength">
+        <input type="range" min="-1" max="2" step="0.05" value="${st}" data-slider="${name}">
+        <div class="sl-meta"><span>−1</span><span>0</span><span>1</span><span>+2</span></div>
+        ${isSus?'<div class="suspend-note">parked — not sent to the graph; restore to submit</div>':''}
+        <button class="rm-btn" data-rm="${name}">remove</button>
+      </div>`;
+    return d;
+  };
+  for (const [n,s] of active) list.appendChild(row(n,s,false));
+  for (const [n,s] of suspended) list.appendChild(row(n,s,true));
+
+  // interactions
+  list.querySelectorAll('.lora-head').forEach(h => h.addEventListener('click', e => {
+    if (e.target.closest('.sus-btn')) return;
+    const n = h.dataset.n;
+    openRow = (openRow===n) ? null : n;
+    render();
+  }));
+  list.querySelectorAll('.sus-btn').forEach(b => b.addEventListener('click', () => {
+    const n = b.closest('.lora-head').dataset.n;
+    if (active.has(n)) { suspended.set(n, active.get(n)); active.delete(n); }
+    else { active.set(n, suspended.get(n)); suspended.delete(n); }
+    openRow = null; render();
+  }));
+  list.querySelectorAll('[data-slider]').forEach(s => s.addEventListener('input', () => {
+    const n = s.dataset.slider;
+    const v = clamp(parseFloat(s.value));
+    if (active.has(n)) active.set(n, v); else suspended.set(n, v);
+    s.closest('.lora-row').querySelector('.lora-strength-tag').textContent = v.toFixed(2);
+    updateTotal();
+  }));
+  list.querySelectorAll('[data-rm]').forEach(b => b.addEventListener('click', () => {
+    const n = b.dataset.rm; active.delete(n); suspended.delete(n);
+    if (openRow===n) openRow=null; render();
+  }));
+
+  // categories
+  const cats = ['all', ...new Set(LIB.map(l=>l.cat.trim()))];
+  const cd = document.getElementById('cats');
+  cd.innerHTML = '';
+  cats.forEach(c => {
+    const b = document.createElement('button');
+    b.className = 'cat-chip' + (c===catSel?' on':'');
+    b.textContent = c;
+    b.onclick = () => { catSel=c; render(); };
+    cd.appendChild(b);
+  });
+  renderLib();
+  updateTotal();
+  document.getElementById('count').textContent =
+    `${active.size} active${suspended.size?` · ${suspended.size} parked`:''}${active.size>=8?' · cap 8':''}`;
+}
+
+function renderLib() {
+  const q = document.getElementById('filter').value.trim().toLowerCase();
+  const lib = document.getElementById('lib');
+  lib.innerHTML = '';
+  const items = LIB
+    .filter(l => !active.has(l.name) && !suspended.has(l.name))
+    .filter(l => catSel==='all' || l.cat.trim()===catSel)
+    .filter(l => !q || l.name.toLowerCase().includes(q))
+    .slice(0, 20);
+  if (!items.length) { lib.innerHTML = '<div class="lib-hint">no LoRAs found</div>'; return; }
+  for (const l of items) {
+    const d = document.createElement('div');
+    d.className = 'lib-item';
+    d.innerHTML = `<span>${l.name}</span><span class="cat">${l.cat}</span>`;
+    d.onclick = () => {
+      if (active.size >= 8) { alert('mock: at most 8 LoRAs (server cap)'); return; }
+      active.set(l.name.trim(), 1.0); openRow = l.name.trim(); render();
+    };
+    lib.appendChild(d);
+  }
+}
+
+function updateTotal() {
+  const total = [...active.values()].reduce((a,b)=>a+b,0);
+  const heavy = [...active.values()].filter(v=>v>0.8).length;
+  const bar = document.getElementById('total');
+  document.getElementById('totalv').textContent = total.toFixed(2);
+  bar.className = 'total-bar';
+  if (heavy >= 3) { bar.classList.add('err','show');
+    bar.innerHTML = `⛔ Total weight <b>${total.toFixed(2)}</b> — ${heavy} LoRAs above 0.8. Likely to mush / burn contrast.`; }
+  else if (heavy === 2 || total > 2.5) { bar.classList.add('warn','show');
+    bar.innerHTML = `⚠️ Total weight <b>${total.toFixed(2)}</b> — ${heavy} heavy LoRAs stacked. Output may drift.`; }
+  else if (active.size) { bar.classList.add('show'); bar.style.color='var(--dim)';
+    bar.innerHTML = `Total weight <b>${total.toFixed(2)}</b> — looks reasonable.`; }
+  else bar.classList.remove('show');
+}
+render();
+</script>
+</body>
+</html>
