@@ -824,7 +824,7 @@ export function mountStudio(panel, jobbar) {
   async function prepareInput() {
     const st = studioState().get();
     const denoise = parseFloat(el.denoise.value) || 1;
-    if (!st.path || denoise >= 1) { inputName = null; inputParent = null; return null; }
+    if (!st.path) { inputName = null; inputParent = null; return null; }   // denoise gating lives in generate(); edit workflows always inject
     if (inputParent === st.path && inputName) return inputName;   // cached per working image
     say('preparing working image as img2img input…');
     const r0 = await fetch(galleryFileUrl(st.path));
