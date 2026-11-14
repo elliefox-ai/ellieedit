@@ -308,7 +308,7 @@ function panelHTML() {
           <div class="st-verbpanel" data-panel="generate">
             <label>Workflow</label><select data-id="wf"></select>
             <div class="st-segrow" data-id="segrow" hidden>
-              <span class="st-seglab">Model</span>
+              <span class="st-seglab" data-id="seg-model-lab">Model</span>
               <span class="st-seg" data-id="seg-model">
                 <button type="button" data-m="9b">9B</button>
                 <button type="button" data-m="4b">4B</button>
@@ -473,7 +473,7 @@ export function mountStudio(panel, jobbar) {
   const $ = id => panel.querySelector(`[data-id="${id}"]`);
   const el = Object.fromEntries(['chip', 'chip-name', 'chip-chain', 'clear', 'imm',
     'canvasarea', 'frame', 'badge', 'img-a', 'wrap-b', 'img-b', 'cmpbar',
-    'strip', 'cands', 'wf', 'segrow', 'seg-model', 'seg-edit', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
+    'strip', 'cands', 'wf', 'segrow', 'seg-model', 'seg-model-lab', 'seg-edit', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
     'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui',
     'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all',
     'rpreset', 'rprompt', 'rseed', 'rrandom', 'rdenoise-lbl', 'rdenoise', 'rdenoise-val',
@@ -1123,8 +1123,19 @@ export function mountStudio(panel, jobbar) {
   // family → model → {gen, edit}; populated from /config families so any
   // family with variants gets the toggles (klein 9b/4b, moss turbo, …)
   let FAMILY_MODELS = {};
+  // Per-family model/mode memory: switching families (or a config reload)
+  // restores each family's last selection instead of resetting it.
+  const FAMILY_STATE = {};
   let wfModel = null, wfEdit = false;
   const familyVariants = () => FAMILY_MODELS[el.wf.value] || null;
+  function restoreFamilyState() {
+    const s = FAMILY_STATE[el.wf.value];
+    wfModel = s ? s.model : null;
+    wfEdit = s ? !!s.edit : false;
+  }
+  function saveFamilyState() {
+    FAMILY_STATE[el.wf.value] = { model: wfModel, edit: wfEdit };
+  }
   function composeWorkflow() {
     const v = familyVariants();
     if (!v) return el.wf.value;
@@ -1134,8 +1145,14 @@ export function mountStudio(panel, jobbar) {
   function renderVariants() {
     const v = familyVariants();
     el.segrow.hidden = !v;
-    if (!v) return;
+    if (!v) { saveFamilyState(); return; }
     if (!v[wfModel]) wfModel = Object.keys(v)[0];
+    // Per-model visibility: the variant picker (e.g. klein 9b/4b) only
+    // renders when the family actually has more than one model — a single-
+    // model family like moss doesn't get a redundant "TURBO" button.
+    const multiModel = Object.keys(v).length > 1;
+    el['seg-model'].hidden = !multiModel;
+    el['seg-model-lab'].hidden = !multiModel;
     // rebuild model buttons for this family
     el['seg-model'].innerHTML = '';
     for (const key of Object.keys(v)) {
@@ -1153,6 +1170,7 @@ export function mountStudio(panel, jobbar) {
       b.classList.toggle('on', wfEdit === (b.dataset.e === '1'));
     }
     if (!editOk) wfEdit = false;
+    saveFamilyState();
   }
   el['seg-model'].addEventListener('click', e => {
     const b = e.target.closest('button[data-m]');
@@ -1182,7 +1200,7 @@ export function mountStudio(panel, jobbar) {
       allLoras = c.loras;
       wfDefs = c.workflows || [];
       FAMILY_MODELS = c.families || {};
-      wfModel = null; wfEdit = false;   // re-resolve for the preserved family
+      restoreFamilyState();          // keep each family's last model/mode across reloads
       renderVariants();
       renderLoras();
     } catch (e) { say('config failed: ' + e.message, true); }
@@ -1402,7 +1420,7 @@ export function mountStudio(panel, jobbar) {
   }
   // workflow switch re-aims the default folder (auto mode follows)
   el.wf.addEventListener('change', () => {
-    wfModel = null; wfEdit = false;   // each family starts on its default model
+    restoreFamilyState();             // per-family memory instead of hard reset
     if (loraUI.auto) loraUI.openRoot = null;
     renderVariants(); renderLoras();
   });
