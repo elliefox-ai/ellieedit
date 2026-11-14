@@ -1120,27 +1120,36 @@ export function mountStudio(panel, jobbar) {
   // Model+mode toggles (§10 review 12:44): families with variants offer a
   // model segmented control and an edit toggle; the concrete workflow id is
   // composed from the selection so the backend registry stays flat.
-  const KLEIN_MODELS = {
-    '9b': { gen: 'klein', edit: null },          // no 9B edit graph on Megatron
-    '4b': { gen: 'klein-4b', edit: 'klein-4b-edit' },
-  };
-  let wfModel = '9b', wfEdit = false;
+  // family → model → {gen, edit}; populated from /config families so any
+  // family with variants gets the toggles (klein 9b/4b, moss turbo, …)
+  let FAMILY_MODELS = {};
+  let wfModel = null, wfEdit = false;
+  const familyVariants = () => FAMILY_MODELS[el.wf.value] || null;
   function composeWorkflow() {
-    if (el.wf.value !== 'klein') return el.wf.value;
-    const v = KLEIN_MODELS[wfModel];
-    return (wfEdit && v.edit) ? v.edit : v.gen;
+    const v = familyVariants();
+    if (!v) return el.wf.value;
+    const m = v[wfModel] || Object.values(v)[0];
+    return (wfEdit && m.edit) ? m.edit : m.gen;
   }
   function renderVariants() {
-    const isKlein = el.wf.value === 'klein';
-    el.segrow.hidden = !isKlein;
-    if (!isKlein) return;
-    for (const b of el['seg-model'].querySelectorAll('button'))
-      b.classList.toggle('on', b.dataset.m === wfModel);
-    const editId = KLEIN_MODELS[wfModel].edit;
+    const v = familyVariants();
+    el.segrow.hidden = !v;
+    if (!v) return;
+    if (!v[wfModel]) wfModel = Object.keys(v)[0];
+    // rebuild model buttons for this family
+    el['seg-model'].innerHTML = '';
+    for (const key of Object.keys(v)) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.dataset.m = key;
+      b.textContent = key.toUpperCase();
+      if (key === wfModel) b.classList.add('on');
+      el['seg-model'].appendChild(b);
+    }
+    const editId = v[wfModel] && v[wfModel].edit;
     const editOk = !!editId && wfDefs.some(w => w.id === editId && w.available);
     for (const b of el['seg-edit'].querySelectorAll('button')) {
       b.disabled = !editOk && b.dataset.e === '1';
-      b.title = editOk ? '' : 'no edit graph for this model (files missing)';
+      b.title = editOk ? '' : 'no edit graph for this model';
       b.classList.toggle('on', wfEdit === (b.dataset.e === '1'));
     }
     if (!editOk) wfEdit = false;
@@ -1149,7 +1158,8 @@ export function mountStudio(panel, jobbar) {
     const b = e.target.closest('button[data-m]');
     if (!b) return;
     wfModel = b.dataset.m;
-    const editId = KLEIN_MODELS[wfModel].edit;
+    const v = familyVariants();
+    const editId = v && v[wfModel] && v[wfModel].edit;
     if (!editId || !wfDefs.some(w => w.id === editId && w.available)) wfEdit = false;
     renderVariants();
   });
@@ -1171,6 +1181,8 @@ export function mountStudio(panel, jobbar) {
       }).join(''), c.families && c.families[c.default_workflow] ? c.default_workflow.split('-')[0] === 'klein' ? 'klein' : (c.default_workflow || 'klein') : 'klein');
       allLoras = c.loras;
       wfDefs = c.workflows || [];
+      FAMILY_MODELS = c.families || {};
+      wfModel = null; wfEdit = false;   // re-resolve for the preserved family
       renderVariants();
       renderLoras();
     } catch (e) { say('config failed: ' + e.message, true); }
@@ -1389,7 +1401,11 @@ export function mountStudio(panel, jobbar) {
     }
   }
   // workflow switch re-aims the default folder (auto mode follows)
-  el.wf.addEventListener('change', () => { if (loraUI.auto) { loraUI.openRoot = null; } renderLoras(); });
+  el.wf.addEventListener('change', () => {
+    wfModel = null; wfEdit = false;   // each family starts on its default model
+    if (loraUI.auto) loraUI.openRoot = null;
+    renderVariants(); renderLoras();
+  });
   el.aspects.addEventListener('click', e => {
     const b = e.target.closest('[data-a]');
     if (!b) return;

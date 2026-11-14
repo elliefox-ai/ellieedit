@@ -46,7 +46,8 @@ WORKFLOW_FILES = {"klein": "klein_gen_basic.json",           # Klein 9B generate
                   "krea2": "krea2_gen_basic.json",
                   "zengorestyle": "zengostyle_restyle_f2k4b_mkl.json",
                   "qwen21": "qwen21_gen_basic.json",
-                  "moss": "moss_gen_basic.json"}
+                  "moss": "moss_gen_basic.json",
+                  "moss-edit": "moss_edit_basic.json"}       # MOSS edit (patch adapter)
 # Model/edit variants per family (§10 review 12:44): the workflow list stays
 # short — the UI offers a model toggle + edit toggle for families that have
 # them, and composes the concrete workflow id from the selection.
@@ -54,6 +55,9 @@ WORKFLOW_FAMILIES = {
     "klein": {
         "models": {"9b": {"gen": "klein", "edit": None},
                    "4b": {"gen": "klein-4b", "edit": "klein-4b-edit"}},
+    },
+    "moss": {
+        "models": {"turbo": {"gen": "moss", "edit": "moss-edit"}},
     },
 }
 # legacy ids that resolve into a family variant (kept for old clients/recent.jsonl)
@@ -404,7 +408,7 @@ def reachable() -> bool:
         return False
 
 
-EDIT_WORKFLOWS = {"klein-edit", "klein-4b-edit"}   # reference-image graphs: always feed the working image
+EDIT_WORKFLOWS = {"klein-edit", "klein-4b-edit", "moss-edit"}   # reference-image graphs: always feed the working image
 
 @router.get("/config")
 def config():
