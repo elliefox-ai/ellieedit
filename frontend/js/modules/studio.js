@@ -106,7 +106,8 @@ function panelHTML() {
     .st-lsec.open .st-lsec-b { display: block; }
     .st-lrow { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border-bottom: 1px solid #1c1c30; }
     .st-lrow:last-child { border-bottom: 0; }
-    .st-lrow .rn { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+    .st-lrow .rn { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+    .st-lrow .where { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .st-lrow.parked .rn { color: #c9b97a; }
     .st-lrow .str { font-size: 11px; color: #b39ae0; background: #161628; border-radius: 4px; padding: 2px 6px; }
     .st-lrow .where { font-size: 10px; color: #6c6c8e; }
@@ -151,7 +152,7 @@ function panelHTML() {
     .st-src-dn,.st-src-up{position:absolute;top:2px;left:2px;width:20px;height:20px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:12px;color:#b39ae0}
     .st-src-x{position:absolute;top:2px;right:2px;width:18px;height:18px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:11px;color:#fff}
     /* ---- right rail ---- */
-    .st-rail { flex: 0 0 330px; background: #12121f; border-left: 1px solid #2a2a44; display: flex; flex-direction: column; min-height: 0; }
+    .st-rail { flex: 0 0 330px; min-width: 0; overflow: hidden; background: #12121f; border-left: 1px solid #2a2a44; display: flex; flex-direction: column; min-height: 0; }
     .st-verbswitch { display: flex; margin: 12px; background: #161628; border: 1px solid #4a4a6c; border-radius: 8px; overflow: hidden; }
     .st-verbswitch button { flex: 1; border: 0; border-radius: 0; background: transparent; color: #8a8aaa; min-height: 44px; font-size: 13px; }
     .st-verbswitch button.on { background: #5b4a8a; color: #fff; }
