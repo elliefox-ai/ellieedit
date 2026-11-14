@@ -188,11 +188,11 @@ function renderAcc() {
         const row = document.createElement('div');
         const isParked = pins.get(name) === 'parked';
         row.className = 'row' + (isParked ? ' parked' : '') + (expRow === name ? ' exp' : '');
+        const st = pins.get(name);
         const rn = document.createElement('span');
         rn.className = 'rn'; rn.textContent = (st === undefined ? '' : (isParked ? '⏸ ' : '📌 ')) + `${sub}/lora-sample-${i + 1}`;
         rn.addEventListener('click', () => { expRow = expRow === name ? null : name; renderAcc(); });
         row.appendChild(rn);
-        const st = pins.get(name);
         if (typeof st === 'number') {
           const tag = document.createElement('span');
           tag.className = 'str'; tag.textContent = '×' + st.toFixed(2);

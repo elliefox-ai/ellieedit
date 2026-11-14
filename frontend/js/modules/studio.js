@@ -1127,7 +1127,7 @@ export function mountStudio(panel, jobbar) {
   // restores each family's last selection instead of resetting it.
   const FAMILY_STATE = {};
   let wfModel = null, wfEdit = false;
-  const familyVariants = () => FAMILY_MODELS[el.wf.value] || null;
+  const familyVariants = () => (FAMILY_MODELS[el.wf.value] || {}).models || null;
   function restoreFamilyState() {
     const s = FAMILY_STATE[el.wf.value];
     wfModel = s ? s.model : null;
