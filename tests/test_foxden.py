@@ -293,7 +293,7 @@ def test_config_scans_loras_and_reports_reachability(client, monkeypatch):
     assert {w["id"]: w["edit"] for w in c["workflows"]} == {
         "klein": False, "krea2": False, "zengorestyle": False, "qwen21": False,
         "moss": False, "klein-edit": True, "klein-4b-edit": True,
-        "klein-4b": False}  # edit graphs report themselves
+        "klein-4b": False, "moss-edit": True}  # edit graphs report themselves
 
 
 def test_config_comfy_unreachable_is_graceful(client, monkeypatch):
