@@ -40,6 +40,11 @@ export function normalizeState(raw) {
   if (num(r.steps) !== null) out.steps = num(r.steps);
   if (num(r.size_idx) !== null) out.size_idx = Math.min(3, Math.max(0, Math.trunc(num(r.size_idx))));
   if (typeof r.input_image === 'string' && r.input_image) out.input_image = r.input_image;
+  // Model/mode (studio wishlist §6a): the toggles a family was last used
+  // with, so _last and presets restore them instead of resetting to the
+  // first model / generate. Absent when never saved (old states).
+  if (typeof r.model === 'string' && r.model) out.model = r.model;
+  if (typeof r.edit === 'boolean') out.edit = r.edit;
   return out;
 }
 

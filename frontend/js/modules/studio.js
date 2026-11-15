@@ -87,6 +87,10 @@ function panelHTML() {
     .st-cmpbar button { border: 0; border-radius: 0; background: transparent; min-height: 44px; font-size: 12px; color: #8a8aaa; }
     .st-cmpbar button.on { background: #5b4a8a; color: #fff; }
     .st-frame.comparing .st-imgb { clip-path: inset(0 var(--cmp, 50%) 0 0); }
+    .st-cmpdiv { position: absolute; top: 0; bottom: 64px; left: 50%; width: 28px; margin-left: -14px; z-index: 7; display: none; cursor: ew-resize; touch-action: none; }
+    .st-frame.comparing .st-cmpdiv { display: block; }
+    .st-cmpdiv::before { content: ''; position: absolute; top: 0; bottom: 0; left: 13px; width: 2px; background: #b39ae0; box-shadow: 0 0 6px rgba(0,0,0,.6); }
+    .st-cmpdiv::after { content: '‹ ›'; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(15,15,26,.9); border: 1px solid #b39ae0; color: #b39ae0; border-radius: 14px; padding: 4px 6px; font-size: 11px; line-height: 1; pointer-events: none; }
     .st-emptymsg { color: #6c6c8e; font-size: 13px; text-align: center; max-width: 420px; padding: 20px; }
     .st-canvasarea.has-image .st-emptymsg { display: none; }
     /* ---- candidate strip ---- */
@@ -107,6 +111,7 @@ function panelHTML() {
     .st-lrow { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border-bottom: 1px solid #1c1c30; }
     .st-lrow:last-child { border-bottom: 0; }
     .st-lrow .rn { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+    .st-lrow .chev { color: #6c6c8e; font-size: 11px; flex: 0 0 auto; }
     .st-lrow .where { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .st-lrow.parked .rn { color: #c9b97a; }
     .st-lrow .str { font-size: 11px; color: #b39ae0; background: #161628; border-radius: 4px; padding: 2px 6px; }
@@ -285,6 +290,7 @@ function panelHTML() {
               <button data-c="before">Before</button>
               <button data-c="split">Split</button>
             </div>
+            <div class="st-cmpdiv" data-id="cmpdiv" title="Drag to compare"></div>
           </div>
         </div>
         <div class="st-strip" data-id="strip">
@@ -472,7 +478,7 @@ export function mountStudio(panel, jobbar) {
   const root = panel.querySelector('.st-root');
   const $ = id => panel.querySelector(`[data-id="${id}"]`);
   const el = Object.fromEntries(['chip', 'chip-name', 'chip-chain', 'clear', 'imm',
-    'canvasarea', 'frame', 'badge', 'img-a', 'wrap-b', 'img-b', 'cmpbar',
+    'canvasarea', 'frame', 'badge', 'img-a', 'wrap-b', 'img-b', 'cmpbar', 'cmpdiv',
     'strip', 'cands', 'wf', 'segrow', 'seg-model', 'seg-model-lab', 'seg-edit', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
     'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui',
     'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all',
@@ -575,6 +581,7 @@ export function mountStudio(panel, jobbar) {
     const s = stack;
     const compare = !!(compareOn && s && s.idx > 0);
     el.frame.classList.toggle('comparing', compare);
+    el.cmpdiv.style.left = cmpPct + '%';
     // img-b paints over img-a: while a candidate preview is up, clip it
     // away entirely so the preview is visible (§10 review 12:34)
     el['wrap-b'].style.clipPath = compare ? `inset(0 ${100 - cmpPct}% 0 0)`
@@ -590,9 +597,32 @@ export function mountStudio(panel, jobbar) {
     const b = e.target.closest('[data-c]');
     if (!b) return;
     if (b.dataset.c === 'after') { compareOn = false; }
-    else { compareOn = true; cmpPct = b.dataset.c === 'before' ? 0 : 100; }
+    // Split opens at the middle — 100 left it indistinguishable from
+    // Result (studio wishlist §2).
+    else { compareOn = true; cmpPct = b.dataset.c === 'before' ? 0 : 50; }
     syncComparer();
   });
+
+  // Compare divider: drag it to move the split (studio wishlist §2).
+  // The handle owns its own pointer capture — the frame's drags stay
+  // pan/zoom, so the divider must be grabbed, not the frame.
+  let cmpDrag = null;
+  el.cmpdiv.addEventListener('pointerdown', e => {
+    if (!compareOn || !stack || stack.idx <= 0) return;
+    cmpDrag = e.pointerId;
+    el.cmpdiv.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  el.cmpdiv.addEventListener('pointermove', e => {
+    if (cmpDrag !== e.pointerId) return;
+    const r = el.frame.getBoundingClientRect();
+    if (!r.width) return;
+    cmpPct = Math.min(100, Math.max(0, ((e.clientX - r.left) / r.width) * 100));
+    syncComparer();
+  });
+  const endCmpDrag = e => { if (cmpDrag === e.pointerId) cmpDrag = null; };
+  el.cmpdiv.addEventListener('pointerup', endCmpDrag);
+  el.cmpdiv.addEventListener('pointercancel', endCmpDrag);
 
   // Load a working image as the stack original. Same-path guard: the
   // store event, send-to, and our own promote must not rebuild a stack
@@ -608,7 +638,31 @@ export function mountStudio(panel, jobbar) {
         ? fetch(cands.find(path).url) : Promise.resolve(r0));
       if (!r.ok) throw new Error(r.status);
       const blob = await r.blob();
-      stack = createStack({ url: URL.createObjectURL(blob), name: name || path.split('/').pop(), path });
+      const outEntry = { url: URL.createObjectURL(blob), name: name || path.split('/').pop(), path };
+      // An input image makes the compare real (studio wishlist §2): when
+      // the working image's provenance names one, seed the stack with it
+      // as entry 0 so Before/Split compare input vs output. Best-effort —
+      // any failure falls back to the single-entry stack.
+      let seeded = null;
+      try {
+        const pr = await fetch(`/api/foxden/provenance?path=${encodeURIComponent(path)}`);
+        const rec = pr.ok ? await pr.json() : null;
+        const input = rec && typeof rec.input_image === 'string' && rec.input_image && rec.input_image !== path
+          ? rec.input_image : null;
+        if (input) {
+          const i0 = await fetch(galleryFileUrl(input));
+          const ir = i0.ok ? i0 : await (cands.find(input)
+            ? fetch(cands.find(input).url) : Promise.resolve(i0));
+          if (ir.ok) {
+            const ib = await ir.blob();
+            seeded = pushRender(
+              createStack({ url: URL.createObjectURL(ib), name: input.split('/').pop(), path: input }),
+              outEntry);
+            seeded = setViewedAsBase(seeded); // next run renders from the output, not the input
+          }
+        }
+      } catch { /* fall through to the single-entry stack */ }
+      stack = seeded || createStack(outEntry);
       compareOn = false; cmpPct = 100;
       zoomScale = 1; zoomTx = 0; zoomTy = 0;
       maskCanvas = null; maskPainted = false; maskUndoStack = [];
@@ -1232,6 +1286,16 @@ export function mountStudio(panel, jobbar) {
   function loraRow(name, st, parked, box) {
     const row = document.createElement('div');
     row.className = 'st-lrow' + (parked ? ' parked' : '');
+    // Expand affordance (studio wishlist §5): the name is the tap target
+    // for the strength slider — show it, or nobody finds the slider.
+    const chev = document.createElement('span');
+    chev.className = 'chev';
+    chev.textContent = loraUI.expRow === name ? '▾' : '▸';
+    chev.title = 'tap to tune strength';
+    chev.addEventListener('click', () => {
+      loraUI.expRow = loraUI.expRow === name ? null : name; renderLoras();
+    });
+    row.appendChild(chev);
     const rn = document.createElement('span');
     rn.className = 'rn';
     rn.textContent = name.split('/').pop().replace(/\.safetensors$/i, '');
@@ -1405,6 +1469,12 @@ export function mountStudio(panel, jobbar) {
         const row = document.createElement('div');
         row.className = 'st-lrow';
         const pinnedA = pins.active.get(n), pinnedS = pins.suspended.has(n);
+        const chev = document.createElement('span');
+        chev.className = 'chev';
+        chev.textContent = loraUI.expRow === n ? '▾' : '▸';
+        chev.title = 'tap to tune strength';
+        chev.addEventListener('click', () => { loraUI.expRow = loraUI.expRow === n ? null : n; renderLoras(); });
+        row.appendChild(chev);
         const rn = document.createElement('span');
         rn.className = 'rn';
         rn.textContent = (pinnedA !== undefined ? '📌 ' : pinnedS ? '⏸ ' : '') +
@@ -1441,6 +1511,13 @@ export function mountStudio(panel, jobbar) {
           });
           sl.addEventListener('change', () => renderLoras());
           body.appendChild(sl);
+        } else if (loraUI.expRow === n) {
+          // Expanded but not pinned: the tap did nothing visible before
+          // (studio wishlist §5) — say what the slider needs.
+          const hint = document.createElement('div');
+          hint.className = 'st-hintline'; hint.style.padding = '4px 12px 8px';
+          hint.textContent = pinnedS ? 'restore ▶ to tune strength' : 'pin ＋ to tune strength';
+          body.appendChild(hint);
         }
       }
       if (list.length > 60) {
@@ -1489,6 +1566,7 @@ export function mountStudio(panel, jobbar) {
       seed: el.seed.value === '' ? null : parseInt(el.seed.value),
       loras: pins.payload(), suspended_loras: pins.suspendedPayload(),
       denoise: parseFloat(el.denoise.value),
+      model: wfModel, edit: wfEdit,
     });
   }
   // A provenance recipe carries the *concrete* workflow id (e.g.
@@ -1509,12 +1587,27 @@ export function mountStudio(panel, jobbar) {
     const st = normalizeState(raw);
     if (st.workflow) {
       const dw = deriveWorkflow(st.workflow);
+      let matched = false;
       if (dw && [...el.wf.options].some(o => o.value === dw.family)) {
         el.wf.value = dw.family;
         wfModel = dw.model; wfEdit = dw.edit;
-        saveFamilyState(); renderVariants();
+        matched = true;
       } else if ([...el.wf.options].some(o => o.value === st.workflow && !o.disabled)) {
         el.wf.value = st.workflow;
+        matched = true;
+      }
+      if (matched) {
+        // A saved model/mode (from _last or a preset) wins over the
+        // derived default — but only when it names a real model of this
+        // family, and edit only when that model has an edit graph
+        // (studio wishlist §6a). Without one, the derive/first-model
+        // default stands (old states).
+        const v = familyVariants();
+        if (st.model && v && v[st.model]) {
+          wfModel = st.model;
+          wfEdit = st.edit === true && !!(v[st.model].edit);
+        }
+        saveFamilyState(); renderVariants();
       }
     }
     el.prompt.value = st.prompt;
