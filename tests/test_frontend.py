@@ -1243,6 +1243,32 @@ def test_stage4_batch_and_candidate_pins():
     assert "save all outputs to gallery" in studio
 
 
+def test_stage4_canvas_preview_pins():
+    """Stage 4: the canvas always shows the first candidate after a run and
+    whichever candidate is tapped (2026-11-15 fix). Before it, both preview
+    landings were gated on `!compareOn`, so once Split had been opened the
+    canvas silently stopped tracking new candidates and taps; with no
+    working image the frame stayed hidden, so the first candidate never
+    appeared; and the strip rebuild dropped the .sel ring on every tap."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    # the preview always lands in both paths (run completion + candidate tap)
+    assert studio.count("The preview always lands") == 2
+    assert "if (!compareOn) {" not in studio   # candidate gates gone; the
+    # filter preview's one-line `if (!compareOn) el['img-a'].src = ...` stays
+    assert "previewed = collected[0]" in studio   # first candidate is the viewed one
+    # with no working image yet, the run unhides the frame and names the
+    # candidate on the badge (showCurrent is the only other unhide)
+    assert studio.count("el.frame.hidden = false;") == 2
+    assert "el.badge.textContent = collected[0].path.split('/').pop();" in studio
+    # the strip rebuild re-applies the viewed candidate's ring from previewed
+    assert "const selPath = previewed ? previewed.path : null;" in studio
+    assert "if (selPath && c.path === selPath) d.classList.add('sel');" in studio
+    assert "void selBtn" not in studio and "void selPath" not in studio
+    # showCurrent's dead `previewUrl || prev.url` (previewUrl is nulled just
+    # above) is gone — it always shows the stack's before entry
+    assert "previewUrl || prev.url" not in studio
+
+
 def test_stage4_refine_and_provenance_pins():
     """Stage 4: Refine runs Update's preset runner on the working image
     (run-async / inpaint-async on the store path) with the comparer in the

@@ -574,7 +574,7 @@ export function mountStudio(panel, jobbar) {
     if (s.idx === 0) compareOn = false;
     el.frame.hidden = false;
     el.canvasarea.classList.add('has-image');
-    el['img-a'].src = previewUrl || prev.url;
+    el['img-a'].src = prev.url;
     el['img-b'].src = cur.url;
     const prov = studioState().get().provenance;
     el.badge.textContent = `${cur.name}` +
@@ -989,14 +989,16 @@ export function mountStudio(panel, jobbar) {
   }
   function renderCandidates() {
     const list = cands.get();
-    let selPath = null;
-    const selBtn = panel.querySelector('.st-cand.sel');
-    void selBtn;
+    // The viewed candidate keeps its ring across the rebuild: the strips
+    // are recreated from scratch, so re-apply .sel from previewed (the
+    // old selBtn/selPath read was voided and never did this).
+    const selPath = previewed ? previewed.path : null;
     for (const target of [el.cands, el.ovcands]) {
       target.innerHTML = '';
       list.forEach((c, i) => {
         const d = document.createElement('button');
         d.className = 'st-cand';
+        if (selPath && c.path === selPath) d.classList.add('sel');
         d.title = 'Use as working image';
         const tag = document.createElement('span');
         tag.className = 'tag'; tag.textContent = `c${i + 1}`;
@@ -1006,20 +1008,18 @@ export function mountStudio(panel, jobbar) {
         pick.className = 'pick'; pick.textContent = 'promote';
         d.append(tag, im, pick);
         d.addEventListener('click', () => {
-          for (const x of panel.querySelectorAll('.st-cand')) x.classList.remove('sel');
-          for (const t of panel.querySelectorAll('.st-cands')) {
-            [...t.children].forEach(x2 => x2.classList.toggle('sel', x2.querySelector('img')?.src === c.url));
-          }
-          d.classList.add('sel');
           // Viewing ONLY (§7.2/§10 review 12:23): a candidate tap previews it
           // on the canvas; becoming the working image is the explicit
           // down-arrow on the source slot.
           previewed = c;
           previewUrl = c.url;
-          if (!compareOn) {
-            el['img-a'].src = previewUrl;
-            el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
-          }
+          // The preview always lands, comparer or not: compare yields so the
+          // canvas shows the selected candidate (same pattern as refine /
+          // filter-apply, which reset compareOn on a new output). The .sel
+          // ring is re-applied by renderCandidates() from previewed.
+          compareOn = false; cmpPct = 100;
+          el['img-a'].src = previewUrl;
+          el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
           syncComparer();
           renderCandidates();
           say(`viewing ${c.path.split('/').pop()} — tap ⬇ on source to use it`);
@@ -1070,7 +1070,6 @@ export function mountStudio(panel, jobbar) {
       target.appendChild(src);
     }
     el.strip.classList.toggle('st-running', busy);
-    void selPath;
   }
 
   // ── generate: batch N = N sequential runs, one candidate set ──
@@ -1150,11 +1149,19 @@ export function mountStudio(panel, jobbar) {
       // review: see results without changing the working image). Cleared by
       // showCurrent() on the next working-image change or run.
       if (collected.length) {
+        previewed = collected[0];
         previewUrl = collected[0].url;
-        if (!compareOn) {
-          el['img-a'].src = previewUrl;
-          el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
+        // The preview always lands, comparer or not (see the candidate tap):
+        // compare yields, and with no working image yet the frame is still
+        // hidden, so unhide it and name the candidate on the badge.
+        compareOn = false; cmpPct = 100;
+        if (!stack) {
+          el.frame.hidden = false;
+          el.canvasarea.classList.add('has-image');
+          el.badge.textContent = collected[0].path.split('/').pop();
         }
+        el['img-a'].src = previewUrl;
+        el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
         syncComparer();
       }
       // No auto-promote (decision §7.2/§10): outputs become the working
