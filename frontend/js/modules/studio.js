@@ -556,6 +556,7 @@ export function mountStudio(panel, jobbar) {
     if (!s) {
       el.frame.hidden = true;
       el.canvasarea.classList.remove('has-image');
+      updateSaveButtons();
       return;
     }
     const cur = current(s), prev = compareEntry(s);
@@ -581,7 +582,7 @@ export function mountStudio(panel, jobbar) {
     for (const b of el.cmpbar.querySelectorAll('button')) {
       const mode = b.dataset.c;
       const on = (mode === 'after' && !compare) || (mode === 'split' && compare && cmpPct < 100) || (mode === 'before' && compare && cmpPct <= 0);
-      b.classList.toggle('on', mode === 'after' ? !compare : false);
+      b.classList.toggle('on', on);
     }
     el.cmpbar.style.display = s && s.idx > 0 ? '' : 'none';
   }
@@ -620,7 +621,14 @@ export function mountStudio(panel, jobbar) {
   studioState().subscribe(d => {
     syncChip(d);
     renderCandidates();
-    if (!d.path) return;
+    if (!d.path) {
+      // Clearing the store must clear the canvas too (studio eval §3):
+      // otherwise the old image, badge, and save buttons linger.
+      stack = null; previewed = null; previewUrl = null;
+      maskCanvas = null; maskPainted = false; maskUndoStack = [];
+      showCurrent();
+      return;
+    }
     openWorking(d.path, d.name);
     if (verb === 'provenance') renderProvenance();
   });
@@ -757,6 +765,9 @@ export function mountStudio(panel, jobbar) {
     }
     for (const p of panel.querySelectorAll('.st-verbpanel')) p.hidden = p.dataset.panel !== v;
     setRunLabel();
+    // The Provenance panel reads the store lazily — render it on open, or
+    // it shows whatever was last rendered (studio eval §2).
+    if (v === 'provenance') renderProvenance();
   }
   function setRunLabel() {
     el.runbtn.textContent =
@@ -1060,9 +1071,10 @@ export function mountStudio(panel, jobbar) {
         throw new Error((s.error || 'generation failed') +
           ((s.log_tail || []).length ? '\n\n' + s.log_tail.slice(-8).join('\n') : ''));
       }
-      // Progress ring: candidate index + sub-progress within this poll cycle.
+      // Progress ring: candidate index + sub-progress within this poll cycle,
+      // as a 0..1 fraction of the whole batch (studio eval §7).
       const frac = Math.min(0.99, (Date.now() - t0) / 120000);
-      setFabProgress(candIdx + frac, `${candIdx + 1}/${batch}`);
+      setFabProgress((candIdx + frac) / batch, `${candIdx + 1}/${batch}`);
       say(`${s.state}… ${Math.round((Date.now() - t0) / 1000)}s`);
       await new Promise(r => setTimeout(r, 1500));
     }
@@ -1252,7 +1264,15 @@ export function mountStudio(panel, jobbar) {
       const sl = document.createElement('input');
       sl.type = 'range'; sl.className = 'st-lslider'; sl.min = -1; sl.max = 2; sl.step = 0.05;
       sl.value = st;
-      sl.addEventListener('input', () => { pins.setStrength(name, +sl.value); renderLoras(); });
+      // Live-update the strength tag in place while dragging; a full
+      // re-render here would destroy the slider mid-drag (studio eval §1).
+      // The tray re-renders once on release ('change').
+      sl.addEventListener('input', () => {
+        pins.setStrength(name, +sl.value);
+        const tag = row.querySelector('.str');
+        if (tag) tag.textContent = '×' + (+sl.value).toFixed(2);
+      });
+      sl.addEventListener('change', () => renderLoras());
       box.appendChild(sl);
     }
   }
@@ -1309,7 +1329,16 @@ export function mountStudio(panel, jobbar) {
 
     const q = document.createElement('input');
     q.className = 'st-lq'; q.placeholder = 'search all loras…'; q.value = loraUI.q;
-    q.addEventListener('input', () => { loraUI.q = q.value; renderLoras(); });
+    q.addEventListener('input', () => {
+      loraUI.q = q.value;
+      const pos = q.selectionStart;
+      renderLoras();
+      // renderLoras rebuilds the tray, including this input — restore
+      // focus and caret, or typing stops after one character (studio
+      // eval §1).
+      const nq = el.loraui.querySelector('.st-lq');
+      if (nq) { nq.focus(); try { nq.setSelectionRange(pos, pos); } catch { /* ignore */ } }
+    });
     el.loraui.appendChild(q);
 
     // folder chips: auto (workflow default) + every root present
@@ -1403,7 +1432,14 @@ export function mountStudio(panel, jobbar) {
           const sl = document.createElement('input');
           sl.type = 'range'; sl.className = 'st-lslider'; sl.min = -1; sl.max = 2; sl.step = 0.05;
           sl.value = pinnedA;
-          sl.addEventListener('input', () => { pins.setStrength(n, +sl.value); renderLoras(); });
+          // As in loraRow: live-update in place while dragging; re-render
+          // once on release so the drag isn't destroyed mid-gesture.
+          sl.addEventListener('input', () => {
+            pins.setStrength(n, +sl.value);
+            const tag = row.querySelector('.str');
+            if (tag) tag.textContent = '×' + (+sl.value).toFixed(2);
+          });
+          sl.addEventListener('change', () => renderLoras());
           body.appendChild(sl);
         }
       }
@@ -1455,9 +1491,32 @@ export function mountStudio(panel, jobbar) {
       denoise: parseFloat(el.denoise.value),
     });
   }
+  // A provenance recipe carries the *concrete* workflow id (e.g.
+  // klein-4b-edit); the form only offers families. Derive the family +
+  // model + mode from the id so ReUse restores the workflow too
+  // (studio eval §4). Returns null when the id isn't in the families map.
+  function deriveWorkflow(id) {
+    for (const [fam, fd] of Object.entries(FAMILY_MODELS)) {
+      const models = (fd && fd.models) || {};
+      for (const [model, mv] of Object.entries(models)) {
+        if (mv && mv.gen === id) return { family: fam, model, edit: false };
+        if (mv && mv.edit === id) return { family: fam, model, edit: true };
+      }
+    }
+    return null;
+  }
   function applyState(raw) {
     const st = normalizeState(raw);
-    if (st.workflow && [...el.wf.options].some(o => o.value === st.workflow && !o.disabled)) el.wf.value = st.workflow;
+    if (st.workflow) {
+      const dw = deriveWorkflow(st.workflow);
+      if (dw && [...el.wf.options].some(o => o.value === dw.family)) {
+        el.wf.value = dw.family;
+        wfModel = dw.model; wfEdit = dw.edit;
+        saveFamilyState(); renderVariants();
+      } else if ([...el.wf.options].some(o => o.value === st.workflow && !o.disabled)) {
+        el.wf.value = st.workflow;
+      }
+    }
     el.prompt.value = st.prompt;
     aspect = st.aspect;
     el.aspects.querySelectorAll('[data-a]').forEach(x => x.classList.toggle('on', x.dataset.a === aspect));
@@ -1515,7 +1574,10 @@ export function mountStudio(panel, jobbar) {
   for (const ev of ['input', 'change', 'click']) {
     panel.addEventListener(ev, e => {
       if (!e.target.closest('[data-panel="generate"]')) return;
-      if (e.target.closest('.st-verbswitch, [data-id="pips"], .st-loraui')) return;
+      if (e.target.closest('.st-verbswitch, [data-id="pips"]')) return;
+      // LoRA tray changes belong in _last too (studio eval §6) — but not
+      // every slider tick / search keystroke: those save on release.
+      if (ev === 'input' && e.target.closest('.st-loraui')) return;
       scheduleSave();
     });
   }
@@ -1755,8 +1817,16 @@ export function mountStudio(panel, jobbar) {
       if (!r2.ok) throw new Error(`store failed: ${r2.status}`);
       const { render_path } = await r2.json();
       clearPreview();
-      // Output-becomes-working: the filtered result re-promotes with
-      // fresh provenance (origin 'filters').
+      // Output-becomes-working, with the version history kept (studio
+      // eval §5): push the filtered render onto the stack first, exactly
+      // as refine does, so the store's same-path guard keeps the history
+      // instead of openWorking() rebuilding a fresh stack.
+      stack = pushRender(stack, {
+        url: galleryFileUrl(render_path), name: `filtered ${current(s).name}`,
+        path: render_path, recipe: 'filters', masked: false,
+      });
+      compareOn = false; cmpPct = 100;
+      showCurrent();
       studioState().set(render_path, 'filters', { name: `filtered ${current(s).name}` });
       showToast('Filter stack applied');
       el.fstatus.textContent = 'applied — output is the working image';
