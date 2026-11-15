@@ -25,7 +25,7 @@ import { normalizeState, presetState, debounce, cleanName, nextSeed, sizeFor, re
 import { createPins } from './foxden-loras.js';
 import { dist, pinchScale, clampPan, wheelScale } from './zoom-viewer.js';
 import { tuneImageData, tunesAreIdentity } from './filters-tunes.js';
-import { clampBatch, batchFromPointer, BATCH_MAX } from './studio-pips.js';
+import { clampBatch, batchFromRockerDrag, BATCH_MAX } from './studio-pips.js';
 
 const API = '/api/foxden';
 const esc = s => String(s).replace(/[&<>"]/g, c =>
@@ -60,7 +60,7 @@ function panelHTML() {
       border: 1px solid #4a4a6c; border-radius: 6px; padding: 8px; width: 100%; box-sizing: border-box; }
     .st-root textarea { resize: vertical; }
     .st-head { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: #12121f;
-      border-bottom: 1px solid #2a2a44; flex: 0 0 auto; }
+      border-bottom: 1px solid #2a2a44; flex: 0 0 auto; flex-wrap: wrap; }
     .st-head h1 { font-size: 15px; font-weight: 600; margin: 0; }
     .st-provchip { display: flex; align-items: center; gap: 8px; background: #161628; border: 1px solid #4a4a6c;
       border-radius: 20px; padding: 4px 12px 4px 6px; font-size: 12px; color: #8a8aaa; max-width: 40vw; min-width: 0; overflow: hidden; }
@@ -79,6 +79,7 @@ function panelHTML() {
     .st-frame .st-imgb img { object-fit: contain; }
     .st-frame .st-imgb { position: absolute; inset: 0; overflow: hidden; }
     .st-frame .st-imgb img { max-width: none; max-height: none; width: 100%; height: 100%; object-fit: contain; position: absolute; inset: 0; }
+    .st-maskview { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
     .st-badge { position: absolute; top: 10px; left: 10px; z-index: 6; background: rgba(15,15,26,.85);
       border: 1px solid #4a4a6c; border-radius: 5px; padding: 3px 10px; font-size: 11px; color: #b39ae0; pointer-events: none; }
     .st-cmpbar { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 6; display: none;
@@ -87,6 +88,10 @@ function panelHTML() {
     .st-cmpbar button { border: 0; border-radius: 0; background: transparent; min-height: 44px; font-size: 12px; color: #8a8aaa; }
     .st-cmpbar button.on { background: #5b4a8a; color: #fff; }
     .st-frame.comparing .st-imgb { clip-path: inset(0 var(--cmp, 50%) 0 0); }
+    .st-cmpdiv { position: absolute; top: 0; bottom: 64px; left: 50%; width: 28px; margin-left: -14px; z-index: 7; display: none; cursor: ew-resize; touch-action: none; }
+    .st-frame.comparing .st-cmpdiv { display: block; }
+    .st-cmpdiv::before { content: ''; position: absolute; top: 0; bottom: 0; left: 13px; width: 2px; background: #b39ae0; box-shadow: 0 0 6px rgba(0,0,0,.6); }
+    .st-cmpdiv::after { content: '‹ ›'; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(15,15,26,.9); border: 1px solid #b39ae0; color: #b39ae0; border-radius: 14px; padding: 4px 6px; font-size: 11px; line-height: 1; pointer-events: none; }
     .st-emptymsg { color: #6c6c8e; font-size: 13px; text-align: center; max-width: 420px; padding: 20px; }
     .st-canvasarea.has-image .st-emptymsg { display: none; }
     /* ---- candidate strip ---- */
@@ -107,7 +112,8 @@ function panelHTML() {
     .st-lrow { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border-bottom: 1px solid #1c1c30; }
     .st-lrow:last-child { border-bottom: 0; }
     .st-lrow .rn { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-    .st-lrow .where { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .st-lrow .chev { color: #6c6c8e; font-size: 11px; flex: 0 0 auto; }
+    .st-lrow .where { max-width: 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .st-lrow.parked .rn { color: #c9b97a; }
     .st-lrow .str { font-size: 11px; color: #b39ae0; background: #161628; border-radius: 4px; padding: 2px 6px; }
     .st-lrow .where { font-size: 10px; color: #6c6c8e; }
@@ -123,7 +129,7 @@ function panelHTML() {
       font-size: 11px; padding: 4px 10px; min-height: 30px; cursor: pointer; }
     .st-lsubs button.on { background: #b39ae033; color: #e6dbff; border-color: #b39ae0; }
     .st-lq { width: 100%; box-sizing: border-box; background: #12121f; border: 1px solid #2a2a44; color: #d8d8ee;
-      border-radius: 8px; padding: 9px 12px; font-size: 13px; }
+      border-radius: 8px; padding: 9px 12px; font-size: 16px; }
     .st-lwarn { font-size: 11px; padding: 6px 10px; border-radius: 6px; }
     .st-lwarn.amber { color: #e0b34d; background: #2a2410; }
     .st-lwarn.red { color: #e05a5a; background: #2a1414; }
@@ -146,11 +152,11 @@ function panelHTML() {
     .st-cand.sel .pick { opacity: 1; }
     .st-cand.empty { display: grid; place-items: center; height: 86px; color: #6c6c8e; font-size: 11px;
       border: 2px dashed #2a2a44; background: transparent; cursor: default; }
-    .st-src{position:relative;flex:0 0 auto;margin-left:auto;display:grid;place-items:center;min-height:64px;min-width:64px;border:1px dashed #4a4a6c;border-radius:8px;color:#8a8aaa;font-size:12px;cursor:pointer;overflow:hidden}
+    .st-src{position:relative;flex:0 0 auto;margin-left:auto;display:grid;place-items:center;min-height:88px;min-width:88px;border:1px dashed #4a4a6c;border-radius:8px;color:#8a8aaa;font-size:12px;cursor:pointer;overflow:hidden}
     .st-src.has{border-style:solid}
-    .st-src.has img{width:64px;height:64px;object-fit:cover;display:block}
-    .st-src-dn,.st-src-up{position:absolute;top:2px;left:2px;width:20px;height:20px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:12px;color:#b39ae0}
-    .st-src-x{position:absolute;top:2px;right:2px;width:18px;height:18px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:11px;color:#fff}
+    .st-src.has img{width:88px;height:88px;object-fit:cover;display:block}
+    .st-src-dn,.st-src-up{position:absolute;top:2px;left:2px;width:44px;height:44px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:16px;color:#b39ae0}
+    .st-src-x{position:absolute;top:2px;right:2px;width:44px;height:44px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:14px;color:#fff}
     /* ---- right rail ---- */
     .st-rail { flex: 0 0 330px; min-width: 0; overflow: hidden; background: #12121f; border-left: 1px solid #2a2a44; display: flex; flex-direction: column; min-height: 0; }
     .st-verbswitch { display: flex; margin: 12px; background: #161628; border: 1px solid #4a4a6c; border-radius: 8px; overflow: hidden; }
@@ -161,7 +167,7 @@ function panelHTML() {
     .st-railactions { flex: 0 0 auto; padding: 12px 16px; border-top: 1px solid #2a2a44; background: #161628; }
     .st-railactions .row { display: flex; gap: 8px; }
     .st-railactions .row + .row { margin-top: 8px; }
-    .st-railactions button { flex: 1; font-size: 12.5px; }
+    .st-railactions button { flex: 1; font-size: 12.5px; min-width: 0; }
     .st-savenote { font-size: 11px; color: #6c6c8e; margin-top: 8px; text-align: center; }
     .st-row2 { display: flex; gap: 8px; }
     .st-row2 > * { flex: 1; min-width: 0; }
@@ -171,13 +177,17 @@ function panelHTML() {
     .st-chip { font-size: 11px; padding: 6px 9px; border-radius: 12px; border: 1px solid #4a4a6c;
       color: #8a8aaa; cursor: pointer; background: #161628; min-height: 32px; }
     .st-chip.on { background: #5b4a8a; border-color: #7a6aaa; color: #fff; }
-    /* ---- batch drag pips ---- */
-    .st-pips { display: flex; gap: 8px; align-items: center; padding: 10px 4px; min-height: 44px;
-      touch-action: none; cursor: ew-resize; user-select: none; -webkit-user-select: none; }
-    .st-pip { width: 26px; height: 26px; border-radius: 50%; border: 2px solid #4a4a6c; background: #161628;
-      display: grid; place-items: center; font-size: 11px; color: #6c6c8e; flex: 0 0 auto; transition: all .15s; padding: 0; min-height: 0; }
-    .st-pip.on { background: #5b4a8a; border-color: #b39ae0; color: #fff; }
-    .st-pip.cursor { border-color: #b39ae0; box-shadow: 0 0 0 3px rgba(179,154,224,.25); }
+    /* ---- batch rocker (usability pass 2026-11-15: replaces the drag pips) ---- */
+    .st-pips { display: flex; align-items: center; gap: 10px; border: 1px solid #4a4a6c; border-radius: 8px;
+      background: #161628; padding: 8px 12px; min-height: 52px; touch-action: none; cursor: ns-resize;
+      user-select: none; -webkit-user-select: none; }
+    .st-pips .st-rock-val { font-size: 22px; color: #d4d4e0; line-height: 1; }
+    .st-pips .st-rock-val b { font-weight: 600; }
+    .st-pips .st-rock-of { font-size: 12px; color: #6c6c8e; }
+    .st-pips .st-rock-hint { font-size: 11px; color: #6c6c8e; margin-left: auto; }
+    .st-pips .st-rock-chevs { display: flex; flex-direction: column; line-height: 1.1; color: #8a8aaa; font-size: 11px; }
+    .st-pips.armed { border-color: #b39ae0; background: #1d1d33; }
+    .st-pips.armed .st-rock-hint { color: #b39ae0; }
     /* ---- collapsible Filters section inside Refine ---- */
     .st-root details.collapse { margin-top: 14px; border: 1px solid #2a2a44; border-radius: 8px; background: #161628; }
     .st-root details.collapse summary { cursor: pointer; list-style: none; padding: 12px 14px; font-size: 12px;
@@ -212,12 +222,12 @@ function panelHTML() {
       max-width: 100vw; max-height: 100vh; display: grid; place-items: center; }
     .st-root.st-immersive .st-frame img { max-width: 100vw; max-height: 100vh; width: auto; height: auto; }
     .st-root.st-immersive .st-frame .st-imgb img { width: 100%; height: 100%; }
-    .st-edgetab { position: fixed; right: 0; top: 0; z-index: 96; display: none; background: #161628;
+    .st-edgetab { position: fixed; right: env(safe-area-inset-right, 0px); top: env(safe-area-inset-top, 0px); z-index: 96; display: none; background: #161628;
       border: 1px solid #4a4a6c; border-right: 0; border-radius: 10px 0 0 10px; color: #b39ae0;
       font-size: 12px; letter-spacing: .12em; padding: 10px 14px; min-height: 44px; min-width: 72px;
       box-shadow: 2px 2px 12px rgba(0,0,0,.5); }
     .st-root.st-immersive .st-edgetab { display: block; }
-    .st-genfab { position: fixed; right: 24px; bottom: 24px; z-index: 96; width: 76px; height: 76px;
+    .st-genfab { position: fixed; right: calc(24px + env(safe-area-inset-right, 0px)); bottom: calc(24px + env(safe-area-inset-bottom, 0px)); z-index: 96; width: 76px; height: 76px;
       border-radius: 50%; display: none; place-items: center; background: #5b4a8a; border: 2px solid #7a6aaa;
       color: #fff; box-shadow: 0 6px 24px rgba(0,0,0,.6); padding: 0; overflow: hidden; }
     .st-root.st-immersive .st-genfab { display: grid; }
@@ -226,7 +236,7 @@ function panelHTML() {
     .st-genfab .inner { position: relative; width: 62px; height: 62px; border-radius: 50%; background: #5b4a8a;
       display: grid; place-items: center; font-size: 11.5px; line-height: 1.2; text-align: center; }
     .st-genfab.running .inner { background: #3a2a5a; }
-    .st-bottomhandle { position: fixed; left: 50%; bottom: 0; transform: translateX(-50%); z-index: 96; display: none;
+    .st-bottomhandle { position: fixed; left: 50%; bottom: env(safe-area-inset-bottom, 0px); transform: translateX(-50%); z-index: 96; display: none;
       background: rgba(22,22,40,.9); border: 1px solid #4a4a6c; border-bottom: 0; border-radius: 12px 12px 0 0;
       color: #8a8aaa; font-size: 11px; padding: 6px 26px 8px; min-height: 44px; letter-spacing: .08em; }
     .st-root.st-immersive .st-bottomhandle { display: block; }
@@ -236,7 +246,7 @@ function panelHTML() {
       max-height: 45vh; overflow-y: auto; }
     .st-candoverlay.open { transform: translateY(0); }
     .st-candoverlay .ov-actions { display: flex; gap: 8px; margin-top: 12px; }
-    .st-candoverlay .ov-actions button { flex: 1; font-size: 12.5px; min-height: 44px; }
+    .st-candoverlay .ov-actions button { flex: 1; font-size: 12.5px; min-height: 44px; min-width: 0; }
     .st-toast { position: fixed; top: 18px; left: 50%; transform: translate(-50%, -140%); z-index: 99;
       background: rgba(22,22,40,.95); border: 1px solid #b39ae0; border-radius: 10px; padding: 10px 18px;
       font-size: 13px; color: #d4d4e0; display: flex; align-items: center; gap: 10px;
@@ -267,6 +277,7 @@ function panelHTML() {
       </span>
       <span class="spacer"></span>
       <button class="st-clear" data-id="clear" title="Clear working image" hidden>✕ clear</button>
+      <button data-id="fit" title="Reset zoom to fit" hidden>⤢ Fit</button>
       <button data-id="imm" title="Hide chrome; image fills screen">⛶ Fullscreen</button>
     </header>
 
@@ -274,17 +285,18 @@ function panelHTML() {
       <section class="st-stagecol">
         <div class="st-canvasarea" data-id="canvasarea">
           <div class="st-emptymsg">No working image yet.<br>
-            Set one from the Gallery (📌 Set as working image), the Ladder verb, or a candidate below.
-            Generate lands here too — every finished output becomes the working image.</div>
+            Set one from the Gallery (📌 Set as working image), the Ladder verb, or a candidate below.</div>
           <div class="st-frame" data-id="frame" hidden>
             <span class="st-badge" data-id="badge"></span>
             <img data-id="img-a" alt="working image">
             <span class="st-imgb" data-id="wrap-b"><img data-id="img-b" alt="current render"></span>
+            <canvas class="st-maskview" data-id="maskview" hidden></canvas>
             <div class="st-cmpbar" data-id="cmpbar">
               <button class="on" data-c="after">Result</button>
               <button data-c="before">Before</button>
               <button data-c="split">Split</button>
             </div>
+            <div class="st-cmpdiv" data-id="cmpdiv" title="Drag to compare"></div>
           </div>
         </div>
         <div class="st-strip" data-id="strip">
@@ -319,7 +331,7 @@ function panelHTML() {
                 <button type="button" data-e="1">Edit</button>
               </span>
             </div>
-            <label>Prompt</label><textarea data-id="prompt" rows="3" placeholder="describe the image…"></textarea>
+            <label>Prompt</label><textarea data-id="prompt" rows="6" placeholder="describe the image…"></textarea>
             <div class="st-row2">
               <div><label>Aspect</label>
                 <div class="st-chips" data-id="aspects">
@@ -333,7 +345,7 @@ function panelHTML() {
             </div>
             <div class="st-row2">
               <div><label>Seed</label><input type="number" data-id="seed" placeholder="random"></div>
-              <div style="display:flex;align-items:end;gap:6px">
+              <div style="display:flex;align-items:end;gap:6px;flex-wrap:wrap;min-width:0">
                 <label style="margin:0 0 8px"><input type="checkbox" data-id="lock" style="width:auto"> 🔒 lock</label>
                 <button data-id="dice" title="Random seed">🎲</button>
               </div>
@@ -343,13 +355,12 @@ function panelHTML() {
             <span class="st-hintline">&lt;1 uses the working image as the img2img input</span>
             <label style="margin-top:14px">Batch count</label>
             <div class="st-pips" data-id="pips" role="slider" aria-label="Batch count 1 to 4"
-              aria-valuemin="1" aria-valuemax="${BATCH_MAX}" aria-valuenow="1" tabindex="0">
-              <button class="st-pip on cursor" data-v="1" aria-label="batch 1">1</button>
-              <button class="st-pip" data-v="2" aria-label="batch 2">2</button>
-              <button class="st-pip" data-v="3" aria-label="batch 3">3</button>
-              <button class="st-pip" data-v="4" aria-label="batch 4">4</button>
+              aria-valuemin="1" aria-valuemax="${BATCH_MAX}" aria-valuenow="1" tabindex="0"
+              title="Hold 1 second, then drag up or down">
+              <span class="st-rock-val"><b data-id="batchval">1</b><span class="st-rock-of"> / 4</span></span>
+              <span class="st-rock-chevs" aria-hidden="true"><span>▲</span><span>▼</span></span>
+              <span class="st-rock-hint">hold 1s, drag ↕</span>
             </div>
-            <span class="st-hintline">drag across the pips · batch = <b data-id="batchval">1</b></span>
             <label>LoRAs <span data-id="lcount"></span></label>
             <div class="st-loraui" data-id="loraui"></div>
             <label>Presets</label>
@@ -369,10 +380,10 @@ function panelHTML() {
             <label>Preset</label>
             <select data-id="rpreset"><option value="">loading…</option></select>
             <label>Prompt</label>
-            <textarea data-id="rprompt" rows="3" placeholder="prompt for the transform…"></textarea>
+            <textarea data-id="rprompt" rows="6" placeholder="prompt for the transform…"></textarea>
             <div class="st-row2">
               <div><label>Seed</label><input type="number" data-id="rseed" value="0"></div>
-              <div style="display:flex;align-items:end"><label style="margin:0 0 8px"><input type="checkbox" data-id="rrandom" checked style="width:auto"> random</label></div>
+              <div style="display:flex;align-items:end;flex-wrap:wrap;min-width:0"><label style="margin:0 0 8px"><input type="checkbox" data-id="rrandom" checked style="width:auto"> random</label></div>
             </div>
             <label data-id="rdenoise-lbl" style="display:none">Denoise
               <input type="range" data-id="rdenoise" min="0.2" max="0.8" step="0.05" value="0.45">
@@ -393,7 +404,7 @@ function panelHTML() {
             <div class="st-row2" style="margin-top:14px">
               <button class="primary" data-id="rrun">✎ Run preset</button>
             </div>
-            <span class="st-hintline" data-id="rstatus">Runs on the working image; the result promotes with fresh provenance.</span>
+            <span class="st-hintline" data-id="rstatus"></span>
 
             <details class="collapse" data-id="filters-sec">
               <summary>🎛 Filters</summary>
@@ -416,7 +427,6 @@ function panelHTML() {
                 <label>Lift blacks <input type="range" data-id="tn-lift" min="0" max="0.3" step="0.01" value="0"></label>
                 <label>Lift edge <input type="range" data-id="tn-edge" min="0" max="0.5" step="0.01" value="0"></label>
                 <label>Effect strength <input type="range" data-id="strength" min="0" max="100" step="1" value="100"></label>
-                <span class="st-hintline">Preview renders here on the canvas; Filters act on the working image, and the applied output re-promotes with fresh provenance.</span>
                 <button class="primary" style="width:100%;margin-top:14px" data-id="fapply">Apply filter stack</button>
                 <span class="st-hintline" data-id="fstatus"></span>
               </div>
@@ -429,7 +439,6 @@ function panelHTML() {
             <div data-id="provtable"><span class="st-hintline">no working image</span></div>
             <label style="margin-top:14px">Parent chain</label>
             <div class="st-parentchain" data-id="parentchain"><span class="st-hintline">no working image</span></div>
-            <span class="st-hintline">Full lineage is write-once: every promote/refine appends here.</span>
           </div>
         </div>
 
@@ -471,8 +480,8 @@ export function mountStudio(panel, jobbar) {
   panel.innerHTML = panelHTML();
   const root = panel.querySelector('.st-root');
   const $ = id => panel.querySelector(`[data-id="${id}"]`);
-  const el = Object.fromEntries(['chip', 'chip-name', 'chip-chain', 'clear', 'imm',
-    'canvasarea', 'frame', 'badge', 'img-a', 'wrap-b', 'img-b', 'cmpbar',
+  const el = Object.fromEntries(['chip', 'chip-name', 'chip-chain', 'clear', 'fit', 'imm',
+    'canvasarea', 'frame', 'badge', 'img-a', 'wrap-b', 'img-b', 'maskview', 'cmpbar', 'cmpdiv',
     'strip', 'cands', 'wf', 'segrow', 'seg-model', 'seg-model-lab', 'seg-edit', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
     'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui',
     'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all',
@@ -537,6 +546,8 @@ export function mountStudio(panel, jobbar) {
     else if (zoomScale !== old) clampZoomPan();
     applyZoom();
   }
+  // Fit button: the dead stepZoom finally has a caller — reset to 1:1.
+  el.fit.addEventListener('click', () => { if (zoomScale !== 1) stepZoom(1 / zoomScale); });
   function zoomAroundCursor(clientX, clientY, newScale) {
     const old = zoomScale;
     if (newScale === old) return;
@@ -575,6 +586,7 @@ export function mountStudio(panel, jobbar) {
     const s = stack;
     const compare = !!(compareOn && s && s.idx > 0);
     el.frame.classList.toggle('comparing', compare);
+    el.cmpdiv.style.left = cmpPct + '%';
     // img-b paints over img-a: while a candidate preview is up, clip it
     // away entirely so the preview is visible (§10 review 12:34)
     el['wrap-b'].style.clipPath = compare ? `inset(0 ${100 - cmpPct}% 0 0)`
@@ -590,9 +602,32 @@ export function mountStudio(panel, jobbar) {
     const b = e.target.closest('[data-c]');
     if (!b) return;
     if (b.dataset.c === 'after') { compareOn = false; }
-    else { compareOn = true; cmpPct = b.dataset.c === 'before' ? 0 : 100; }
+    // Split opens at the middle — 100 left it indistinguishable from
+    // Result (studio wishlist §2).
+    else { compareOn = true; cmpPct = b.dataset.c === 'before' ? 0 : 50; }
     syncComparer();
   });
+
+  // Compare divider: drag it to move the split (studio wishlist §2).
+  // The handle owns its own pointer capture — the frame's drags stay
+  // pan/zoom, so the divider must be grabbed, not the frame.
+  let cmpDrag = null;
+  el.cmpdiv.addEventListener('pointerdown', e => {
+    if (!compareOn || !stack || stack.idx <= 0) return;
+    cmpDrag = e.pointerId;
+    el.cmpdiv.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  el.cmpdiv.addEventListener('pointermove', e => {
+    if (cmpDrag !== e.pointerId) return;
+    const r = el.frame.getBoundingClientRect();
+    if (!r.width) return;
+    cmpPct = Math.min(100, Math.max(0, ((e.clientX - r.left) / r.width) * 100));
+    syncComparer();
+  });
+  const endCmpDrag = e => { if (cmpDrag === e.pointerId) cmpDrag = null; };
+  el.cmpdiv.addEventListener('pointerup', endCmpDrag);
+  el.cmpdiv.addEventListener('pointercancel', endCmpDrag);
 
   // Load a working image as the stack original. Same-path guard: the
   // store event, send-to, and our own promote must not rebuild a stack
@@ -608,7 +643,31 @@ export function mountStudio(panel, jobbar) {
         ? fetch(cands.find(path).url) : Promise.resolve(r0));
       if (!r.ok) throw new Error(r.status);
       const blob = await r.blob();
-      stack = createStack({ url: URL.createObjectURL(blob), name: name || path.split('/').pop(), path });
+      const outEntry = { url: URL.createObjectURL(blob), name: name || path.split('/').pop(), path };
+      // An input image makes the compare real (studio wishlist §2): when
+      // the working image's provenance names one, seed the stack with it
+      // as entry 0 so Before/Split compare input vs output. Best-effort —
+      // any failure falls back to the single-entry stack.
+      let seeded = null;
+      try {
+        const pr = await fetch(`/api/foxden/provenance?path=${encodeURIComponent(path)}`);
+        const rec = pr.ok ? await pr.json() : null;
+        const input = rec && typeof rec.input_image === 'string' && rec.input_image && rec.input_image !== path
+          ? rec.input_image : null;
+        if (input) {
+          const i0 = await fetch(galleryFileUrl(input));
+          const ir = i0.ok ? i0 : await (cands.find(input)
+            ? fetch(cands.find(input).url) : Promise.resolve(i0));
+          if (ir.ok) {
+            const ib = await ir.blob();
+            seeded = pushRender(
+              createStack({ url: URL.createObjectURL(ib), name: input.split('/').pop(), path: input }),
+              outEntry);
+            seeded = setViewedAsBase(seeded); // next run renders from the output, not the input
+          }
+        }
+      } catch { /* fall through to the single-entry stack */ }
+      stack = seeded || createStack(outEntry);
       compareOn = false; cmpPct = 100;
       zoomScale = 1; zoomTx = 0; zoomTy = 0;
       maskCanvas = null; maskPainted = false; maskUndoStack = [];
@@ -636,6 +695,7 @@ export function mountStudio(panel, jobbar) {
   function syncChip(d) {
     el.chip.hidden = !d.path;
     el.clear.hidden = !d.path;
+    el.fit.hidden = !d.path;
     if (d.path) {
       el['chip-name'].textContent = d.name || d.path.split('/').pop();
       const p = d.provenance;
@@ -649,9 +709,18 @@ export function mountStudio(panel, jobbar) {
   el.canvasarea.addEventListener('pointerdown', e => {
     zPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (zPointers.size >= 2) {
+      // Second finger: this is a pinch, never a stroke — cancel any stroke
+      // in progress so the second finger doesn't paint a dot (update.js).
+      masking = false; _maskLastPt = null;
       const [a, b] = [...zPointers.values()];
       zPinch = { d0: dist(a, b), mid0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
                  scale0: zoomScale, tx0: zoomTx, ty0: zoomTy };
+    } else if (maskVisible()) {
+      // Mask arming, ported from update.js: one pointer, mask section open.
+      masking = true; _maskLastPt = null;
+      pushMaskUndo();
+      el.canvasarea.setPointerCapture(e.pointerId);
+      maskStroke(e);
     }
   });
   el.canvasarea.addEventListener('pointermove', e => {
@@ -675,6 +744,8 @@ export function mountStudio(panel, jobbar) {
   });
   const zUp = e => {
     zPointers.delete(e.pointerId);
+    // A stroke ends when its pointer lifts (update.js endMask).
+    masking = false; _maskLastPt = null;
     if (zPointers.size < 2) { zPinch = null; if (zoomScale <= 1.05) { zoomScale = 1; zoomTx = 0; zoomTy = 0; applyZoom(); } }
   };
   el.canvasarea.addEventListener('pointerup', zUp);
@@ -687,6 +758,37 @@ export function mountStudio(panel, jobbar) {
 
   // ── mask painting (masked-inpaint recipe) ──
   let masking = false;
+  // The mask is paintable only while the Refine verb is showing the mask
+  // section (masked-inpaint preset picked) and a mask canvas exists.
+  function maskVisible() {
+    return verb === 'refine' && el.mask.style.display !== 'none' && !!maskCanvas;
+  }
+  // Visible overlay: the mask itself is an offscreen canvas, so without
+  // this the user would paint blind. Red tint, alpha = mask brightness,
+  // drawn at low res (it's a guide) and stretched over the frame by CSS;
+  // it lives inside the frame, so the zoom transform moves it for free.
+  let maskViewTmp = null;
+  function drawMaskView() {
+    const mv = el.maskview;
+    if (!mv) return;
+    const show = verb === 'refine' && el.mask.style.display !== 'none' && !!maskCanvas && !!stack;
+    mv.hidden = !show;
+    if (!show) return;
+    const OW = 320, OH = Math.max(1, Math.round(320 * maskCanvas.height / maskCanvas.width));
+    if (!maskViewTmp) maskViewTmp = document.createElement('canvas');
+    maskViewTmp.width = OW; maskViewTmp.height = OH;
+    const tctx = maskViewTmp.getContext('2d');
+    tctx.drawImage(maskCanvas, 0, 0, OW, OH);
+    const src = tctx.getImageData(0, 0, OW, OH);
+    mv.width = OW; mv.height = OH;
+    const ctx = mv.getContext('2d');
+    const out = ctx.createImageData(OW, OH);
+    for (let i = 0; i < src.data.length; i += 4) {
+      out.data[i] = 255; out.data[i + 1] = 64; out.data[i + 2] = 64;
+      out.data[i + 3] = Math.round(src.data[i] * 0.6);
+    }
+    ctx.putImageData(out, 0, 0);
+  }
   function initMaskForSource() {
     const srcEntry = stack && source(stack);
     if (!srcEntry) return;
@@ -701,6 +803,7 @@ export function mountStudio(panel, jobbar) {
       const ctx = mc.getContext('2d');
       ctx.fillStyle = '#000'; ctx.fillRect(0, 0, mc.width, mc.height);
       maskCanvas = mc;
+      drawMaskView();
     };
     img.src = srcEntry.url;
   }
@@ -712,6 +815,9 @@ export function mountStudio(panel, jobbar) {
   }
   function maskStroke(e) {
     if (!maskCanvas) return;
+    // No new mapping needed while zoomed: the frame's bounding rect already
+    // includes the scale, so the pointer → rect → natural-size ratio
+    // accounts for zoom for free (update.js applyZoom comment).
     const fr = el.frame.getBoundingClientRect();
     const sx = maskCanvas.width / fr.width, sy = maskCanvas.height / fr.height;
     const x = (e.clientX - fr.left) * sx, y = (e.clientY - fr.top) * sy;
@@ -724,6 +830,7 @@ export function mountStudio(panel, jobbar) {
     ctx.lineTo(x, y); ctx.stroke();
     _maskLastPt = { x, y };
     maskPainted = maskMode === 'paint' ? true : maskHasWhite();
+    drawMaskView();
   }
   el['mask-paint'].addEventListener('click', () => { maskMode = 'paint'; });
   el['mask-erase'].addEventListener('click', () => { maskMode = 'erase'; });
@@ -733,6 +840,7 @@ export function mountStudio(panel, jobbar) {
     const ctx = maskCanvas.getContext('2d');
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
     maskPainted = false;
+    drawMaskView();
   });
   function pushMaskUndo() {
     if (!maskCanvas) return;
@@ -750,6 +858,7 @@ export function mountStudio(panel, jobbar) {
       ctx.drawImage(img, 0, 0);
       maskPainted = maskHasWhite();
       el['mask-undo'].disabled = maskUndoStack.length === 0;
+      drawMaskView();
     };
     img.src = url;
   });
@@ -768,6 +877,9 @@ export function mountStudio(panel, jobbar) {
     // The Provenance panel reads the store lazily — render it on open, or
     // it shows whatever was last rendered (studio eval §2).
     if (v === 'provenance') renderProvenance();
+    // The mask overlay only shows on the Refine verb with the mask section
+    // open; hide it when leaving, show it when returning.
+    drawMaskView();
   }
   function setRunLabel() {
     el.runbtn.textContent =
@@ -1092,40 +1204,42 @@ export function mountStudio(panel, jobbar) {
     } catch (e) { say(`save all failed: ${e.message}`, true); }
   }
 
-  // ── batch pips (studio-pips.js math; pointer capture, touch-action:none,
-  // aria slider — no keyboard dependency) ──
+  // ── batch rocker (usability pass 2026-11-15, replaces the drag pips):
+  // hold ~1s to arm, then drag vertically — up adds, down subtracts, 1..4.
+  // The hold stops accidental bumps; the armed state is visible on the
+  // control. Arrow keys step it without the hold (keyboard is deliberate).
+  const ROCKER_HOLD_MS = 1000, ROCKER_STEP_PX = 28;
+  let rockerArmTimer = null, rockerArmed = false, rockerStartY = 0, rockerStartBatch = 1;
   function setBatch(v) {
     batch = clampBatch(v);
-    for (const p of el.pips.querySelectorAll('.st-pip')) {
-      p.classList.toggle('on', +p.dataset.v <= batch);
-      p.classList.toggle('cursor', +p.dataset.v === batch);
-    }
     el.pips.setAttribute('aria-valuenow', String(batch));
     el.batchval.textContent = String(batch);
     setRunLabel();
   }
-  // rocker: hold ~350ms to arm, then drag changes the count — a scroll
-  // across the control can no longer bump it by accident (§10 review 12:23)
-  let rockerArmed = null;
+  const disarmRocker = () => {
+    if (rockerArmTimer) { clearTimeout(rockerArmTimer); rockerArmTimer = null; }
+    rockerArmed = false;
+    el.pips.classList.remove('armed');
+  };
   el.pips.addEventListener('pointerdown', e => {
     el.pips.setPointerCapture(e.pointerId);
-    if (rockerArmed) return;
-    rockerArmed = setTimeout(() => { rockerArmed = true; }, 350);
+    if (rockerArmTimer || rockerArmed) return;
+    rockerStartY = e.clientY; rockerStartBatch = batch;
+    rockerArmTimer = setTimeout(() => {
+      rockerArmTimer = null; rockerArmed = true;
+      el.pips.classList.add('armed');
+    }, ROCKER_HOLD_MS);
   });
-  el.pips.addEventListener('pointerup', () => {
-    if (rockerArmed && rockerArmed !== true) clearTimeout(rockerArmed);
-    rockerArmed = null;
-  });
-  el.pips.addEventListener('pointercancel', () => {
-    if (rockerArmed && rockerArmed !== true) clearTimeout(rockerArmed);
-    rockerArmed = null;
-  });
+  el.pips.addEventListener('pointerup', disarmRocker);
+  el.pips.addEventListener('pointercancel', disarmRocker);
   el.pips.addEventListener('pointermove', e => {
-    if (rockerArmed === true && (e.buttons > 0 || e.pressure > 0))
-      setBatch(batchFromPointer(e.clientX, el.pips.getBoundingClientRect()));
+    if (!rockerArmed) return;
+    setBatch(batchFromRockerDrag(rockerStartBatch, rockerStartY, e.clientY, ROCKER_STEP_PX));
   });
-  el.pips.querySelectorAll('.st-pip').forEach(p =>
-    p.addEventListener('click', e => { e.stopPropagation(); setBatch(+p.dataset.v); }));
+  el.pips.addEventListener('keydown', e => {
+    if (e.key === 'ArrowUp') { e.preventDefault(); setBatch(batch + 1); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); setBatch(batch - 1); }
+  });
   setBatch(1);
 
   // ── generate form: config / loras / aspects / presets / _last ──
@@ -1232,6 +1346,16 @@ export function mountStudio(panel, jobbar) {
   function loraRow(name, st, parked, box) {
     const row = document.createElement('div');
     row.className = 'st-lrow' + (parked ? ' parked' : '');
+    // Expand affordance (studio wishlist §5): the name is the tap target
+    // for the strength slider — show it, or nobody finds the slider.
+    const chev = document.createElement('span');
+    chev.className = 'chev';
+    chev.textContent = loraUI.expRow === name ? '▾' : '▸';
+    chev.title = 'tap to tune strength';
+    chev.addEventListener('click', () => {
+      loraUI.expRow = loraUI.expRow === name ? null : name; renderLoras();
+    });
+    row.appendChild(chev);
     const rn = document.createElement('span');
     rn.className = 'rn';
     rn.textContent = name.split('/').pop().replace(/\.safetensors$/i, '');
@@ -1329,6 +1453,11 @@ export function mountStudio(panel, jobbar) {
 
     const q = document.createElement('input');
     q.className = 'st-lq'; q.placeholder = 'search all loras…'; q.value = loraUI.q;
+    // 16px keeps iOS from auto-zooming on focus; the attrs keep the
+    // keyboard in search mode without autocorrect (usability pass).
+    q.setAttribute('inputmode', 'search');
+    q.setAttribute('autocomplete', 'off');
+    q.setAttribute('autocapitalize', 'off');
     q.addEventListener('input', () => {
       loraUI.q = q.value;
       const pos = q.selectionStart;
@@ -1405,6 +1534,12 @@ export function mountStudio(panel, jobbar) {
         const row = document.createElement('div');
         row.className = 'st-lrow';
         const pinnedA = pins.active.get(n), pinnedS = pins.suspended.has(n);
+        const chev = document.createElement('span');
+        chev.className = 'chev';
+        chev.textContent = loraUI.expRow === n ? '▾' : '▸';
+        chev.title = 'tap to tune strength';
+        chev.addEventListener('click', () => { loraUI.expRow = loraUI.expRow === n ? null : n; renderLoras(); });
+        row.appendChild(chev);
         const rn = document.createElement('span');
         rn.className = 'rn';
         rn.textContent = (pinnedA !== undefined ? '📌 ' : pinnedS ? '⏸ ' : '') +
@@ -1441,6 +1576,13 @@ export function mountStudio(panel, jobbar) {
           });
           sl.addEventListener('change', () => renderLoras());
           body.appendChild(sl);
+        } else if (loraUI.expRow === n) {
+          // Expanded but not pinned: the tap did nothing visible before
+          // (studio wishlist §5) — say what the slider needs.
+          const hint = document.createElement('div');
+          hint.className = 'st-hintline'; hint.style.padding = '4px 12px 8px';
+          hint.textContent = pinnedS ? 'restore ▶ to tune strength' : 'pin ＋ to tune strength';
+          body.appendChild(hint);
         }
       }
       if (list.length > 60) {
@@ -1489,6 +1631,7 @@ export function mountStudio(panel, jobbar) {
       seed: el.seed.value === '' ? null : parseInt(el.seed.value),
       loras: pins.payload(), suspended_loras: pins.suspendedPayload(),
       denoise: parseFloat(el.denoise.value),
+      model: wfModel, edit: wfEdit,
     });
   }
   // A provenance recipe carries the *concrete* workflow id (e.g.
@@ -1509,12 +1652,27 @@ export function mountStudio(panel, jobbar) {
     const st = normalizeState(raw);
     if (st.workflow) {
       const dw = deriveWorkflow(st.workflow);
+      let matched = false;
       if (dw && [...el.wf.options].some(o => o.value === dw.family)) {
         el.wf.value = dw.family;
         wfModel = dw.model; wfEdit = dw.edit;
-        saveFamilyState(); renderVariants();
+        matched = true;
       } else if ([...el.wf.options].some(o => o.value === st.workflow && !o.disabled)) {
         el.wf.value = st.workflow;
+        matched = true;
+      }
+      if (matched) {
+        // A saved model/mode (from _last or a preset) wins over the
+        // derived default — but only when it names a real model of this
+        // family, and edit only when that model has an edit graph
+        // (studio wishlist §6a). Without one, the derive/first-model
+        // default stands (old states).
+        const v = familyVariants();
+        if (st.model && v && v[st.model]) {
+          wfModel = st.model;
+          wfEdit = st.edit === true && !!(v[st.model].edit);
+        }
+        saveFamilyState(); renderVariants();
       }
     }
     el.prompt.value = st.prompt;
@@ -1618,6 +1776,7 @@ export function mountStudio(panel, jobbar) {
     el.mask.style.display = masked ? '' : 'none';
     el['rdenoise-lbl'].style.display = masked ? '' : 'none';
     if (masked) initMaskForSource();
+    drawMaskView();
   });
   el['rdenoise'].addEventListener('input', () => {
     el['rdenoise-val'].textContent = (+el['rdenoise'].value).toFixed(2);

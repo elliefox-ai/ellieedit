@@ -5,7 +5,7 @@ import { normalizeState, presetState, debounce, cleanName, nextSeed, sizeFor, SI
 
 const full = { workflow: 'klein', prompt: 'a fox', aspect: 'portrait', seed: 42,
   loras: [{ name: 'a', strength_model: 0.5 }], suspended_loras: [{ name: 'b', strength_model: 1.25 }],
-  steps: 6, denoise: 0.6, input_image: 'in.png' };
+  steps: 6, denoise: 0.6, input_image: 'in.png', model: '4b', edit: true };
 
 // every field round-trips (incl. suspended tray + input image ref)
 assert.deepEqual(normalizeState(full), full);
@@ -19,6 +19,16 @@ assert.equal(normalizeState({ denoise: '0.45' }).denoise, 0.45);
 assert.equal(normalizeState({ denoise: 7 }).denoise, 1);
 assert.equal(normalizeState({ denoise: 'junk' }).denoise, 1);
 assert.equal(presetState({ ...full, denoise: 0.3 }, false).denoise, 0.3);
+
+// model/mode round-trip (studio wishlist §6a); garbage is dropped, never crashes
+assert.equal(normalizeState({ model: '4b', edit: true }).model, '4b');
+assert.equal(normalizeState({ model: '4b', edit: true }).edit, true);
+assert.ok(!('model' in normalizeState({ model: 4 })));
+assert.ok(!('model' in normalizeState({ model: '' })));
+assert.ok(!('edit' in normalizeState({ edit: 'yes' })));
+assert.ok(!('model' in normalizeState({})) && !('edit' in normalizeState({})));
+assert.equal(presetState({ ...full, model: '9b', edit: false }, true).model, '9b');
+assert.equal(presetState({ ...full, model: '9b', edit: false }, true).edit, false);
 const g = normalizeState({ aspect: 'diagonal', seed: 'abc', loras: [null, {}, { name: 'x', strength_model: 'z' }], steps: 'n/a' });
 assert.equal(g.aspect, 'landscape'); assert.equal(g.seed, null);
 assert.deepEqual(g.loras, [{ name: 'x', strength_model: 1 }]); assert.ok(!('steps' in g));

@@ -1214,19 +1214,22 @@ def test_stage4_save_module_pins():
 
 
 def test_stage4_batch_and_candidate_pins():
-    """Stage 4: batch count = drag pips 1-4 default 1 (pure math module,
-    pointer capture + touch-action none + aria slider); candidates are an
-    explicit triage surface — selection sets the working image, nothing
-    auto-saves, the next run replaces the strip; optional save-all
-    checkbox targets Gallery, default OFF."""
+    """Stage 4: batch count = hold-to-arm rocker 1-4 default 1 (pure math
+    module, pointer capture + touch-action none + aria slider); the rocker
+    replaced the drag pips in the usability pass 2026-11-15 — hold ~1s to
+    arm, then drag vertically. Candidates are an explicit triage surface —
+    selection sets the working image, nothing auto-saves, the next run
+    replaces the strip; optional save-all checkbox targets Gallery,
+    default OFF."""
     mods = Path(__file__).parent.parent / "frontend" / "js" / "modules"
     pips = (mods / "studio-pips.js").read_text()
     studio = (mods / "studio.js").read_text()
     assert "BATCH_MIN = 1" in pips and "BATCH_MAX = 4" in pips
-    assert "export function batchFromPointer" in pips
-    assert "batchFromPointer" in studio and "clampBatch" in studio
+    assert "export function batchFromRockerDrag" in pips
+    assert "batchFromRockerDrag" in studio and "clampBatch" in studio
+    assert "ROCKER_HOLD_MS = 1000" in studio       # hold a second to arm
     assert "setPointerCapture" in studio
-    assert "touch-action: none" in studio          # pips never scroll the page while dragging
+    assert "touch-action: none" in studio          # rocker never scrolls the page while dragging
     assert 'role="slider"' in studio and "aria-valuemin" in studio
     assert "setBatch(1)" in studio                 # default 1
     # explicit candidate promote only (decision §7.2)
@@ -1253,6 +1256,15 @@ def test_stage4_refine_and_provenance_pins():
     assert "/api/update/inpaint-async" in studio
     assert "/api/update/jobs/" in studio
     assert "__masked_inpaint" in studio
+    # masked inpaint is paintable again (usability pass 2026-11-15): the
+    # canvas pointerdown arms masking when the mask section is open (ported
+    # from update.js), a second finger cancels the stroke, pointerup ends
+    # it, and a visible red overlay shows the painted region.
+    assert "masking = true; _maskLastPt = null;" in studio
+    assert "masking = false; _maskLastPt = null;" in studio
+    assert "maskVisible()" in studio
+    assert 'data-id="maskview"' in studio
+    assert "drawMaskView()" in studio
     # comparer lives in the canvas
     assert 'data-id="cmpbar"' in studio and "comparing" in studio
     # filters inside Refine, reusing the filters endpoints
