@@ -57,8 +57,20 @@ function activate(name) {
 
 function buildTabs() {
   tabbar.innerHTML = '';
+  // Tabs first, then the build marker and working chip: the marker used to
+  // sit first with margin-left:auto, so on a narrow screen it pushed the
+  // tabs off the right edge (usability pass 2026-11-15). The tabbar now
+  // scrolls horizontally, so every tab stays reachable.
+  for (const desc of registry) {
+    const btn = document.createElement('button');
+    btn.className = 'tab';
+    btn.dataset.name = desc.name;
+    btn.innerHTML = `<span class="icon">${desc.icon}</span><span>${desc.label}</span>`;
+    btn.addEventListener('click', () => activate(desc.name));
+    tabbar.appendChild(btn);
+  }
   const marker = document.createElement('span');
-  marker.style.cssText = 'margin-left:auto;align-self:center;font-size:10px;color:#5a5a7a;padding-right:8px';
+  marker.style.cssText = 'margin-left:auto;align-self:center;font-size:10px;color:#5a5a7a;padding-right:8px;flex-shrink:0';
   marker.textContent = `build ${BUILD}`;
   tabbar.appendChild(marker);
   // Working-image chip (decision #3): a visible indicator of what's loaded,
@@ -92,14 +104,6 @@ function buildTabs() {
   };
   studioState().subscribe(syncChip);
   syncChip(studioState().restore());
-  for (const desc of registry) {
-    const btn = document.createElement('button');
-    btn.className = 'tab';
-    btn.dataset.name = desc.name;
-    btn.innerHTML = `<span class="icon">${desc.icon}</span><span>${desc.label}</span>`;
-    btn.addEventListener('click', () => activate(desc.name));
-    tabbar.appendChild(btn);
-  }
 }
 
 function mountAll() {
