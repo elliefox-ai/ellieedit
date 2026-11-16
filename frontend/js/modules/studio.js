@@ -27,8 +27,8 @@ import { dist, pinchScale, clampPan, wheelScale } from './zoom-viewer.js';
 import { clampBatch, batchFromRockerDrag, BATCH_MAX } from './studio-pips.js';
 
 const API = '/api/foxden';
-const esc = s => String(s).replace(/[&<>"]/g, c =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 function panelHTML() {
   return `
@@ -457,7 +457,7 @@ export function mountStudio(panel, jobbar) {
   let restored = false;
   let previewUrl = null;       // candidate preview URL shown on the canvas
   let previewed = null;        // candidate currently viewed (⬇ promotes it)
-  let maskCanvas = null, maskMode = 'paint', maskPainted = false, maskUndoStack = [];
+  let maskCanvas = null, maskMode = 'paint', maskPainted = false, maskUndoStack = [], maskWhiteCount = 0;
   let _maskLastPt = null;
 
   const say = (msg, isErr) => { if (jobbar) jobbar.innerHTML = `<span class="badge${isErr ? ' err' : ''}">${esc(msg)}</span>`; };
@@ -581,6 +581,18 @@ export function mountStudio(panel, jobbar) {
   el.cmpdiv.addEventListener('pointerup', endCmpDrag);
   el.cmpdiv.addEventListener('pointercancel', endCmpDrag);
 
+  // Revoke blob URLs minted for a replaced stack (studio eval §10): every
+  // openWorking mints fresh object URLs, so the previous stack's are
+  // orphaned unless revoked. Only blob: URLs are revoked — view/data URLs
+  // belong to the server or the candidate and must be left alone. Call
+  // only after the canvas has swapped to the new stack (showCurrent), so
+  // nothing displayed is ever revoked.
+  function revokeStackUrls(s) {
+    if (!s) return;
+    for (const en of s.entries) {
+      if (en.url && en.url.startsWith('blob:')) URL.revokeObjectURL(en.url);
+    }
+  }
   // Load a working image as the stack original. Same-path guard: the
   // store event, send-to, and our own promote must not rebuild a stack
   // that already contains this path (version history survives).
@@ -619,12 +631,14 @@ export function mountStudio(panel, jobbar) {
           }
         }
       } catch { /* fall through to the single-entry stack */ }
+      const prevStack = stack;
       stack = seeded || createStack(outEntry);
       compareOn = false; cmpPct = 100;
       zoomScale = 1; zoomTx = 0; zoomTy = 0;
       maskCanvas = null; maskPainted = false; maskUndoStack = [];
       clearPreview();
       showCurrent();
+      revokeStackUrls(prevStack);
       // The painted mask belongs to the source: a new working image gets a
       // fresh blank mask (only when the Mask verb is showing, so entering
       // it later still builds one — see showVerb).
@@ -639,9 +653,11 @@ export function mountStudio(panel, jobbar) {
     if (!d.path) {
       // Clearing the store must clear the canvas too (studio eval §3):
       // otherwise the old image, badge, and save buttons linger.
+      const prevStack = stack;
       stack = null; previewed = null; previewUrl = null;
       maskCanvas = null; maskPainted = false; maskUndoStack = [];
       showCurrent();
+      revokeStackUrls(prevStack);
       return;
     }
     openWorking(d.path, d.name);
@@ -748,9 +764,6 @@ export function mountStudio(panel, jobbar) {
   function initMaskForSource() {
     const srcEntry = stack && source(stack);
     if (!srcEntry) return;
-    if (maskCanvas && maskPainted) {
-      maskUndoStack = [];  // new base: stale mask must not survive
-    }
     maskPainted = false; maskUndoStack = []; maskCanvas = null;
     const img = new Image();
     img.onload = () => {
@@ -758,16 +771,33 @@ export function mountStudio(panel, jobbar) {
       mc.width = img.naturalWidth; mc.height = img.naturalHeight;
       const ctx = mc.getContext('2d');
       ctx.fillStyle = '#000'; ctx.fillRect(0, 0, mc.width, mc.height);
+      maskWhiteCount = 0;
       maskCanvas = mc;
       drawMaskView();
     };
     img.src = srcEntry.url;
   }
-  function maskHasWhite() {
-    if (!maskCanvas) return false;
+  // White-pixel count, maintained incrementally (studio eval §12): the old
+  // maskHasWhite() re-scanned the whole canvas (O(W×H)) on every erase
+  // move. The count is exact — every mutation goes through maskStroke
+  // (bbox delta), mask-clear (zero), undo restore (full rescan, rare), or
+  // initMaskForSource (blank canvas, zero) — so "any white" is just count > 0.
+  function scanWhiteCount() {
+    if (!maskCanvas) return 0;
     const data = maskCanvas.getContext('2d').getImageData(0, 0, maskCanvas.width, maskCanvas.height).data;
-    for (let i = 0; i < data.length; i += 4) if (data[i] > 0) return true;
-    return false;
+    let n = 0;
+    for (let i = 0; i < data.length; i += 4) if (data[i] > 0) n++;
+    return n;
+  }
+  function maskHasWhite() {
+    return !!maskCanvas && maskWhiteCount > 0;
+  }
+  function countWhiteIn(box) {
+    if (!maskCanvas || box.w <= 0 || box.h <= 0) return 0;
+    const data = maskCanvas.getContext('2d').getImageData(box.x, box.y, box.w, box.h).data;
+    let n = 0;
+    for (let i = 0; i < data.length; i += 4) if (data[i] > 0) n++;
+    return n;
   }
   function maskStroke(e) {
     if (!maskCanvas) return;
@@ -778,12 +808,29 @@ export function mountStudio(panel, jobbar) {
     const sx = maskCanvas.width / fr.width, sy = maskCanvas.height / fr.height;
     const x = (e.clientX - fr.left) * sx, y = (e.clientY - fr.top) * sy;
     const ctx = maskCanvas.getContext('2d');
+    const brush = parseInt(el.brush.value, 10) || 40;
+    const lw = brush * sx;
+    // Only the stroke's bounding box can change: count the white pixels
+    // there before and after the draw, and adjust the running count by the
+    // delta — O(brush²) per move instead of O(canvas). The box is expanded
+    // by half the line width in both axes (plus 1px for antialiasing) so
+    // it covers the round caps and the stroke fringe — the stroke is a
+    // disc of radius lw/2 in canvas space, whatever the x/y scale ratio.
+    const p0 = _maskLastPt || { x, y };
+    const half = lw / 2 + 1;
+    const bx = Math.max(0, Math.floor(Math.min(p0.x, x) - half));
+    const by = Math.max(0, Math.floor(Math.min(p0.y, y) - half));
+    const bx2 = Math.min(maskCanvas.width, Math.ceil(Math.max(p0.x, x) + half));
+    const by2 = Math.min(maskCanvas.height, Math.ceil(Math.max(p0.y, y) + half));
+    const box = { x: bx, y: by, w: bx2 - bx, h: by2 - by };
+    const before = countWhiteIn(box);
     ctx.strokeStyle = maskMode === 'paint' ? '#fff' : '#000';
-    ctx.lineWidth = (parseInt(el.brush.value, 10) || 40) * sx;
+    ctx.lineWidth = lw;
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     ctx.beginPath();
     if (_maskLastPt) ctx.moveTo(_maskLastPt.x, _maskLastPt.y); else ctx.moveTo(x, y);
     ctx.lineTo(x, y); ctx.stroke();
+    maskWhiteCount = Math.max(0, maskWhiteCount + countWhiteIn(box) - before);
     _maskLastPt = { x, y };
     maskPainted = maskMode === 'paint' ? true : maskHasWhite();
     drawMaskView();
@@ -796,6 +843,7 @@ export function mountStudio(panel, jobbar) {
     const ctx = maskCanvas.getContext('2d');
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
     maskPainted = false;
+    maskWhiteCount = 0;
     drawMaskView();
   });
   function pushMaskUndo() {
@@ -812,6 +860,7 @@ export function mountStudio(panel, jobbar) {
       const ctx = maskCanvas.getContext('2d');
       ctx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
       ctx.drawImage(img, 0, 0);
+      maskWhiteCount = scanWhiteCount();
       maskPainted = maskHasWhite();
       el['mask-undo'].disabled = maskUndoStack.length === 0;
       drawMaskView();
@@ -890,15 +939,19 @@ export function mountStudio(panel, jobbar) {
         const r = await fetch('/api/update/save-back', { method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ render_path: entry.path, source_path: orig.path }) });
-        if (!r.ok) throw new Error((await r.json()).detail || r.status);
+        if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).detail || r.status));
         const d = await r.json();
+        // Save-over replaces the bytes at the original's path — if the
+        // prepared img2img input was cached for that path, it is stale
+        // (studio eval §9): drop it so the next run re-prepares.
+        if (d.overwritten === inputParent) { inputName = null; inputParent = null; inputDims = null; }
         showToast(`Saved over ${d.overwritten}`);
         say(`saved over ${d.overwritten} (${d.bytes} bytes)`);
       } else if (kind === 'new') {
         const r = await fetch('/api/update/save-new', { method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ render_path: entry.path, source_path: orig.path }) });
-        if (!r.ok) throw new Error((await r.json()).detail || r.status);
+        if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).detail || r.status));
         const d = await r.json();
         showToast('Saved as new file');
         say(`saved as new file — ${d.new_path}`);
@@ -911,7 +964,7 @@ export function mountStudio(panel, jobbar) {
             intermediates: s.entries.slice(1, s.idx).map(e2 => e2.path).filter(Boolean),
             recipe: entry.recipe || null, masked: !!entry.masked,
           }) });
-        if (!r.ok) throw new Error((await r.json()).detail || r.status);
+        if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).detail || r.status));
         const d = await r.json();
         showToast('Saved to Library');
         say(`saved — final ${d.final} · original ${d.original} (family ${d.family_id})`);
@@ -1107,8 +1160,6 @@ export function mountStudio(panel, jobbar) {
       const st0 = studioState().get();
       if (isEdit && !st0.path) {
         say('edit workflows need a working image — set one from Gallery or a candidate first', true);
-        busy = false; el.runbtn.disabled = false; el.genfab.disabled = false;
-        el.strip.classList.remove('st-running'); setFabProgress(0, '');
         return;
       }
       // edit graphs consume the reference at any denoise — always inject
@@ -1168,11 +1219,15 @@ export function mountStudio(panel, jobbar) {
     } catch (err) {
       say(`generate failed: ${err.message}`, true);
       showToast('Run failed');
+    } finally {
+      // One reset for every exit (studio eval §13): the early return used
+      // to duplicate this, so a future early return could leave Generate
+      // permanently disabled. Resting label is ⚡Gen (null), not blank.
+      busy = false;
+      el.runbtn.disabled = false; el.genfab.disabled = false;
+      el.strip.classList.remove('st-running');
+      setFabProgress(0, null);
     }
-    busy = false;
-    el.runbtn.disabled = false; el.genfab.disabled = false;
-    el.strip.classList.remove('st-running');
-    setFabProgress(0, null);
     renderCandidates();
   }
 
@@ -1321,10 +1376,15 @@ export function mountStudio(panel, jobbar) {
     try {
       const c = await api('/config');
       const fams = [...new Set(c.workflows.map(w => w.family || w.id))];
+      // default_workflow may be a family name ("klein") or a concrete
+      // workflow id ("moss-edit") — the family is the first segment, never
+      // a families-map lookup (a concrete id is not a family key; the old
+      // lookup silently fell back to klein for any concrete id).
+      const defFam = (c.default_workflow || 'klein').split('-')[0];
       rebuildSelectPreserving(el.wf, fams.map(f => {
         const anyAvail = c.workflows.some(w => (w.family || w.id) === f && w.available);
-        return `<option value="${f}" ${anyAvail ? '' : 'disabled'}>${esc(f)}${anyAvail ? '' : ' (file missing)'}</option>`;
-      }).join(''), c.families && c.families[c.default_workflow] ? c.default_workflow.split('-')[0] === 'klein' ? 'klein' : (c.default_workflow || 'klein') : 'klein');
+        return `<option value="${esc(f)}" ${anyAvail ? '' : 'disabled'}>${esc(f)}${anyAvail ? '' : ' (file missing)'}</option>`;
+      }).join(''), fams.includes(defFam) ? defFam : 'klein');
       allLoras = c.loras;
       wfDefs = c.workflows || [];
       FAMILY_MODELS = c.families || {};
@@ -1809,7 +1869,7 @@ export function mountStudio(panel, jobbar) {
     el['mdenoise-val'].textContent = (+el.mdenoise.value).toFixed(2);
   });
 
-  let jobCancelled = false, maskRunning = false;
+  let maskRunning = false;
   async function runMask() {
     if (maskRunning || !stack) { if (!stack) say('no working image — set one first', true); return; }
     const srcEntry = source(stack);
@@ -1818,7 +1878,7 @@ export function mountStudio(panel, jobbar) {
     if (!maskCanvas || !maskHasWhite()) { say('paint a region to regenerate first', true); return; }
     const useRandom = el.mrandom.checked;
     const seed = useRandom ? null : (parseInt(el.mseed.value, 10) || 0);
-    maskRunning = true; jobCancelled = false;
+    maskRunning = true;
     el.mrun.disabled = true;
     busy = true;
     setFabProgress(0.05, '…');
@@ -1829,7 +1889,7 @@ export function mountStudio(panel, jobbar) {
         seed, random: useRandom };
       const r = await fetch('/api/update/inpaint-async', { method: 'POST',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (!r.ok) throw new Error((await r.json()).detail || r.status);
+      if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).detail || r.status));
       const { job_id } = await r.json();
       const data = await pollJob(job_id);
       el.mseed.value = String(data.seed);
@@ -1865,11 +1925,10 @@ export function mountStudio(panel, jobbar) {
   async function pollJob(jobId) {
     const started = Date.now();
     for (;;) {
-      if (jobCancelled) throw new Error('job cancelled');
       if (Date.now() - started > 15 * 60 * 1000) throw new Error('job timed out after 15 minutes');
       await new Promise(res => setTimeout(res, 2000));
       const r = await fetch(`/api/update/jobs/${jobId}`);
-      if (!r.ok) throw new Error((await r.json()).detail || r.status);
+      if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).detail || r.status));
       const job = await r.json();
       if (job.status === 'done') return job.result;
       if (job.status === 'error') throw new Error(job.error || 'job failed');

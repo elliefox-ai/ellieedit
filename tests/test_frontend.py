@@ -1211,6 +1211,48 @@ def test_stage4_save_module_pins():
     assert "/api/update/save-new" in studio
     assert "/api/update/save-family" in studio
     assert "wireSaveBars" in studio                    # one wiring, many mounts
+    # save-over replaces the bytes at the original's path: a prepared
+    # img2img input cached for that path goes stale (studio eval §9)
+    assert "d.overwritten === inputParent" in studio
+    assert "inputName = null; inputParent = null; inputDims = null;" in studio
+
+
+def test_stage4_bugfix_batch_pins():
+    """Studio bugfix batch (2026-11-16, eval findings 9-13): blob object
+    URLs revoked when the stack is replaced or cleared; mask white-pixel
+    count maintained incrementally instead of a full-canvas scan per erase
+    move; dead bits removed (jobCancelled, the initMaskForSource redundant
+    guard, the generate() duplicated busy-reset, the fragile loadConfig
+    default-workflow lookup, unescaped quotes in esc()). Finding 11
+    (cross-strip selection) and the showCurrent previewUrl dead read were
+    already fixed by the canvas-preview pass — the shared strip renderer
+    re-applies .sel from previewed in both strips."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    # §10: blob URLs revoked on stack replace / clear (only blob: URLs)
+    assert "function revokeStackUrls" in studio
+    assert "revokeStackUrls(prevStack)" in studio
+    assert "en.url.startsWith('blob:')" in studio
+    # §12: incremental white-pixel count, not a full scan per move
+    assert "maskWhiteCount" in studio
+    assert "function scanWhiteCount" in studio
+    assert "function countWhiteIn" in studio
+    assert "return !!maskCanvas && maskWhiteCount > 0;" in studio
+    assert "maskWhiteCount = scanWhiteCount();" in studio  # undo restore rescans (rare)
+    # §13: dead bits gone
+    assert "jobCancelled" not in studio
+    assert "stale mask must not survive" not in studio
+    # generate() has one busy-reset in a finally, not a duplicated reset
+    assert "} finally {" in studio
+    assert "setFabProgress(0, '')" not in studio
+    # loadConfig derives the family by splitting the workflow id
+    assert "const defFam = (c.default_workflow || 'klein').split('-')[0];" in studio
+    assert "fams.includes(defFam) ? defFam : 'klein'" in studio
+    # esc() escapes single quotes; the workflow option value is escaped too
+    assert "\"'\": '&#39;'" in studio
+    assert 'value="${esc(f)}"' in studio
+    # §11 (already fixed): both strips share one renderer, .sel from previewed
+    assert "for (const target of [el.cands, el.ovcands])" in studio
+    assert "if (selPath && c.path === selPath) d.classList.add('sel');" in studio
 
 
 def test_stage4_batch_and_candidate_pins():
