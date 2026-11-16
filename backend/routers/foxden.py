@@ -429,6 +429,17 @@ def config():
         "comfy_reachable": reachable(),
     }
 
+@router.get("/workflows/schema")
+def workflows_schema():
+    """Editor-facing manifest: how to DRIVE every workflow, no graph internals.
+
+    Regenerate the committed workflows/manifest.json after changing the
+    registry maps: scripts/gen_workflow_manifest.py.
+    """
+    # lazy: workflow_schema imports this module's registry maps
+    from ..workflow_schema import build_manifest
+    return build_manifest()
+
 
 # -------------------------------------------------------------- generate
 
