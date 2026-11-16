@@ -1160,7 +1160,7 @@ def test_stage4_studio_layout_contract():
     assert "mountFoxden" not in studio
     assert "mountUpdate" not in studio
     # settled rail: three tabs, never stacked sub-views
-    for verb in ("generate", "refine", "provenance"):
+    for verb in ("generate", "mask", "provenance"):
         assert f'data-verb="{verb}"' in studio
     # the old modules keep their rollback registration functions, unrouted
     fx = (HERE.parent / "frontend" / "js" / "modules" / "foxden.js").read_text()
@@ -1233,8 +1233,12 @@ def test_stage4_batch_and_candidate_pins():
     assert 'role="slider"' in studio and "aria-valuemin" in studio
     assert "setBatch(1)" in studio                 # default 1
     # explicit candidate promote only (decision §7.2)
-    # candidate promote moved to the explicit ⬇ on the source slot (§7.2/§10 review 2026-11-13)
-    assert "studioState().set(previewed.path, 'foxden-output'" in studio
+    # candidate promote moved to the explicit ⬇ on the source slot (§7.2/§10 review 2026-11-13);
+    # since 2026-11-16 both the ⬇ and the Mask panel's "Use as source" go
+    # through promoteCandidate, which pushes onto the stack first (history
+    # survives) and moves the run source with it
+    assert "promoteCandidate(previewed)" in studio
+    assert "studioState().set(c.path, 'foxden-output'" in studio
     assert "cands.startRun(collected)" in studio   # next run replaces the strip
     html = studio[studio.index('<input type="checkbox" data-id="save-all"'):]
     at = html.index("<input")
@@ -1251,10 +1255,11 @@ def test_stage4_canvas_preview_pins():
     working image the frame stayed hidden, so the first candidate never
     appeared; and the strip rebuild dropped the .sel ring on every tap."""
     studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
-    # the preview always lands in both paths (run completion + candidate tap)
-    assert studio.count("The preview always lands") == 2
+    # the preview always lands in all three paths (run completion,
+    # candidate tap, mask run)
+    assert studio.count("The preview always lands") == 3
     assert "if (!compareOn) {" not in studio   # candidate gates gone; the
-    # filter preview's one-line `if (!compareOn) el['img-a'].src = ...` stays
+    # filter preview that shared the flag went with the filters section
     assert "previewed = collected[0]" in studio   # first candidate is the viewed one
     # with no working image yet, the run unhides the frame and names the
     # candidate on the badge (showCurrent is the only other unhide)
@@ -1269,35 +1274,64 @@ def test_stage4_canvas_preview_pins():
     assert "previewUrl || prev.url" not in studio
 
 
-def test_stage4_refine_and_provenance_pins():
-    """Stage 4: Refine runs Update's preset runner on the working image
-    (run-async / inpaint-async on the store path) with the comparer in the
-    canvas; filters live INSIDE Refine as a collapsible section reusing
-    /api/filters/*; Provenance is fed by GET /api/foxden/provenance?path=.
+def test_stage4_mask_and_provenance_pins():
+    """Stage 4 (2026-11-16 restructure): Refine is gone — the verbs are
+    Generate / Mask / Provenance. Mask is its own generation panel: a model
+    picker driven by the workflow schema (edit-role models only; Klein 4B
+    enabled, Moss disabled until its mask path lands), paint/erase/clear/
+    undo, prompt, denoise, seed, single-shot run. The mask run lands as a
+    CANDIDATE — never auto-promoted; the painted mask stays across runs on
+    the same source. Filters and the non-mask Update presets left Studio
+    entirely. Provenance is fed by GET /api/foxden/provenance?path=.
     img2img comes from the working image when denoise < 1 (upload +
     parent_image)."""
     studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
-    # refine = Update runner endpoints on the working image
-    assert "/api/update/run-async" in studio
+    # the verbs are Generate / Mask / Provenance — no Refine, no preset dropdown
+    assert 'data-verb="mask"' in studio
+    assert 'data-verb="refine"' not in studio
+    assert "__masked_inpaint" not in studio
+    assert "loadRefinePresets" not in studio
+    assert "rpreset" not in studio
+    assert "/api/update/run-async" not in studio
+    # no filters left in Studio (the separate main Filters tab is their home)
+    assert "filters-sec" not in studio
+    assert "filterState" not in studio and "colorholdParams" not in studio
+    assert "tuneImageData" not in studio and "tunesAreIdentity" not in studio
+    assert "schedulePreview" not in studio and "FILTER_SLIDERS" not in studio
+    assert "loadImg" not in studio and "details.collapse" not in studio
+    # Mask = Update masked-inpaint endpoint on the working image, single-shot
     assert "/api/update/inpaint-async" in studio
     assert "/api/update/jobs/" in studio
-    assert "__masked_inpaint" in studio
-    # masked inpaint is paintable again (usability pass 2026-11-15): the
-    # canvas pointerdown arms masking when the mask section is open (ported
-    # from update.js), a second finger cancels the stroke, pointerup ends
-    # it, and a visible red overlay shows the painted region.
+    assert "async function runMask" in studio
+    assert "cands.startRun([cand])" in studio
+    mask_run = studio[studio.index("async function runMask"):studio.index("el.mrun.addEventListener")]
+    assert "cands.startRun" in mask_run and "previewed = cand" in mask_run
+    assert "showCurrent" not in mask_run and "studioState().set" not in mask_run
+    assert "pushRender" not in mask_run   # no auto-promote, no stack write
+    assert "batch" not in mask_run        # single-shot: no batch loop
+    # model picker: schema-driven, edit-role models only, Klein 4B enabled
+    assert "MASK_EDIT_WORKFLOWS" in studio
+    assert "/api/foxden/workflows/schema" in studio
+    assert "klein-4b-edit" in studio
+    assert "(mask path coming)" in studio
+    models = studio[studio.index("async function loadMaskModels"):studio.index("el.mmodel.addEventListener")]
+    assert "FAMILY_MODELS" in models      # /config families map is the fallback
+    assert "if (!v || !v.edit) continue" in models
+    # mask persistence: a fresh blank mask only when the source changes
+    assert "if (verb === 'mask') initMaskForSource();" in studio
+    assert "if (v === 'mask' && stack && !maskCanvas) initMaskForSource();" in studio
+    # masked inpaint is paintable: the canvas pointerdown arms masking when
+    # the Mask verb is active, a second finger cancels the stroke, pointerup
+    # ends it, and a visible red overlay shows the painted region.
     assert "masking = true; _maskLastPt = null;" in studio
     assert "masking = false; _maskLastPt = null;" in studio
     assert "maskVisible()" in studio
     assert 'data-id="maskview"' in studio
     assert "drawMaskView()" in studio
+    # the mask section is always visible in the Mask panel (no preset gate)
+    assert 'style="display:none"' not in studio
     # comparer lives in the canvas
     assert 'data-id="cmpbar"' in studio and "comparing" in studio
-    # filters inside Refine, reusing the filters endpoints
-    assert "details.collapse" in studio
-    assert "/api/filters/apply" in studio and "/api/filters/store" in studio
-    assert "tuneImageData" in studio
-    assert "studioState().set(render_path, 'filters'" in studio
     # provenance tab fed by the foxden provenance endpoint
     assert "/provenance?path=" in studio
     assert "parentchain" in studio or "parent_image" in studio
@@ -1306,6 +1340,17 @@ def test_stage4_refine_and_provenance_pins():
     assert "body.parent_image = inputParent" in studio
     # prepareInput no longer bails on denoise>=1 — edit graphs always inject (2026-11-13)
     assert "denoise gating lives in generate()" in studio
+    # explicit advance to source (multi-stage work): a labeled "Use as
+    # source" button in the Mask panel and the ⬇ both promote the viewed
+    # candidate — pushRender first (history survives), run source moves
+    # with it (setViewedAsBase), mask resets for the new source. Never
+    # automatic: the mask run itself still does no stack write.
+    assert 'data-id="madvance"' in studio
+    assert "Use as source" in studio
+    assert "function promoteCandidate" in studio
+    assert "promoteCandidate(previewed)" in studio
+    assert "setViewedAsBase(stack)" in studio
+    assert "recipe: 'masked-inpaint'" in studio
 
 
 def test_stage4_studio_activation_never_reloads_config():
