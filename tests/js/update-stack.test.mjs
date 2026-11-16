@@ -52,6 +52,23 @@ test('setViewedAsBase: same as swap, viewed entry becomes the base', () => {
   assert.equal(current(s), r1);
 });
 
+test('promote composition: pushRender + setViewedAsBase advances the run source', () => {
+  // The "Use as source" advance (studio.js promoteCandidate): each stage
+  // is pushed onto the stack first, then the run source moves to it — so
+  // the next mask run renders FROM the promoted stage, not the original,
+  // and the version history survives the advances.
+  let s = createStack(orig);
+  s = pushRender(s, r1);
+  s = setViewedAsBase(s);
+  assert.equal(source(s), r1);
+  assert.equal(compareEntry(s), orig); // the comparer keeps its before
+  s = pushRender(s, r2);
+  s = setViewedAsBase(s);
+  assert.equal(source(s), r2);
+  assert.equal(compareEntry(s), r1); // each stage compares against the previous one
+  assert.equal(s.entries.length, 3);
+});
+
 test('selectEntry: forward cycling is viewed selection, clamped, no new entries', () => {
   let s = createStack(orig);
   s = pushRender(s, r1);

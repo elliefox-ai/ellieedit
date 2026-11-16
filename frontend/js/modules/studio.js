@@ -1,6 +1,6 @@
 // Studio — Stage 4 (settled layout, mock-1b, design doc §10). ONE working
 // image: a single canvas (pan/zoom via zoom-viewer math) + a right rail
-// with tabs Generate | Refine | Provenance. The Stage 3 sub-tab stacking
+// with tabs Generate | Mask | Provenance. The Stage 3 sub-tab stacking
 // (Update/FoxDen mounted as side-by-side surfaces) is gone — this module
 // IS the consolidation: it talks to the same endpoints directly and owns
 // one canvas, one candidate strip, one comprehensive save module, and a
@@ -24,27 +24,11 @@ import {
 import { normalizeState, presetState, debounce, cleanName, nextSeed, sizeFor, rebuildSelectPreserving } from './foxden-state.js';
 import { createPins } from './foxden-loras.js';
 import { dist, pinchScale, clampPan, wheelScale } from './zoom-viewer.js';
-import { tuneImageData, tunesAreIdentity } from './filters-tunes.js';
 import { clampBatch, batchFromRockerDrag, BATCH_MAX } from './studio-pips.js';
 
 const API = '/api/foxden';
 const esc = s => String(s).replace(/[&<>"]/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-
-// Filters toolset (collapse section inside Refine): the /api/filters/apply
-// parameter set + canvas tunes, exactly the params filters.js sends.
-const FILTER_SLIDERS = [
-  ['ch-dark', 'dark_t', parseFloat], ['ch-sat', 'sat_mul', parseFloat],
-  ['ch-val', 'val_mul', parseFloat], ['ch-smooth', 'smooth', v => parseInt(v, 10) === 0 ? 0 : parseInt(v, 10) * 2 + 1],
-  ['ch-sigma', 'line_sigma', parseFloat],
-  ['gate-maxw', 'gate_maxw', v => parseInt(v, 10)], ['gate-bh', 'gate_bh_full', parseFloat],
-  ['gate-strength', 'gate_strength', parseFloat],
-  ['vib-strength', 'vibrance', parseFloat], ['vib-falloff', 'vibrance_falloff', parseFloat],
-  ['vib-protect', 'vibrance_protect', parseFloat],
-  ['tn-sat', 'satMul', parseFloat], ['tn-bri', 'brightness', parseFloat],
-  ['tn-con', 'contrast', parseFloat], ['tn-lift', 'lift', parseFloat],
-  ['tn-edge', 'edge', parseFloat], ['strength', 'strength', parseFloat],
-];
 
 function panelHTML() {
   return `
@@ -188,15 +172,6 @@ function panelHTML() {
     .st-pips .st-rock-chevs { display: flex; flex-direction: column; line-height: 1.1; color: #8a8aaa; font-size: 11px; }
     .st-pips.armed { border-color: #b39ae0; background: #1d1d33; }
     .st-pips.armed .st-rock-hint { color: #b39ae0; }
-    /* ---- collapsible Filters section inside Refine ---- */
-    .st-root details.collapse { margin-top: 14px; border: 1px solid #2a2a44; border-radius: 8px; background: #161628; }
-    .st-root details.collapse summary { cursor: pointer; list-style: none; padding: 12px 14px; font-size: 12px;
-      text-transform: uppercase; letter-spacing: .06em; color: #8a8aaa; min-height: 44px; display: flex; align-items: center; }
-    .st-root details.collapse summary::-webkit-details-marker { display: none; }
-    .st-root details.collapse summary::after { content: '▾'; margin-left: auto; color: #6c6c8e; }
-    .st-root details.collapse[open] summary::after { content: '▴'; }
-    .st-root details.collapse .inside { padding: 4px 14px 14px; }
-    .st-root details.collapse input[type=range] { padding: 0; }
     /* ---- provenance panel ---- */
     .st-provtable { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
     .st-provtable td { padding: 7px 6px; border-bottom: 1px solid #2a2a44; vertical-align: top; }
@@ -311,7 +286,7 @@ function panelHTML() {
       <aside class="st-rail">
         <div class="st-verbswitch" role="tablist" aria-label="Studio rail tabs">
           <button class="on" data-verb="generate" role="tab" aria-selected="true">⚡ Generate</button>
-          <button data-verb="refine" role="tab" aria-selected="false">✎ Refine</button>
+          <button data-verb="mask" role="tab" aria-selected="false">🎭 Mask</button>
           <button data-verb="provenance" role="tab" aria-selected="false">🧬 Provenance</button>
         </div>
 
@@ -375,20 +350,12 @@ function panelHTML() {
             <span class="st-hintline">Default off. When on, finished outputs are copied into the gallery bank automatically (Gallery, not Library).</span>
           </div>
 
-          <!-- REFINE -->
-          <div class="st-verbpanel" data-panel="refine" hidden>
-            <label>Preset</label>
-            <select data-id="rpreset"><option value="">loading…</option></select>
-            <label>Prompt</label>
-            <textarea data-id="rprompt" rows="6" placeholder="prompt for the transform…"></textarea>
-            <div class="st-row2">
-              <div><label>Seed</label><input type="number" data-id="rseed" value="0"></div>
-              <div style="display:flex;align-items:end;flex-wrap:wrap;min-width:0"><label style="margin:0 0 8px"><input type="checkbox" data-id="rrandom" checked style="width:auto"> random</label></div>
-            </div>
-            <label data-id="rdenoise-lbl" style="display:none">Denoise
-              <input type="range" data-id="rdenoise" min="0.2" max="0.8" step="0.05" value="0.45">
-              <span data-id="rdenoise-val">0.45</span></label>
-            <div class="st-mask" data-id="mask" style="display:none">
+          <!-- MASK -->
+          <div class="st-verbpanel" data-panel="mask" hidden>
+            <label>Model</label>
+            <select data-id="mmodel"><option value="">loading…</option></select>
+            <span class="st-hintline">The mask uses this model's inpaint version — more arrive as their mask paths land.</span>
+            <div class="st-mask" data-id="mask">
               <label>Mask — paint on the canvas</label>
               <div class="st-row2">
                 <button data-id="mask-paint">🖌 Paint</button>
@@ -401,36 +368,21 @@ function panelHTML() {
               </div>
               <span class="st-hintline">White = regenerate; everything else stays pixel-exact.</span>
             </div>
-            <div class="st-row2" style="margin-top:14px">
-              <button class="primary" data-id="rrun">✎ Run preset</button>
+            <label>Prompt</label>
+            <textarea data-id="mprompt" rows="6" placeholder="prompt for the masked region…"></textarea>
+            <label>Denoise
+              <input type="range" data-id="mdenoise" min="0.2" max="0.8" step="0.05" value="0.45">
+              <span data-id="mdenoise-val">0.45</span></label>
+            <div class="st-row2">
+              <div><label>Seed</label><input type="number" data-id="mseed" value="0"></div>
+              <div style="display:flex;align-items:end;flex-wrap:wrap;min-width:0"><label style="margin:0 0 8px"><input type="checkbox" data-id="mrandom" checked style="width:auto"> random</label></div>
             </div>
-            <span class="st-hintline" data-id="rstatus"></span>
-
-            <details class="collapse" data-id="filters-sec">
-              <summary>🎛 Filters</summary>
-              <div class="inside">
-                <label><input type="checkbox" data-id="ch-enabled" checked style="width:auto"> Enable colorhold</label>
-                <label>Dark threshold <input type="range" data-id="ch-dark" min="0.1" max="0.9" step="0.01" value="0.45"></label>
-                <label>Line saturation <input type="range" data-id="ch-sat" min="0.5" max="2" step="0.05" value="1.45"></label>
-                <label>Line darkness <input type="range" data-id="ch-val" min="0.3" max="1" step="0.01" value="0.72"></label>
-                <label>Fill smoothing <input type="range" data-id="ch-smooth" min="0" max="5" step="1" value="3"></label>
-                <label>Line smoothing <input type="range" data-id="ch-sigma" min="0" max="2" step="0.1" value="0"></label>
-                <label>Max stroke width <input type="range" data-id="gate-maxw" min="1" max="12" step="1" value="6"></label>
-                <label>Gate sensitivity <input type="range" data-id="gate-bh" min="0.02" max="0.2" step="0.01" value="0.06"></label>
-                <label>Gate strength <input type="range" data-id="gate-strength" min="0" max="100" step="1" value="100"></label>
-                <label>Vibrance <input type="range" data-id="vib-strength" min="0" max="100" step="1" value="0"></label>
-                <label>Vibrance falloff <input type="range" data-id="vib-falloff" min="0.05" max="0.6" step="0.01" value="0.25"></label>
-                <label>Skin protection <input type="range" data-id="vib-protect" min="0" max="100" step="1" value="50"></label>
-                <label>Saturation <input type="range" data-id="tn-sat" min="0" max="2" step="0.05" value="1"></label>
-                <label>Brightness <input type="range" data-id="tn-bri" min="-0.5" max="0.5" step="0.01" value="0"></label>
-                <label>Contrast <input type="range" data-id="tn-con" min="0" max="2" step="0.05" value="1"></label>
-                <label>Lift blacks <input type="range" data-id="tn-lift" min="0" max="0.3" step="0.01" value="0"></label>
-                <label>Lift edge <input type="range" data-id="tn-edge" min="0" max="0.5" step="0.01" value="0"></label>
-                <label>Effect strength <input type="range" data-id="strength" min="0" max="100" step="1" value="100"></label>
-                <button class="primary" style="width:100%;margin-top:14px" data-id="fapply">Apply filter stack</button>
-                <span class="st-hintline" data-id="fstatus"></span>
-              </div>
-            </details>
+            <div class="st-row2" style="margin-top:14px">
+              <button class="primary" data-id="mrun">🎭 Run mask edit</button>
+              <button data-id="madvance" disabled>⬇ Use as source</button>
+            </div>
+            <span class="st-hintline">Use as source advances the viewed result to the working image, so the next mask edit starts from it. Never automatic — make as many attempts as you like first.</span>
+            <span class="st-hintline" data-id="mstatus"></span>
           </div>
 
           <!-- PROVENANCE -->
@@ -485,9 +437,9 @@ export function mountStudio(panel, jobbar) {
     'strip', 'cands', 'wf', 'segrow', 'seg-model', 'seg-model-lab', 'seg-edit', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
     'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui',
     'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all',
-    'rpreset', 'rprompt', 'rseed', 'rrandom', 'rdenoise-lbl', 'rdenoise', 'rdenoise-val',
+    'mmodel', 'mprompt', 'mdenoise', 'mdenoise-val', 'mseed', 'mrandom',
     'mask', 'mask-paint', 'mask-erase', 'brush', 'mask-clear', 'mask-undo',
-    'rrun', 'rstatus', 'filters-sec', 'ch-enabled', 'fapply', 'fstatus',
+    'mrun', 'madvance', 'mstatus',
     'provtable', 'parentchain', 'runbtn', 'edgetab', 'genfab', 'fabring', 'fabinner',
     'bottomhandle', 'candoverlay', 'ovcands', 'toast', 'toasttext'].map(k => [k, $(k)]));
 
@@ -503,7 +455,7 @@ export function mountStudio(panel, jobbar) {
   const pins = createPins();
   const cands = createCandidates();
   let restored = false;
-  let previewUrl = null;       // filters live-preview overrides the canvas display
+  let previewUrl = null;       // candidate preview URL shown on the canvas
   let previewed = null;        // candidate currently viewed (⬇ promotes it)
   let maskCanvas = null, maskMode = 'paint', maskPainted = false, maskUndoStack = [];
   let _maskLastPt = null;
@@ -673,6 +625,10 @@ export function mountStudio(panel, jobbar) {
       maskCanvas = null; maskPainted = false; maskUndoStack = [];
       clearPreview();
       showCurrent();
+      // The painted mask belongs to the source: a new working image gets a
+      // fresh blank mask (only when the Mask verb is showing, so entering
+      // it later still builds one — see showVerb).
+      if (verb === 'mask') initMaskForSource();
     } catch (err) {
       say(`failed to load working image: ${err.message}`, true);
     }
@@ -758,10 +714,10 @@ export function mountStudio(panel, jobbar) {
 
   // ── mask painting (masked-inpaint recipe) ──
   let masking = false;
-  // The mask is paintable only while the Refine verb is showing the mask
-  // section (masked-inpaint preset picked) and a mask canvas exists.
+  // The mask is paintable only while the Mask verb is active and a mask
+  // canvas exists for the current source.
   function maskVisible() {
-    return verb === 'refine' && el.mask.style.display !== 'none' && !!maskCanvas;
+    return verb === 'mask' && !!maskCanvas;
   }
   // Visible overlay: the mask itself is an offscreen canvas, so without
   // this the user would paint blind. Red tint, alpha = mask brightness,
@@ -771,7 +727,7 @@ export function mountStudio(panel, jobbar) {
   function drawMaskView() {
     const mv = el.maskview;
     if (!mv) return;
-    const show = verb === 'refine' && el.mask.style.display !== 'none' && !!maskCanvas && !!stack;
+    const show = verb === 'mask' && !!maskCanvas && !!stack;
     mv.hidden = !show;
     if (!show) return;
     const OW = 320, OH = Math.max(1, Math.round(320 * maskCanvas.height / maskCanvas.width));
@@ -877,14 +833,18 @@ export function mountStudio(panel, jobbar) {
     // The Provenance panel reads the store lazily — render it on open, or
     // it shows whatever was last rendered (studio eval §2).
     if (v === 'provenance') renderProvenance();
-    // The mask overlay only shows on the Refine verb with the mask section
-    // open; hide it when leaving, show it when returning.
+    // Entering Mask with a working image and no mask yet builds a fresh
+    // blank one for the source; an existing painted mask is kept — the
+    // mask only resets when the source changes (see openWorking).
+    if (v === 'mask' && stack && !maskCanvas) initMaskForSource();
+    // The mask overlay only shows on the Mask verb; hide it when leaving,
+    // show it when returning.
     drawMaskView();
   }
   function setRunLabel() {
     el.runbtn.textContent =
       verb === 'generate' ? `⚡ Generate · batch ${batch}` :
-      verb === 'refine' ? '✎ Run preset' : '🧬 Info only';
+      verb === 'mask' ? '🎭 Run mask edit' : '🧬 Info only';
   }
   panel.querySelector('.st-verbswitch').addEventListener('click', e => {
     const b = e.target.closest('[data-verb]');
@@ -892,7 +852,7 @@ export function mountStudio(panel, jobbar) {
   });
   el.runbtn.addEventListener('click', () => {
     if (verb === 'generate') generate();
-    else if (verb === 'refine') runRefine();
+    else if (verb === 'mask') runMask();
     else showVerb('provenance');
   });
 
@@ -919,8 +879,9 @@ export function mountStudio(panel, jobbar) {
     const s = stack;
     if (!s || !saveable(s)) { say('nothing saveable on the canvas — run or promote first', true); return; }
     // Save acts on what the canvas shows (§10 review 12:34): a viewed
-    // candidate if one is up, else the stack top.
-    const entry = previewed ? { path: previewed.path, name: previewed.path.split('/').pop() } : current(s);
+    // candidate if one is up, else the stack top. A viewed candidate with
+    // no server path (a mask run whose render failed to store) can't save.
+    const entry = (previewed && previewed.path) ? { path: previewed.path, name: previewed.path.split('/').pop() } : current(s);
     const orig = s.entries[0];
     if (!orig.path) { say('original source has no server path', true); return; }
     try {
@@ -987,6 +948,37 @@ export function mountStudio(panel, jobbar) {
     }
     filePick.click();
   }
+  // Advance the viewed candidate to the working image (multi-stage work):
+  // the result becomes the source for the next mask edit. Explicit only —
+  // never automatic — so several attempts at one fix stay possible.
+  // History-preserving: the candidate is pushed onto the stack FIRST, so
+  // openWorking's same-path guard keeps the version history (the comparer
+  // keeps its before; earlier stages stay reachable) instead of rebuilding
+  // a fresh single-entry stack. And the run source moves with it
+  // (setViewedAsBase) — without that, the next run would still render
+  // from the original. The painted mask belongs to the source, so it is
+  // reset for the new working image.
+  function promoteCandidate(c) {
+    if (!c || !c.path) { say('nothing to use as source', true); return; }
+    const entry = { url: c.url, name: c.path.split('/').pop(), path: c.path,
+      recipe: c.recipe || null, masked: !!c.masked };
+    if (!stack) stack = createStack(entry);
+    else if (stack.entries.some(en => en.path === c.path)) {
+      stack = selectEntry(stack, stack.entries.findIndex(en => en.path === c.path));
+    } else {
+      stack = pushRender(stack, entry);
+    }
+    stack = setViewedAsBase(stack);
+    compareOn = false; cmpPct = 100;
+    showCurrent();
+    maskCanvas = null; maskPainted = false; maskUndoStack = [];
+    studioState().set(c.path, 'foxden-output', { name: entry.name });
+    if (verb === 'mask') initMaskForSource();
+    say(`working image: ${entry.name}`);
+  }
+  function syncAdvance() {
+    if (el.madvance) el.madvance.disabled = !(previewed && previewed.path);
+  }
   function renderCandidates() {
     const list = cands.get();
     // The viewed candidate keeps its ring across the rebuild: the strips
@@ -1014,8 +1006,8 @@ export function mountStudio(panel, jobbar) {
           previewed = c;
           previewUrl = c.url;
           // The preview always lands, comparer or not: compare yields so the
-          // canvas shows the selected candidate (same pattern as refine /
-          // filter-apply, which reset compareOn on a new output). The .sel
+          // canvas shows the selected candidate (same pattern as generate()'s
+          // completion, which resets compareOn on a new output). The .sel
           // ring is re-applied by renderCandidates() from previewed.
           compareOn = false; cmpPct = 100;
           el['img-a'].src = previewUrl;
@@ -1038,14 +1030,16 @@ export function mountStudio(panel, jobbar) {
       const st = studioState().get();
       const src = document.createElement('span');
       src.className = 'st-src' + (st.path ? ' has' : '');
-      if (previewed) {
+      // Promote is offered only when the viewed candidate has a server
+      // path — a mask run whose render failed to store still previews (its
+      // image is a data URL) but cannot become the working image.
+      if (previewed && previewed.path) {
         const dn = document.createElement('span');
         dn.className = 'st-src-dn'; dn.textContent = '⬇';
         dn.title = `Use viewed image (${previewed.path.split('/').pop()}) as source`;
         dn.addEventListener('click', (e) => {
           e.stopPropagation();
-          studioState().set(previewed.path, 'foxden-output', { name: previewed.path.split('/').pop() });
-          say(`working image: ${previewed.path.split('/').pop()}`);
+          promoteCandidate(previewed);
         });
         src.appendChild(dn);
       }
@@ -1070,6 +1064,7 @@ export function mountStudio(panel, jobbar) {
       target.appendChild(src);
     }
     el.strip.classList.toggle('st-running', busy);
+    syncAdvance();
   }
 
   // ── generate: batch N = N sequential runs, one candidate set ──
@@ -1759,91 +1754,114 @@ export function mountStudio(panel, jobbar) {
     say(`applied settings from ${st.name || st.path}`);
   });
 
-  // ── refine: Update's preset runner on the working image ──
-  let refinePresets = [];
-  async function loadRefinePresets() {
+  // ── mask: its own generation panel. The mask run is single-shot and
+  // lands as a CANDIDATE — never auto-promoted; the user picks the masked
+  // result over the source with ⬇. The painted mask stays across runs on
+  // the same source and resets only when the source changes (openWorking /
+  // showVerb own that). The model picker is driven by the workflow schema,
+  // not a preset dropdown: the verb picks the variant (mask-inpaint), the
+  // user picks the model.
+  //
+  // Enabled set — which edit workflows have a Studio mask path. Today that
+  // is Klein 4B ONLY: the only masked-inpaint execution in the backend is
+  // Update POST /api/update/inpaint-async → comfy_inpaint_klein in
+  // backend/comfy.py (Klein-only), and foxden POST /api/foxden/generate
+  // (GenerateBody) has NO mask field at all — zero mask references in
+  // backend/routers/foxden.py — so Moss edit cannot run a mask through it.
+  // Moss is listed disabled until Moss/Krea mask plumbing lands; then this
+  // set grows and the picker just works.
+  const MASK_EDIT_WORKFLOWS = new Set(['klein-4b-edit']);
+  let maskModel = 'klein-4b-edit';   // selected edit workflow id
+  const modelLabel = m => /^[0-9]/.test(m) ? m.toUpperCase() : m[0].toUpperCase() + m.slice(1);
+  async function loadMaskModels() {
+    let families = null;
     try {
-      const r = await fetch('/api/update/presets');
-      const data = await r.json();
-      refinePresets = data.presets || [];
-      const sel = el.rpreset;
-      sel.innerHTML = '';
-      for (const p of refinePresets) {
-        const o = document.createElement('option');
-        o.value = p.file; o.textContent = p.name; o.title = p.description;
-        sel.appendChild(o);
+      const s = await fetch('/api/foxden/workflows/schema');
+      if (s.ok) families = (await s.json()).families || null;
+    } catch { /* fall back to the /config families map below */ }
+    if (!families) families = FAMILY_MODELS;
+    const sel = el.mmodel;
+    sel.innerHTML = '';
+    const options = [];
+    for (const [fam, fd] of Object.entries(families || {})) {
+      for (const [model, v] of Object.entries((fd && fd.models) || {})) {
+        if (!v || !v.edit) continue;   // edit-role models only
+        options.push({ family: fam, model, edit: v.edit,
+          label: `${modelLabel(fam)} ${modelLabel(model)}` });
       }
-      const mi = document.createElement('option');
-      mi.value = '__masked_inpaint'; mi.textContent = '🎭 Masked inpaint (Klein)';
-      sel.appendChild(mi);
-    } catch (e) { el.rstatus.textContent = 'preset load failed: ' + e.message; }
+    }
+    // Both sources failed: Klein 4B is the one mask path that exists.
+    if (!options.length) options.push({ family: 'klein', model: '4b', edit: 'klein-4b-edit', label: 'Klein 4B' });
+    for (const o of options) {
+      const opt = document.createElement('option');
+      opt.value = o.edit;
+      const enabled = MASK_EDIT_WORKFLOWS.has(o.edit);
+      opt.disabled = !enabled;
+      opt.textContent = enabled ? o.label : `${o.label} (mask path coming)`;
+      sel.appendChild(opt);
+    }
+    const firstEnabled = options.find(o => MASK_EDIT_WORKFLOWS.has(o.edit));
+    maskModel = firstEnabled ? firstEnabled.edit : options[0].edit;
+    sel.value = maskModel;
   }
-  el.rpreset.addEventListener('change', () => {
-    const masked = el.rpreset.value === '__masked_inpaint';
-    el.mask.style.display = masked ? '' : 'none';
-    el['rdenoise-lbl'].style.display = masked ? '' : 'none';
-    if (masked) initMaskForSource();
-    drawMaskView();
-  });
-  el['rdenoise'].addEventListener('input', () => {
-    el['rdenoise-val'].textContent = (+el['rdenoise'].value).toFixed(2);
+  el.mmodel.addEventListener('change', () => { maskModel = el.mmodel.value; });
+  el.mdenoise.addEventListener('input', () => {
+    el['mdenoise-val'].textContent = (+el.mdenoise.value).toFixed(2);
   });
 
-  let jobCancelled = false, refineRunning = false;
-  async function runRefine() {
-    if (refineRunning || !stack) { if (!stack) say('no working image — set one first', true); return; }
-    const preset = el.rpreset.value;
-    if (!preset) { say('pick a preset first', true); return; }
+  let jobCancelled = false, maskRunning = false;
+  async function runMask() {
+    if (maskRunning || !stack) { if (!stack) say('no working image — set one first', true); return; }
     const srcEntry = source(stack);
     if (!srcEntry.path) { say('working image has no server path', true); return; }
-    const useRandom = el.rrandom.checked;
-    const seed = useRandom ? null : (parseInt(el.rseed.value, 10) || 0);
-    refineRunning = true; jobCancelled = false;
-    el.rrun.disabled = true;
+    if (!MASK_EDIT_WORKFLOWS.has(maskModel)) { say('this model has no mask path yet', true); return; }
+    if (!maskCanvas || !maskHasWhite()) { say('paint a region to regenerate first', true); return; }
+    const useRandom = el.mrandom.checked;
+    const seed = useRandom ? null : (parseInt(el.mseed.value, 10) || 0);
+    maskRunning = true; jobCancelled = false;
+    el.mrun.disabled = true;
     busy = true;
     setFabProgress(0.05, '…');
     try {
-      let url, body;
-      if (preset === '__masked_inpaint') {
-        if (!maskCanvas || !maskHasWhite()) throw new Error('paint a region to regenerate first');
-        url = '/api/update/inpaint-async';
-        body = { path: srcEntry.path, prompt: el.rprompt.value,
-          mask_b64: maskCanvas.toDataURL('image/png'),
-          denoise: parseFloat(el['rdenoise'].value) || 0.45,
-          seed, random: useRandom };
-      } else {
-        url = '/api/update/run-async';
-        body = { preset, path: srcEntry.path, prompt: el.rprompt.value, seed, random: useRandom };
-      }
-      const r = await fetch(url, { method: 'POST',
+      const body = { path: srcEntry.path, prompt: el.mprompt.value,
+        mask_b64: maskCanvas.toDataURL('image/png'),
+        denoise: parseFloat(el.mdenoise.value) || 0.45,
+        seed, random: useRandom };
+      const r = await fetch('/api/update/inpaint-async', { method: 'POST',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       if (!r.ok) throw new Error((await r.json()).detail || r.status);
       const { job_id } = await r.json();
       const data = await pollJob(job_id);
-      el.rseed.value = String(data.seed);
-      stack = pushRender(stack, {
-        url: data.image, name: `render seed=${data.seed}`,
-        path: data.render_path || '',
-        recipe: data.recipe || preset, masked: preset === '__masked_inpaint',
-      });
+      el.mseed.value = String(data.seed);
+      // Candidate flow (mirrors generate()'s completion): the masked result
+      // lands as a candidate and is previewed — it never auto-promotes, and
+      // the painted mask stays put for the next run on the same source.
+      // data.image is a data URL (base64 PNG), not a view URL — it works as
+      // an img src for the strip and the canvas. data.render_path is the
+      // gallery path, or null when the store failed: the candidate still
+      // previews, but ⬇ stays unavailable (see renderCandidates).
+      const cand = { url: data.image, path: data.render_path || '', recipe: 'masked-inpaint', masked: true };
+      cands.startRun([cand]);
+      renderCandidates();
+      previewed = cand;
+      previewUrl = cand.url;
+      // The preview always lands, comparer or not (see the candidate tap).
       compareOn = false; cmpPct = 100;
-      showCurrent();
-      // Output-becomes-working (Stage 3 contract, kept): the stored render
-      // promotes; the stack already contains it so no rebuild happens.
-      if (data.render_path) {
-        studioState().set(data.render_path, 'update', { name: `render seed=${data.seed}` });
-      }
-      showToast(`Refine complete — seed ${data.seed}`);
+      el['img-a'].src = previewUrl;
+      el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
+      syncComparer();
+      showToast(`Mask edit complete — seed ${data.seed}`);
       flashOverlayInImmersive();
-      say(`render done (seed ${data.seed})`);
+      say(`mask edit done (seed ${data.seed}) — Use as source to advance it to the working image`);
     } catch (err) {
-      say('run failed: ' + err.message, true);
+      say('mask run failed: ' + err.message, true);
     }
-    refineRunning = false; busy = false;
-    el.rrun.disabled = false;
+    maskRunning = false; busy = false;
+    el.mrun.disabled = false;
     setFabProgress(0, null);
   }
-  el.rrun.addEventListener('click', runRefine);
+  el.mrun.addEventListener('click', runMask);
+  el.madvance.addEventListener('click', () => promoteCandidate(previewed));
   async function pollJob(jobId) {
     const started = Date.now();
     for (;;) {
@@ -1855,152 +1873,18 @@ export function mountStudio(panel, jobbar) {
       const job = await r.json();
       if (job.status === 'done') return job.result;
       if (job.status === 'error') throw new Error(job.error || 'job failed');
-      el.rstatus.textContent = `ComfyUI ${job.status}…`;
+      el.mstatus.textContent = `ComfyUI ${job.status}…`;
       setFabProgress(Math.min(0.9, (Date.now() - started) / 300000), '⏳');
     }
   }
 
-  // ── filters toolset (collapsible section inside Refine) ──
-  function filterState() {
-    const s = { chEnabled: el['ch-enabled'].checked };
-    for (const [id, key, parse] of FILTER_SLIDERS) s[key] = parse($(id).value);
-    return s;
-  }
-  function colorholdParams() {
-    const s = filterState();
-    return { chEnabled: s.chEnabled, dark_t: s.dark_t, sat_mul: s.sat_mul,
-      val_mul: s.val_mul, smooth: s.smooth, line_sigma: s.line_sigma,
-      vibrance: s.vibrance, vibrance_falloff: s.vibrance_falloff,
-      vibrance_protect: s.vibrance_protect / 100 };
-  }
+  // Preview reset: clears a candidate preview off the canvas (openWorking
+  // calls it when the working image changes).
   function clearPreview() {
     if (!previewUrl) return;
     previewUrl = null;
     if (stack) { const cur = current(stack); el['img-b'].src = cur.url; el['img-a'].src = compareEntry(stack).url; }
   }
-  const schedulePreview = debounce(async () => {
-    const s = stack;
-    if (!s || !el['filters-sec'].open) return;
-    const st = filterState();
-    const tunes = { satMul: st.satMul, brightness: st.brightness, contrast: st.contrast, lift: st.lift, edge: st.edge };
-    const backendActive = st.chEnabled || st.vibrance > 0;
-    if (!backendActive && tunesAreIdentity(tunes) && st.strength >= 100) { clearPreview(); return; }
-    try {
-      el.fstatus.textContent = 'previewing…';
-      let baseImg;
-      if (backendActive) {
-        const body = { ...colorholdParams(),
-          strength: st.chEnabled ? 100 : 0,
-          preview_max_side: 1024, path: source(s).path };
-        const r = await fetch('/api/filters/apply', { method: 'POST',
-          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        if (!r.ok) throw new Error(`filter preview failed: ${r.status}`);
-        const data = await r.json();
-        baseImg = await loadImg(data.image);
-      } else {
-        baseImg = await loadImg(galleryFileUrl(source(s).path));
-      }
-      const scale = Math.min(1, 1024 / Math.max(baseImg.naturalWidth, baseImg.naturalHeight));
-      const cv = document.createElement('canvas');
-      cv.width = Math.max(1, Math.round(baseImg.naturalWidth * scale));
-      cv.height = Math.max(1, Math.round(baseImg.naturalHeight * scale));
-      const ctx = cv.getContext('2d');
-      ctx.drawImage(baseImg, 0, 0, cv.width, cv.height);
-      if (!tunesAreIdentity(tunes)) {
-        const data = ctx.getImageData(0, 0, cv.width, cv.height);
-        tuneImageData(data, tunes);
-        ctx.putImageData(data, 0, 0);
-      }
-      if (st.strength < 100) {
-        const orig = await loadImg(galleryFileUrl(source(s).path));
-        ctx.globalAlpha = 1 - st.strength / 100;
-        ctx.drawImage(orig, 0, 0, cv.width, cv.height);
-        ctx.globalAlpha = 1;
-      }
-      previewUrl = cv.toDataURL('image/png');
-      el['img-b'].src = previewUrl;
-      if (!compareOn) el['img-a'].src = previewUrl;
-      el.fstatus.textContent = 'live preview — Apply filter stack to commit at full res';
-    } catch (e) {
-      el.fstatus.textContent = e.message;
-    }
-  }, 350);
-  function loadImg(src) {
-    return new Promise((res, rej) => {
-      const img = new Image();
-      img.onload = () => res(img);
-      img.onerror = () => rej(new Error('image failed to load'));
-      img.src = src;
-    });
-  }
-  for (const [id] of FILTER_SLIDERS) $(id).addEventListener('input', schedulePreview);
-  el['ch-enabled'].addEventListener('change', schedulePreview);
-  el['filters-sec'].addEventListener('toggle', () => { if (!el['filters-sec'].open) clearPreview(); });
-  el.fapply.addEventListener('click', async () => {
-    const s = stack;
-    if (!s) { el.fstatus.textContent = 'no working image'; return; }
-    el.fstatus.textContent = 'running full-res filter…';
-    busy = true;
-    try {
-      const st = filterState();
-      const tunes = { satMul: st.satMul, brightness: st.brightness, contrast: st.contrast, lift: st.lift, edge: st.edge };
-      const backendActive = st.chEnabled || st.vibrance > 0;
-      let baseImg;
-      if (backendActive) {
-        const body = { ...colorholdParams(), strength: st.chEnabled ? 100 : 0, path: source(s).path };
-        const r = await fetch('/api/filters/apply', { method: 'POST',
-          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        if (!r.ok) throw new Error(`filter apply failed: ${r.status}`);
-        const data = await r.json();
-        baseImg = await loadImg(data.image);
-      } else {
-        baseImg = await loadImg(galleryFileUrl(source(s).path));
-      }
-      const cv = document.createElement('canvas');
-      cv.width = baseImg.naturalWidth; cv.height = baseImg.naturalHeight;
-      const ctx = cv.getContext('2d');
-      ctx.drawImage(baseImg, 0, 0);
-      if (!tunesAreIdentity(tunes)) {
-        const data = ctx.getImageData(0, 0, cv.width, cv.height);
-        tuneImageData(data, tunes);
-        ctx.putImageData(data, 0, 0);
-      }
-      if (st.strength < 100) {
-        const orig = await loadImg(galleryFileUrl(source(s).path));
-        ctx.globalAlpha = 1 - st.strength / 100;
-        ctx.drawImage(orig, 0, 0, cv.width, cv.height);
-        ctx.globalAlpha = 1;
-      }
-      const blob = await new Promise(res => cv.toBlob(res, 'image/png'));
-      const dataUrl = await new Promise((res, rej) => {
-        const fr = new FileReader();
-        fr.onload = () => res(fr.result); fr.onerror = rej;
-        fr.readAsDataURL(blob);
-      });
-      const r2 = await fetch('/api/filters/store', { method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_b64: dataUrl, source_module: 'studio' }) });
-      if (!r2.ok) throw new Error(`store failed: ${r2.status}`);
-      const { render_path } = await r2.json();
-      clearPreview();
-      // Output-becomes-working, with the version history kept (studio
-      // eval §5): push the filtered render onto the stack first, exactly
-      // as refine does, so the store's same-path guard keeps the history
-      // instead of openWorking() rebuilding a fresh stack.
-      stack = pushRender(stack, {
-        url: galleryFileUrl(render_path), name: `filtered ${current(s).name}`,
-        path: render_path, recipe: 'filters', masked: false,
-      });
-      compareOn = false; cmpPct = 100;
-      showCurrent();
-      studioState().set(render_path, 'filters', { name: `filtered ${current(s).name}` });
-      showToast('Filter stack applied');
-      el.fstatus.textContent = 'applied — output is the working image';
-    } catch (e) {
-      el.fstatus.textContent = e.message;
-    }
-    busy = false;
-  });
 
   // ── provenance panel ──
   async function renderProvenance() {
@@ -2123,15 +2007,15 @@ export function mountStudio(panel, jobbar) {
   // tab switches (chunk-A structural fix). ──
   (async () => {
     await loadConfig();
+    loadMaskModels();   // after loadConfig: the /config families map is its fallback
     const last = await loadPresets();
     if (last) applyState(last);
     restored = true;
   })();
-  loadRefinePresets();
   studioState().restore();
   showVerb('generate');
   renderCandidates();
-  void revert; void revertToOriginal; void selectEntry; void setViewedAsBase; void canRevert;   // stack API surface (kept for the version contract)
+  void revert; void revertToOriginal; void canRevert;   // stack API surface (kept for the version contract; selectEntry + setViewedAsBase are used by promoteCandidate)
 
   return { showVerb, setBatch, saveAs, setImmersive };
 }
