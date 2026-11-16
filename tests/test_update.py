@@ -200,11 +200,20 @@ def test_saved_prompts_endpoints(store, client):
 def fake_comfy(tmp_path, monkeypatch, roots):
     """Fixture Comfy + temp gallery root; mimics the real shared output root
     (Comfy writes outputs into GALLERY_ROOT/ellieedit_tmp)."""
+    from backend import comfy as comfy_mod
     from tests.fake_comfy import start_fake_comfy
     groot, _lroot = roots
     (groot / "src.png").write_bytes(_png_bytes())
     fake = start_fake_comfy(output_dir=groot)
+    # Both names must point at the fake: _execute_run uploads through
+    # comfy._comfy_upload (reads backend.comfy.COMFY_URL) but submits /
+    # polls / fetches through update.py's own helpers (read update.COMFY_URL,
+    # a copy taken at import). Patching only update's copy sent the upload
+    # to the real Comfy box (100.115.117.53:8188), which from a VM without
+    # Tailscale closes the connection without a response — RemoteDisconnected
+    # before the fake ever saw a request.
     monkeypatch.setattr(update_mod, "COMFY_URL", fake.url)
+    monkeypatch.setattr(comfy_mod, "COMFY_URL", fake.url)
     yield fake
     fake.stop()
 
