@@ -2019,8 +2019,8 @@ export function mountStudio(panel, jobbar) {
   // backend/routers/foxden.py — so Moss edit cannot run a mask through it.
   // Moss is listed disabled until Moss/Krea mask plumbing lands; then this
   // set grows and the picker just works.
-  const MASK_EDIT_WORKFLOWS = new Set(['klein-4b-edit']);
-  let maskModel = 'klein-4b-edit';   // selected edit workflow id
+  const MASK_EDIT_WORKFLOWS = new Set(['klein-4b']);   // klein-4b self-edits via denoise (2026-11-17 swap)
+  let maskModel = 'klein-4b';   // selected edit workflow id
   const modelLabel = m => /^[0-9]/.test(m) ? m.toUpperCase() : m[0].toUpperCase() + m.slice(1);
   async function loadMaskModels() {
     let families = null;
@@ -2040,7 +2040,7 @@ export function mountStudio(panel, jobbar) {
       }
     }
     // Both sources failed: Klein 4B is the one mask path that exists.
-    if (!options.length) options.push({ family: 'klein', model: '4b', edit: 'klein-4b-edit', label: 'Klein 4B' });
+    if (!options.length) options.push({ family: 'klein', model: '4b', edit: 'klein-4b', label: 'Klein 4B' });
     for (const o of options) {
       const opt = document.createElement('option');
       opt.value = o.edit;

@@ -1431,7 +1431,7 @@ def test_stage4_mask_and_provenance_pins():
     # model picker: schema-driven, edit-role models only, Klein 4B enabled
     assert "MASK_EDIT_WORKFLOWS" in studio
     assert "/api/foxden/workflows/schema" in studio
-    assert "klein-4b-edit" in studio
+    assert "klein-4b" in studio   # denoise-gated self-edit swap 2026-11-17
     assert "(mask path coming)" in studio
     models = studio[studio.index("async function loadMaskModels"):studio.index("el.mmodel.addEventListener")]
     assert "FAMILY_MODELS" in models      # /config families map is the fallback

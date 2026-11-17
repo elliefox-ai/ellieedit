@@ -40,9 +40,7 @@ log = logging.getLogger("ellieedit.foxden")
 router = APIRouter(prefix="/api/foxden", tags=["foxden"])
 
 WORKFLOW_FILES = {"klein": "klein_gen_basic.json",           # Klein 9B generate
-                  "klein-4b": "klein_4b_gen_basic.json",     # Klein 4B generate
-                  "klein-edit": "klein_edit_basic.json",     # Klein 4B edit (legacy id)
-                  "klein-4b-edit": "klein_edit_basic.json",  # Klein 4B edit
+                  "klein-4b": "klein_4b_gen_basic.json",     # Klein 4B: denoise-gated t2i/i2i
                   "krea2": "krea2_gen_basic.json",
                   "zengorestyle": "zengostyle_restyle_f2k4b_mkl.json",
                   "qwen21": "qwen21_gen_basic.json",
@@ -54,14 +52,15 @@ WORKFLOW_FILES = {"klein": "klein_gen_basic.json",           # Klein 9B generate
 WORKFLOW_FAMILIES = {
     "klein": {
         "models": {"9b": {"gen": "klein", "edit": None},
-                   "4b": {"gen": "klein-4b", "edit": "klein-4b-edit"}},
+                   "4b": {"gen": "klein-4b", "edit": None}},   # klein-4b self-edits via denoise
     },
     "moss": {
         "models": {"turbo": {"gen": "moss", "edit": "moss-edit"}},
     },
 }
 # legacy ids that resolve into a family variant (kept for old clients/recent.jsonl)
-WORKFLOW_FAMILY_ALIASES = {"klein-edit": "klein-4b-edit"}
+WORKFLOW_FAMILY_ALIASES = {"klein-edit": "klein-4b",     # legacy ids (recent.jsonl)
+                           "klein-4b-edit": "klein-4b"}
 LORA_EXTS = {".safetensors", ".pt", ".ckpt", ".pth"}
 UPLOAD_MAX = 25 * 1024 * 1024
 RECENT_MAX = 200
@@ -146,7 +145,7 @@ def is_link(v) -> bool:
 
 def load_workflow(name: str) -> dict:
     """Fresh read every call — never cached."""
-    fn = WORKFLOW_FILES.get(name)
+    fn = WORKFLOW_FILES.get(WORKFLOW_FAMILY_ALIASES.get(name, name))
     if not fn:
         raise HTTPException(400, f"unknown workflow {name!r}; "
                                  f"choices: {sorted(WORKFLOW_FILES)}")
@@ -201,6 +200,7 @@ def _find_prompt_upstream(wf: dict, positive_link: list) -> tuple:
     """Walk upstream from a positive conditioning link to the literal prompt
     node. Empty-string literals are skipped (StringConcatenate string_b='')."""
     prompt = None
+    empty_text = None            # CLIPTextEncode.text may legitimately be ''
     seen, frontier = set(), [positive_link[0]]
     while frontier and prompt is None:
         nid = frontier.pop(0)
@@ -212,8 +212,12 @@ def _find_prompt_upstream(wf: dict, positive_link: list) -> tuple:
             if isinstance(v, str) and v.strip():
                 prompt = (nid, key)
                 break
+            if key == "text" and isinstance(v, str) and empty_text is None:
+                empty_text = (nid, key)      # remember, keep walking
         else:
             frontier += [v[0] for v in wf[nid]["inputs"].values() if is_link(v)]
+    if prompt is None:
+        prompt = empty_text                  # empty prompt slot is still the slot
     if prompt is None:
         raise HTTPException(400, "no literal prompt node upstream of sampler")
     return prompt
@@ -372,8 +376,41 @@ def apply_edits(wf: dict, prompt: str, seed: int, width=None, height=None,
         prev = [nid, 0]
     wf[s["guider"]]["inputs"]["model"] = prev
     if input_image:
-        inject_input_image(wf, input_image)
+        inject_input_image(wf, name=input_image)
+    # Denoise-gated I2I switch (klein-4b 2026-11-17): a Crystools latent switch
+    # with a literal `boolean` selects I2I (on_true=VAEEncode) vs empty latent.
+    # Operator rule: denoise 1.0 -> t2i (false); denoise < 1.0 -> I2I (true),
+    # which then REQUIRES an input image.
+    # must feed the sampler's latent_image to count
+    li = None
+    for k, n in wf.items():
+        if n["class_type"] == "KSampler" and is_link(n["inputs"].get("latent_image")):
+            li = n["inputs"]["latent_image"][0]
+    switches = [k for k, n in wf.items()
+                if n["class_type"] == "Switch latent [Crystools]"
+                and k == li
+                and isinstance(n["inputs"].get("boolean"), bool)]
+    if len(switches) == 1:
+        want_i2i = denoise < 1.0
+        if want_i2i and not input_image:
+            raise HTTPException(400, "denoise < 1.0 needs an input image "
+                                     "for this workflow")
+        wf[switches[0]]["inputs"]["boolean"] = want_i2i
     wire_denoise(wf, denoise)
+    # Link-driven sizes: no literal width/height latent sites, but exactly one
+    # INTConstant feeding the size chain (klein-4b): write it as a square size.
+    if width is not None and not s["size"]:
+        # exactly one INTConstant actually feeding a width/height link
+        srcs = {v[0] for n in wf.values() for key in ("width", "height")
+                for v in [n["inputs"].get(key)] if is_link(v)}
+        ints = [k for k, n in wf.items()
+                if n["class_type"] == "INTConstant" and k in srcs
+                and isinstance(n["inputs"].get("value"), int)]
+        if len(ints) == 1:
+            if width != height:
+                raise HTTPException(400, "this workflow takes one square "
+                                         "size (width == height)")
+            wf[ints[0]]["inputs"]["value"] = snap16(width)
     # Baselines exported from the UI carry PreviewImage (temp outputs), which
     # ComfyUI purges and our status filter rightly ignores. Inject a real
     # SaveImage so renders persist as type=output (2026-10-14 inaugural).
@@ -408,7 +445,7 @@ def reachable() -> bool:
         return False
 
 
-EDIT_WORKFLOWS = {"klein-edit", "klein-4b-edit", "moss-edit"}   # reference-image graphs: always feed the working image
+EDIT_WORKFLOWS = {"moss-edit"}   # always-feed graphs; klein-4b gates by denoise now
 
 @router.get("/config")
 def config():

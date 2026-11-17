@@ -288,12 +288,12 @@ def test_config_scans_loras_and_reports_reachability(client, monkeypatch):
     assert c["comfy_reachable"] is True
     assert {w["id"]: w["available"] for w in c["workflows"]} == {
         "klein": True, "krea2": False, "zengorestyle": False, "qwen21": False,
-        "moss": False, "klein-edit": False, "klein-4b": False,
-        "klein-4b-edit": False, "moss-edit": False}  # restyle 2026-10-20, qwen21 2026-10-23, moss 2026-10-26, klein-edit 2026-11-13, 4b split 2026-11-13, moss-edit 2026-11-14 (jsons live in data workflows dir, not the test fixture)
+        "moss": False, "klein-4b": False,
+        "moss-edit": False}  # restyle 2026-10-20, qwen21 2026-10-23, moss 2026-10-26, moss-edit 2026-11-14, klein-4b denoise-gated swap 2026-11-17 (jsons live in data workflows dir, not the test fixture)
     assert {w["id"]: w["edit"] for w in c["workflows"]} == {
         "klein": False, "krea2": False, "zengorestyle": False, "qwen21": False,
-        "moss": False, "klein-edit": True, "klein-4b-edit": True,
-        "klein-4b": False, "moss-edit": True}  # edit graphs report themselves
+        "moss": False,
+        "klein-4b": False, "moss-edit": True}  # klein-4b gates by denoise now, not registry
 
 
 def test_config_comfy_unreachable_is_graceful(client, monkeypatch):
@@ -886,3 +886,73 @@ def test_save_outputs_nothing_findable_is_404(client, env, monkeypatch):
     fake_comfy(monkeypatch, {"/view?": (404, b"nope")})
     r = client.post("/api/foxden/save-outputs", json={"paths": ["ghost.png"]})
     assert r.status_code == 404
+
+
+# ------------------------------------------------- klein-4b denoise-gated swap
+
+def _klein4b_graph():
+    """Skeleton of the 2026-11-17 klein-4b swap: KSampler family, empty-text
+    prompt slot, Crystools I2I switch, INTConstant square size."""
+    return {
+        "34": {"class_type": "LoadImage", "inputs": {"image": "in.png"}},
+        "109": {"class_type": "VAEDecode", "inputs": {"samples": ["140", 0], "vae": ["116", 0]}},
+        "111": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["113", 0]}},
+        "112": {"class_type": "EmptyFlux2LatentImage",
+                "inputs": {"width": ["122", 1], "height": ["122", 2], "batch_size": 1}},
+        "113": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["117", 0]}},
+        "116": {"class_type": "VAELoader", "inputs": {"vae_name": "flux2-vae.safetensors"}},
+        "117": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_4b_fp8_scaled.safetensors", "type": "flux2"}},
+        "118": {"class_type": "UNETLoader", "inputs": {"unet_name": "_Flux2Klein\\flux-2-klein-4b.safetensors"}},
+        "122": {"class_type": "ImageResizeKJv2",
+                "inputs": {"width": ["138", 0], "height": ["138", 0], "image": ["34", 0],
+                           "divisible_by": 2, "device": "cpu"}},
+        "130": {"class_type": "VAEEncode", "inputs": {"pixels": ["122", 0], "vae": ["116", 0]}},
+        "131": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["113", 0], "latent": ["130", 0]}},
+        "138": {"class_type": "INTConstant", "inputs": {"value": 1024}},
+        "139": {"class_type": "Switch latent [Crystools]",
+                "inputs": {"boolean": True, "on_true": ["130", 0], "on_false": ["112", 0]}},
+        "140": {"class_type": "KSampler",
+                "inputs": {"seed": 42, "steps": 4, "cfg": 1, "denoise": 1,
+                           "model": ["118", 0], "positive": ["131", 0],
+                           "negative": ["111", 0], "latent_image": ["139", 0]}},
+        "142": {"class_type": "SaveImage", "inputs": {"images": ["109", 0], "filename_prefix": "foxden"}},
+    }
+
+
+def test_klein4b_denoise_1_runs_t2i_switch_false(env):
+    out = foxden.apply_edits(_klein4b_graph(), "a fox", 7,
+                             width=512, height=512, denoise=1.0)
+    assert out["139"]["inputs"]["boolean"] is False          # empty latent
+    assert out["140"]["inputs"]["denoise"] == 1.0            # native path
+    assert out["113"]["inputs"]["text"] == "a fox"           # empty-text slot found
+    assert out["138"]["inputs"]["value"] == 512              # square size write
+    assert out["34"]["inputs"]["image"] == "in.png"          # LoadImage untouched
+
+
+def test_klein4b_denoise_below_1_requires_input_image(env):
+    with pytest.raises(Exception) as e:
+        foxden.apply_edits(_klein4b_graph(), "a fox", 7, denoise=0.6)
+    assert "input image" in str(e.value)
+
+
+def test_klein4b_denoise_below_1_switches_to_i2i(env):
+    out = foxden.apply_edits(_klein4b_graph(), "a fox", 7, denoise=0.6,
+                             input_image="in.png")
+    assert out["139"]["inputs"]["boolean"] is True           # I2I path
+    assert out["34"]["inputs"]["image"] == "in.png"          # adopt repoints
+    assert out["140"]["inputs"]["denoise"] == 0.6
+
+
+def test_klein4b_nonsquare_size_is_rejected(env):
+    with pytest.raises(Exception) as e:
+        foxden.apply_edits(_klein4b_graph(), "a fox", 7,
+                           width=512, height=768, denoise=1.0)
+    assert "square" in str(e.value)
+
+
+def test_klein4b_registry_swap(env):
+    assert "klein-4b-edit" not in foxden.WORKFLOW_FILES
+    assert "klein-edit" not in foxden.WORKFLOW_FILES
+    assert foxden.WORKFLOW_FAMILY_ALIASES["klein-edit"] == "klein-4b"
+    assert foxden.WORKFLOW_FAMILY_ALIASES["klein-4b-edit"] == "klein-4b"
+    assert "klein-4b" not in foxden.EDIT_WORKFLOWS
