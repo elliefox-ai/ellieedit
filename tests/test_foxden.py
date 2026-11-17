@@ -36,9 +36,19 @@ REAL = Path("/mnt/e/comfyui/user/default/workflows/klein_gen_basic.json")
 
 
 def graphs():
-    out = [pytest.param(KLEIN, id="fixture")]
-    if REAL.is_file():
-        out.append(pytest.param(json.loads(REAL.read_text()), id="real-klein"))
+    # CFGGuider-family contract pins run on the skeleton only: the real
+    # klein_gen_basic.json swapped to the KSampler/denoise-gated shape
+    # (2026-11-17), whose contract is pinned by the klein4b tests below.
+    return [pytest.param(KLEIN, id="fixture")]
+
+
+def klein_swap_graphs():
+    """Real denoise-gated klein graphs (4b + 9b) when reachable."""
+    out = []
+    for path, name in ((Path("/mnt/e/comfyui/user/default/workflows/klein_4b_gen_basic.json"), "real-klein-4b"),
+                       (REAL, "real-klein-9b")):
+        if path.is_file():
+            out.append(pytest.param(json.loads(path.read_text()), id=name))
     return out
 
 
@@ -919,35 +929,40 @@ def _klein4b_graph():
     }
 
 
-def test_klein4b_denoise_1_runs_t2i_switch_false(env):
-    out = foxden.apply_edits(_klein4b_graph(), "a fox", 7,
+@pytest.mark.parametrize("g", klein_swap_graphs())
+def test_klein4b_denoise_1_runs_t2i_switch_false(env, g):
+    out = foxden.apply_edits(g, "a fox", 7,
                              width=512, height=512, denoise=1.0)
-    assert out["139"]["inputs"]["boolean"] is False          # empty latent
-    assert out["140"]["inputs"]["denoise"] == 1.0            # native path
-    assert out["113"]["inputs"]["text"] == "a fox"           # empty-text slot found
-    assert out["138"]["inputs"]["value"] == 512              # square size write
-    assert out["34"]["inputs"]["image"] == "in.png"          # LoadImage untouched
+    assert out[foxden._only(out, "Switch latent [Crystools]")]["inputs"]["boolean"] is False          # empty latent
+    assert out[foxden._only(out, "KSampler")]["inputs"]["denoise"] == 1.0            # native path
+    assert out[foxden._only(out, "CLIPTextEncode")]["inputs"]["text"] == "a fox"           # empty-text slot found
+    assert out[foxden._only(out, "INTConstant")]["inputs"]["value"] == 512              # square size write
+    li = foxden._only(out, "LoadImage")
+    assert out[li]["inputs"]["image"] == g[foxden._only(g, "LoadImage")]["inputs"]["image"]  # untouched
 
 
-def test_klein4b_denoise_below_1_requires_input_image(env):
+@pytest.mark.parametrize("g", klein_swap_graphs())
+def test_klein4b_denoise_below_1_requires_input_image(env, g):
     with pytest.raises(Exception) as e:
-        foxden.apply_edits(_klein4b_graph(), "a fox", 7, denoise=0.6)
+        foxden.apply_edits(g, "a fox", 7, denoise=0.6)
     assert "input image" in str(e.value)
 
 
-def test_klein4b_denoise_below_1_switches_to_i2i(env):
-    out = foxden.apply_edits(_klein4b_graph(), "a fox", 7, denoise=0.6,
+@pytest.mark.parametrize("g", klein_swap_graphs())
+def test_klein4b_denoise_below_1_switches_to_i2i(env, g):
+    out = foxden.apply_edits(g, "a fox", 7, denoise=0.6,
                              input_image="in.png")
-    assert out["139"]["inputs"]["boolean"] is True           # I2I path
-    assert out["34"]["inputs"]["image"] == "in.png"          # adopt repoints
-    assert out["140"]["inputs"]["denoise"] == 0.6
+    assert out[foxden._only(out, "Switch latent [Crystools]")]["inputs"]["boolean"] is True           # I2I path
+    assert out[foxden._only(out, "LoadImage")]["inputs"]["image"] == "in.png"          # adopt repoints
+    assert out[foxden._only(out, "KSampler")]["inputs"]["denoise"] == 0.6
 
 
-def test_klein4b_nonsquare_size_writes_long_side(env):
+@pytest.mark.parametrize("g", klein_swap_graphs())
+def test_klein4b_nonsquare_size_writes_long_side(env, g):
     # resize keeps the input's aspect ratio; the constant is the long-side bound
     out = foxden.apply_edits(_klein4b_graph(), "a fox", 7,
                              width=512, height=768, denoise=1.0)
-    assert out["138"]["inputs"]["value"] == 768
+    assert out[foxden._only(out, "INTConstant")]["inputs"]["value"] == 768
 
 
 def test_klein4b_registry_swap(env):

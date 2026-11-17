@@ -2039,10 +2039,14 @@ export function mountStudio(panel, jobbar) {
           label: `${modelLabel(fam)} ${modelLabel(model)}` });
       }
     }
-    // klein-4b self-edits via denoise (2026-11-17 swap) — its family entry has
-    // no edit role, so add it explicitly or the picker only offers moss.
-    if (!options.some(o => o.family === 'klein'))
-      options.unshift({ family: 'klein', model: '4b', edit: 'klein-4b', label: 'Klein 4B' });
+    // klein workflows self-edit via denoise (2026-11-17 swap) — their family
+    // entries have no edit role, so add them explicitly or the picker only
+    // offers moss.
+    const kleinAdd = [['4b', 'klein-4b', 'Klein 4B'], ['9b', 'klein', 'Klein 9B']];
+    for (const [model, id, label] of kleinAdd) {
+      if (!options.some(o => o.edit === id))
+        options.unshift({ family: 'klein', model, edit: id, label });
+    }
     // Both sources failed: Klein 4B is the one mask path that exists.
     if (!options.length) options.push({ family: 'klein', model: '4b', edit: 'klein-4b', label: 'Klein 4B' });
     for (const o of options) {
