@@ -77,7 +77,14 @@ def build_manifest() -> dict:
             "family": _family_of(wid),
             "model": model,
             "role": role,                       # "gen" | "edit" | legacy roles
-            "edit": wid in EDIT_WORKFLOWS or role == "edit",  # requires input_image (denoise-gated klein: role=edit)
+            # requires input_image; _model_and_role returns the FIRST matching
+            # role, and denoise-gated klein maps to BOTH gen and edit — so
+            # scan all roles for this wid instead of trusting `role`.
+            "edit": wid in EDIT_WORKFLOWS or any(
+                r == "edit"
+                for fd in WORKFLOW_FAMILIES.values()
+                for variants in fd["models"].values()
+                for r, cid in variants.items() if cid == wid),
             "available": (workflows_dir() / fname).is_file(),
             "inputs": COMMON_INPUTS,
             "aliases": [k for k, v in WORKFLOW_FAMILY_ALIASES.items() if v == wid],

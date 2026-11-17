@@ -34,7 +34,7 @@
     "klein": {
       "aliases": [],
       "available": true,
-      "edit": false,
+      "edit": true,
       "family": "klein",
       "inputs": [
         {
@@ -119,7 +119,7 @@
         "klein-4b-edit"
       ],
       "available": true,
-      "edit": false,
+      "edit": true,
       "family": "klein",
       "inputs": [
         {

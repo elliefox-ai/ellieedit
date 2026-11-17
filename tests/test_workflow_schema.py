@@ -36,10 +36,15 @@ def test_manifest_has_no_graph_internals():
     for wid, entry in m["workflows"].items():
         assert set(entry) == {"family", "model", "role", "edit",
                               "available", "inputs", "aliases"}
-        assert entry["edit"] == (wid in
-                                 __import__("backend.routers.foxden",
-                                            fromlist=["EDIT_WORKFLOWS"])
-                                 .EDIT_WORKFLOWS)
+        # edit = legacy EDIT_WORKFLOWS membership OR any family role maps
+        # to this wid as "edit" (denoise-gated klein gen/edit share one id).
+        legacy = __import__("backend.routers.foxden",
+                            fromlist=["EDIT_WORKFLOWS"]).EDIT_WORKFLOWS
+        role_edit = any(r == "edit"
+                        for fd in build_manifest()["families"].values()
+                        for variants in fd["models"].values()
+                        for r, cid in variants.items() if cid == wid)
+        assert entry["edit"] == (wid in legacy or role_edit)
 
 
 def test_manifest_registry_complete():
