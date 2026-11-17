@@ -1299,6 +1299,28 @@ def test_stage4_stale_source_pins():
     assert "d.reason === 'settings'" in studio
 
 
+def test_stage4_wide_sliders_hide_mask_pins():
+    """Wide sliders + hide-mask toggle (2026-11-17, Alexander): the four
+    range inputs (Generate size/denoise, Mask brush/denoise) sat at the
+    browser's intrinsic ~130px in a ~298px panel with nothing beside
+    them — they now fill the panel. The Mask panel gains a Hide mask
+    toggle that hides only the overlay canvas, never the mask data."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    # sliders fill the verb panel (labels are already display: block)
+    assert ".st-verbpanel input[type=range] { width: 100%; box-sizing: border-box; }" in studio
+    # hide-mask toggle: markup, ids list, aria-pressed, label swap
+    assert 'data-id="mask-hide"' in studio
+    assert "'mask-hide'" in studio
+    assert 'aria-pressed="false"' in studio
+    assert "'👁 Show mask'" in studio and "'👁 Hide mask'" in studio
+    # overlay hidden + strokes blocked while hidden; data never cleared
+    assert "const show = verb === 'mask' && !!maskCanvas && !!stack && !maskHidden;" in studio
+    assert "return verb === 'mask' && !!maskCanvas && !maskHidden;" in studio
+    # paint/erase disabled while hidden, re-enabled on show
+    assert "el['mask-paint'].disabled = maskHidden;" in studio
+    assert "el['mask-erase'].disabled = maskHidden;" in studio
+
+
 def test_stage4_batch_and_candidate_pins():
     """Stage 4: batch count = hold-to-arm rocker 1-4 default 1 (pure math
     module, pointer capture + touch-action none + aria slider); the rocker
