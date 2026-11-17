@@ -93,17 +93,23 @@ function panelHTML() {
     .st-lsec-h .n { color: #d8d8ee; }
     .st-lsec-b { display: none; border-top: 1px solid #1c1c30; max-height: 40vh; overflow-y: auto; }
     .st-lsec.open .st-lsec-b { display: block; }
-    .st-lrow { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border-bottom: 1px solid #1c1c30; }
+    .st-lrow { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border-bottom: 1px solid #1c1c30;
+      /* Row weight is hold-and-drag (2026-11-16): touch-action pan-y lets
+         the browser own vertical scrolling while horizontal drags reach
+         the page; user-select off so a hold doesn't select text. */
+      touch-action: pan-y; user-select: none; -webkit-user-select: none; }
     .st-lrow:last-child { border-bottom: 0; }
-    .st-lrow .rn { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-    .st-lrow .chev { color: #6c6c8e; font-size: 11px; flex: 0 0 auto; }
-    .st-lrow .where { max-width: 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Armed while a hold-and-drag tunes the weight — same treatment as
+       the batch rocker's .armed. */
+    .st-lrow.armed { border-color: #b39ae0; background: #1d1d33; }
+    .st-lrow .rn { flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .st-lrow.parked .rn { color: #c9b97a; }
     .st-lrow .str { font-size: 11px; color: #b39ae0; background: #161628; border-radius: 4px; padding: 2px 6px; }
-    .st-lrow .where { font-size: 10px; color: #6c6c8e; }
     .st-lrow button { background: none; border: 1px solid #4a4a6c; color: #8a8aaa; border-radius: 6px;
       font-size: 12px; min-width: 38px; min-height: 34px; cursor: pointer; }
-    .st-lslider { width: 100%; margin: 4px 0 8px; }
+    .st-lorahead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .st-lorahead button { background: none; border: 1px solid #4a4a6c; color: #b39ae0; border-radius: 6px;
+      font-size: 12px; padding: 4px 10px; min-height: 30px; cursor: pointer; white-space: nowrap; }
     .st-lroots { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
     .st-lroots button { background: none; border: 1px solid #4a4a6c; color: #8a8aaa; border-radius: 14px;
       font-size: 11px; padding: 4px 10px; min-height: 30px; cursor: pointer; white-space: nowrap; }
@@ -222,6 +228,23 @@ function panelHTML() {
     .st-candoverlay.open { transform: translateY(0); }
     .st-candoverlay .ov-actions { display: flex; gap: 8px; margin-top: 12px; }
     .st-candoverlay .ov-actions button { flex: 1; font-size: 12.5px; min-height: 44px; min-width: 0; }
+    /* LoRA inspector overlay (2026-11-16): the same bottom-sheet pattern
+       as the candidates overlay, taller — full filenames, full paths and
+       big weight sliders, for complicated setups. */
+    .st-loraoverlay { position: fixed; left: 0; right: 0; bottom: 0; z-index: 95; background: rgba(18,18,31,.97);
+      border-top: 1px solid #4a4a6c; padding: 14px 20px 18px; transform: translateY(105%); transition: transform .25s ease;
+      max-height: 75vh; overflow-y: auto; }
+    .st-loraoverlay.open { transform: translateY(0); }
+    .st-lovsec { font-size: 11px; letter-spacing: .1em; color: #8a8aaa; margin: 14px 0 2px; }
+    .st-lovrow { padding: 10px 0; border-bottom: 1px solid #1c1c30; }
+    .st-lovrow:last-child { border-bottom: 0; }
+    .st-lovrow .fn { font-size: 13px; color: #d8d8ee; overflow-wrap: anywhere; }
+    .st-lovrow .fp { font-size: 11px; color: #6c6c8e; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+    .st-lovrow .ctl { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+    .st-lovslider { flex: 1; min-width: 0; }
+    .st-lovrow .str { font-size: 12px; color: #b39ae0; background: #161628; border-radius: 4px; padding: 2px 8px; min-width: 52px; text-align: center; }
+    .st-lovrow button { background: none; border: 1px solid #4a4a6c; color: #8a8aaa; border-radius: 6px;
+      font-size: 12px; min-width: 38px; min-height: 34px; cursor: pointer; }
     .st-toast { position: fixed; top: 18px; left: 50%; transform: translate(-50%, -140%); z-index: 99;
       background: rgba(22,22,40,.95); border: 1px solid #b39ae0; border-radius: 10px; padding: 10px 18px;
       font-size: 13px; color: #d4d4e0; display: flex; align-items: center; gap: 10px;
@@ -336,7 +359,7 @@ function panelHTML() {
               <span class="st-rock-chevs" aria-hidden="true"><span>▲</span><span>▼</span></span>
               <span class="st-rock-hint">hold 1s, drag ↕</span>
             </div>
-            <label>LoRAs <span data-id="lcount"></span></label>
+            <div class="st-lorahead"><label>LoRAs <span data-id="lcount"></span></label><button data-id="lorapop" title="Open the LoRA inspector — full names, paths and big sliders">⤢ Inspect</button></div>
             <div class="st-loraui" data-id="loraui"></div>
             <label>Presets</label>
             <select data-id="preset-pick"><option value="">Presets…</option></select>
@@ -378,9 +401,9 @@ function panelHTML() {
               <div style="display:flex;align-items:end;flex-wrap:wrap;min-width:0"><label style="margin:0 0 8px"><input type="checkbox" data-id="mrandom" checked style="width:auto"> random</label></div>
             </div>
             <div class="st-row2" style="margin-top:14px">
-              <button class="primary" data-id="mrun">🎭 Run mask edit</button>
               <button data-id="madvance" disabled>⬇ Use as source</button>
             </div>
+            <span class="st-hintline">Run from the button below — on the Mask tab it runs the mask edit.</span>
             <span class="st-hintline">Use as source advances the viewed result to the working image, so the next mask edit starts from it. Never automatic — make as many attempts as you like first.</span>
             <span class="st-hintline" data-id="mstatus"></span>
           </div>
@@ -424,6 +447,14 @@ function panelHTML() {
         <button data-save="library" title="Save to Library">📚 Library</button>
       </div>
     </div>
+    <div class="st-loraoverlay" data-id="loraoverlay">
+      <div class="st-striphead">
+        <h2>LoRA inspector</h2>
+        <button class="ee-btn" data-id="loraclose">✕ Close</button>
+      </div>
+      <span class="st-hintline">Full names, full paths, big sliders — for complicated setups. These are the same pins as in the tray.</span>
+      <div data-id="loraovbody"></div>
+    </div>
     <div class="st-toast" data-id="toast"><span class="tick">✓</span><span data-id="toasttext"></span></div>
   </div>`;
 }
@@ -435,13 +466,14 @@ export function mountStudio(panel, jobbar) {
   const el = Object.fromEntries(['chip', 'chip-name', 'chip-chain', 'clear', 'fit', 'imm',
     'canvasarea', 'frame', 'badge', 'img-a', 'wrap-b', 'img-b', 'maskview', 'cmpbar', 'cmpdiv',
     'strip', 'cands', 'wf', 'segrow', 'seg-model', 'seg-model-lab', 'seg-edit', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
-    'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui',
+    'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui', 'lorapop',
     'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all',
     'mmodel', 'mprompt', 'mdenoise', 'mdenoise-val', 'mseed', 'mrandom',
     'mask', 'mask-paint', 'mask-erase', 'brush', 'mask-clear', 'mask-undo',
-    'mrun', 'madvance', 'mstatus',
+    'madvance', 'mstatus',
     'provtable', 'parentchain', 'runbtn', 'edgetab', 'genfab', 'fabring', 'fabinner',
-    'bottomhandle', 'candoverlay', 'ovcands', 'toast', 'toasttext'].map(k => [k, $(k)]));
+    'bottomhandle', 'candoverlay', 'ovcands', 'loraoverlay', 'loraovbody', 'loraclose',
+    'toast', 'toasttext'].map(k => [k, $(k)]));
 
   let verb = 'generate';
   let stack = null;            // update-stack state: original = working image at load
@@ -1400,40 +1432,73 @@ export function mountStudio(panel, jobbar) {
   const LORA_WF_FOLDER = { klein: '_Flux2Klein', krea2: '_Krea2', qwen21: '_Qwen21',
                            moss: 'moss', zengorestyle: '_Flux2Klein' };
   const loraUI = { q: '', auto: true, root: null, sub: null, openRoot: null,
-                   openActive: true, openPaused: false, expRow: null };
+                   openActive: true, openPaused: false, ovQ: '' };
   const loraRootOf = n => (/[\\/]/.test(n) ? n.replace(/\\/g, '/').split('/')[0] : '(root)');
   const loraSubOf = n => { const p = n.replace(/\\/g, '/').split('/'); return p.length > 2 ? p[1] : null; };
   const loraDefFolder = () => LORA_WF_FOLDER[el.wf.value] || null;
 
+  // LoRA row weight by hold-and-drag (2026-11-16, replaces the
+  // click-to-expand slider): press-and-hold ~300ms arms the row, then
+  // drag left/right to tune strength (120px = 1.0, range -1..2, step
+  // 0.05). A quick tap does nothing; a scroll starts moving before the
+  // hold completes, so it never arms — same hold-to-arm guard as the
+  // batch rocker. Works on active AND paused rows (suspended pins keep
+  // their strength); unpinned rows have nothing to tune.
+  const LORA_DRAG_PX_PER_UNIT = 120, LORA_HOLD_MS = 300, LORA_DRAG_CANCEL_PX = 8;
+  function wireLoraRowDrag(row, name) {
+    let armTimer = null, armed = false, startX = 0, startY = 0, startVal = 0;
+    const cur = () => pins.active.has(name) ? pins.active.get(name)
+      : pins.suspended.has(name) ? pins.suspended.get(name) : null;
+    const disarm = (commit) => {
+      if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+      if (armed) {
+        armed = false; row.classList.remove('armed');
+        if (commit) renderLoras();
+      }
+    };
+    row.addEventListener('pointerdown', e => {
+      if (e.target.closest('button')) return;  // suspend/unpin keep working
+      if (cur() === null) return;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      startX = e.clientX; startY = e.clientY; startVal = cur();
+      armTimer = setTimeout(() => {
+        armTimer = null; armed = true;
+        row.classList.add('armed');
+        try { row.setPointerCapture(e.pointerId); } catch (_) {}
+      }, LORA_HOLD_MS);
+    });
+    row.addEventListener('pointermove', e => {
+      if (armTimer && Math.hypot(e.clientX - startX, e.clientY - startY) > LORA_DRAG_CANCEL_PX) {
+        // Moved before the hold completed: a scroll or a flick, not an arm.
+        clearTimeout(armTimer); armTimer = null;
+      }
+      if (!armed) return;
+      const v = Math.min(2, Math.max(-1,
+        Math.round((startVal + (e.clientX - startX) / LORA_DRAG_PX_PER_UNIT) / 0.05) * 0.05));
+      pins.setStrength(name, v);
+      const tag = row.querySelector('.str');
+      if (tag) tag.textContent = '×' + v.toFixed(2);
+    });
+    row.addEventListener('pointerup', () => disarm(true));
+    row.addEventListener('pointercancel', () => disarm(false));
+  }
+
   function loraRow(name, st, parked, box) {
     const row = document.createElement('div');
     row.className = 'st-lrow' + (parked ? ' parked' : '');
-    // Expand affordance (studio wishlist §5): the name is the tap target
-    // for the strength slider — show it, or nobody finds the slider.
-    const chev = document.createElement('span');
-    chev.className = 'chev';
-    chev.textContent = loraUI.expRow === name ? '▾' : '▸';
-    chev.title = 'tap to tune strength';
-    chev.addEventListener('click', () => {
-      loraUI.expRow = loraUI.expRow === name ? null : name; renderLoras();
-    });
-    row.appendChild(chev);
+    // The name shows the beginning of the filename (ellipsis cuts the
+    // tail); the directory no longer takes up to 40% of the row — the
+    // full path stays in the title tooltip and the inspector.
     const rn = document.createElement('span');
     rn.className = 'rn';
     rn.textContent = name.split('/').pop().replace(/\.safetensors$/i, '');
     rn.title = name;
-    rn.addEventListener('click', () => {
-      loraUI.expRow = loraUI.expRow === name ? null : name; renderLoras();
-    });
     row.appendChild(rn);
-    const where = document.createElement('span');
-    where.className = 'where'; where.textContent = name.replace(/\\/g, '/').split('/').slice(0, -1).join('/');
-    row.appendChild(where);
-    if (!parked) {
-      const tag = document.createElement('span');
-      tag.className = 'str'; tag.textContent = '×' + st.toFixed(2);
-      row.appendChild(tag);
-    }
+    // The strength tag is the live readout for the hold-and-drag, on
+    // active AND paused rows (suspended pins keep their strength).
+    const tag = document.createElement('span');
+    tag.className = 'str'; tag.textContent = '×' + st.toFixed(2);
+    row.appendChild(tag);
     const tog = document.createElement('button');
     tog.textContent = parked ? '▶' : '⏸';
     tog.title = parked ? 'restore' : 'suspend';
@@ -1445,22 +1510,8 @@ export function mountStudio(panel, jobbar) {
     del.textContent = '✕'; del.title = 'unpin';
     del.addEventListener('click', () => { pins.remove(name); renderLoras(); });
     row.append(tog, del);
+    wireLoraRowDrag(row, name);
     box.appendChild(row);
-    if (loraUI.expRow === name && !parked) {
-      const sl = document.createElement('input');
-      sl.type = 'range'; sl.className = 'st-lslider'; sl.min = -1; sl.max = 2; sl.step = 0.05;
-      sl.value = st;
-      // Live-update the strength tag in place while dragging; a full
-      // re-render here would destroy the slider mid-drag (studio eval §1).
-      // The tray re-renders once on release ('change').
-      sl.addEventListener('input', () => {
-        pins.setStrength(name, +sl.value);
-        const tag = row.querySelector('.str');
-        if (tag) tag.textContent = '×' + (+sl.value).toFixed(2);
-      });
-      sl.addEventListener('change', () => renderLoras());
-      box.appendChild(sl);
-    }
   }
 
   function loraSection(label, dotColor, open, onToggle, fill) {
@@ -1496,6 +1547,12 @@ export function mountStudio(panel, jobbar) {
       w.textContent = `getting heavy: ${heavy} strong / total ×${total.toFixed(2)}`;
       el.loraui.appendChild(w);
     }
+
+    // Row weight is hold-and-drag: hold a row ~300ms, then drag ↔.
+    const hint = document.createElement('div');
+    hint.className = 'st-hintline';
+    hint.textContent = 'hold a row, drag ↔ to tune strength';
+    el.loraui.appendChild(hint);
 
     el.loraui.appendChild(loraSection(
       `ACTIVE (${act.length})`, '#7ee0a0', loraUI.openActive,
@@ -1596,22 +1653,16 @@ export function mountStudio(panel, jobbar) {
         const row = document.createElement('div');
         row.className = 'st-lrow';
         const pinnedA = pins.active.get(n), pinnedS = pins.suspended.has(n);
-        const chev = document.createElement('span');
-        chev.className = 'chev';
-        chev.textContent = loraUI.expRow === n ? '▾' : '▸';
-        chev.title = 'tap to tune strength';
-        chev.addEventListener('click', () => { loraUI.expRow = loraUI.expRow === n ? null : n; renderLoras(); });
-        row.appendChild(chev);
         const rn = document.createElement('span');
         rn.className = 'rn';
         rn.textContent = (pinnedA !== undefined ? '📌 ' : pinnedS ? '⏸ ' : '') +
           n.replace(/\\/g, '/').split('/').slice(1).join('/') || n;
         rn.title = n;
-        rn.addEventListener('click', () => { loraUI.expRow = loraUI.expRow === n ? null : n; renderLoras(); });
         row.appendChild(rn);
-        if (pinnedA !== undefined) {
+        if (pinnedA !== undefined || pinnedS) {
           const tag = document.createElement('span');
-          tag.className = 'str'; tag.textContent = '×' + pinnedA.toFixed(2);
+          tag.className = 'str';
+          tag.textContent = '×' + (pinnedA !== undefined ? pinnedA : pins.suspended.get(n)).toFixed(2);
           row.appendChild(tag);
         }
         const btn = document.createElement('button');
@@ -1624,28 +1675,8 @@ export function mountStudio(panel, jobbar) {
           renderLoras();
         });
         row.appendChild(btn);
+        wireLoraRowDrag(row, n);
         body.appendChild(row);
-        if (loraUI.expRow === n && pinnedA !== undefined) {
-          const sl = document.createElement('input');
-          sl.type = 'range'; sl.className = 'st-lslider'; sl.min = -1; sl.max = 2; sl.step = 0.05;
-          sl.value = pinnedA;
-          // As in loraRow: live-update in place while dragging; re-render
-          // once on release so the drag isn't destroyed mid-gesture.
-          sl.addEventListener('input', () => {
-            pins.setStrength(n, +sl.value);
-            const tag = row.querySelector('.str');
-            if (tag) tag.textContent = '×' + (+sl.value).toFixed(2);
-          });
-          sl.addEventListener('change', () => renderLoras());
-          body.appendChild(sl);
-        } else if (loraUI.expRow === n) {
-          // Expanded but not pinned: the tap did nothing visible before
-          // (studio wishlist §5) — say what the slider needs.
-          const hint = document.createElement('div');
-          hint.className = 'st-hintline'; hint.style.padding = '4px 12px 8px';
-          hint.textContent = pinnedS ? 'restore ▶ to tune strength' : 'pin ＋ to tune strength';
-          body.appendChild(hint);
-        }
       }
       if (list.length > 60) {
         const more = document.createElement('div');
@@ -1658,6 +1689,106 @@ export function mountStudio(panel, jobbar) {
       el.loraui.appendChild(sec);
     }
   }
+  // LoRA inspector overlay (2026-11-16): full filenames, full paths and
+  // big sliders, for complicated setups — the same bottom-sheet pattern
+  // as the candidates overlay. Same pins as the tray; the tray
+  // re-renders behind it on every change. Grouped by workflow folder
+  // (all roots, default folder first); search narrows the list.
+  function renderLoraOverlay() {
+    const body = el.loraovbody;
+    body.innerHTML = '';
+    const q = document.createElement('input');
+    q.className = 'st-lq'; q.placeholder = 'search loras…'; q.value = loraUI.ovQ;
+    q.setAttribute('inputmode', 'search');
+    q.setAttribute('autocomplete', 'off');
+    q.setAttribute('autocapitalize', 'off');
+    q.addEventListener('input', () => {
+      loraUI.ovQ = q.value;
+      const pos = q.selectionStart;
+      renderLoraOverlay();
+      // renderLoraOverlay rebuilds the overlay, including this input —
+      // restore focus and caret, or typing stops after one character.
+      const nq = el.loraovbody.querySelector('.st-lq');
+      if (nq) { nq.focus(); try { nq.setSelectionRange(pos, pos); } catch { /* ignore */ } }
+    });
+    body.appendChild(q);
+    const roots = [...new Set(allLoras.map(loraRootOf))];
+    const defF = loraDefFolder();
+    roots.sort((a, b) => (a === defF ? -1 : b === defF ? 1 : a.localeCompare(b)));
+    const query = (loraUI.ovQ || '').trim().toLowerCase();
+    for (const root of roots) {
+      const inF = allLoras.filter(n => loraRootOf(n) === root &&
+        (!query || n.toLowerCase().includes(query)));
+      if (!inF.length) continue;
+      const sec = document.createElement('div');
+      sec.className = 'st-lovsec';
+      sec.textContent = `${root} — ${inF.length} loras`;
+      body.appendChild(sec);
+      for (const n of inF.slice(0, 100)) {
+        const pinnedA = pins.active.has(n), pinnedS = pins.suspended.has(n);
+        const val = pinnedA ? pins.active.get(n) : pinnedS ? pins.suspended.get(n) : null;
+        const row = document.createElement('div');
+        row.className = 'st-lovrow';
+        const fn = document.createElement('div');
+        fn.className = 'fn';
+        fn.textContent = (pinnedA ? '📌 ' : pinnedS ? '⏸ ' : '') +
+          n.replace(/\\/g, '/').split('/').pop().replace(/\.safetensors$/i, '');
+        row.appendChild(fn);
+        const fp = document.createElement('div');
+        fp.className = 'fp'; fp.textContent = n;
+        row.appendChild(fp);
+        const ctl = document.createElement('div');
+        ctl.className = 'ctl';
+        if (val !== null) {
+          const sl = document.createElement('input');
+          sl.type = 'range'; sl.className = 'st-lovslider'; sl.min = -1; sl.max = 2; sl.step = 0.05;
+          sl.value = val;
+          sl.setAttribute('aria-label', `strength for ${fn.textContent}`);
+          const tag = document.createElement('span');
+          tag.className = 'str'; tag.textContent = '×' + val.toFixed(2);
+          // Live-update the value in place while dragging; re-render
+          // once on release so the drag isn't destroyed mid-gesture.
+          sl.addEventListener('input', () => {
+            pins.setStrength(n, +sl.value);
+            tag.textContent = '×' + (+sl.value).toFixed(2);
+          });
+          sl.addEventListener('change', () => { renderLoras(); renderLoraOverlay(); });
+          ctl.append(sl, tag);
+        }
+        const btn = document.createElement('button');
+        btn.textContent = pinnedA ? '⏸' : pinnedS ? '▶' : '＋';
+        btn.title = pinnedA ? 'suspend' : pinnedS ? 'restore' : 'pin at 1.0';
+        btn.addEventListener('click', () => {
+          if (pinnedA) pins.suspend(n);
+          else if (pinnedS) pins.restore(n);
+          else pins.pin(n, 1.0);
+          renderLoras(); renderLoraOverlay();
+        });
+        ctl.appendChild(btn);
+        if (val !== null) {
+          const del = document.createElement('button');
+          del.textContent = '✕'; del.title = 'unpin';
+          del.addEventListener('click', () => { pins.remove(n); renderLoras(); renderLoraOverlay(); });
+          ctl.appendChild(del);
+        }
+        row.appendChild(ctl);
+        body.appendChild(row);
+      }
+      if (inF.length > 100) {
+        const more = document.createElement('div');
+        more.className = 'st-hintline'; more.style.padding = '8px 0';
+        more.textContent = `+${inF.length - 100} more — use search`;
+        body.appendChild(more);
+      }
+    }
+    if (!body.querySelector('.st-lovrow')) {
+      const none = document.createElement('div');
+      none.className = 'st-hintline'; none.style.padding = '8px 0';
+      none.textContent = 'no LoRAs match';
+      body.appendChild(none);
+    }
+  }
+
   // workflow switch re-aims the default folder (auto mode follows)
   el.wf.addEventListener('change', () => {
     restoreFamilyState();             // per-family memory instead of hard reset
@@ -1879,7 +2010,7 @@ export function mountStudio(panel, jobbar) {
     const useRandom = el.mrandom.checked;
     const seed = useRandom ? null : (parseInt(el.mseed.value, 10) || 0);
     maskRunning = true;
-    el.mrun.disabled = true;
+    el.runbtn.disabled = true;
     busy = true;
     setFabProgress(0.05, '…');
     try {
@@ -1917,10 +2048,9 @@ export function mountStudio(panel, jobbar) {
       say('mask run failed: ' + err.message, true);
     }
     maskRunning = false; busy = false;
-    el.mrun.disabled = false;
+    el.runbtn.disabled = false;
     setFabProgress(0, null);
   }
-  el.mrun.addEventListener('click', runMask);
   el.madvance.addEventListener('click', () => promoteCandidate(previewed));
   async function pollJob(jobId) {
     const started = Date.now();
@@ -1999,7 +2129,7 @@ export function mountStudio(panel, jobbar) {
   function setImmersive(on) {
     root.classList.toggle('st-immersive', on);
     el.imm.textContent = on ? '⧉ Expanded' : '⛶ Fullscreen';
-    if (!on) el.candoverlay.classList.remove('open');
+    if (!on) { el.candoverlay.classList.remove('open'); el.loraoverlay.classList.remove('open'); }
     else fitFrame();
   }
   el.imm.addEventListener('click', () => setImmersive(!root.classList.contains('st-immersive')));
@@ -2008,10 +2138,20 @@ export function mountStudio(panel, jobbar) {
   el.candoverlay.addEventListener('click', e => {
     if (e.target === el.candoverlay) el.candoverlay.classList.remove('open');
   });
+  // LoRA inspector overlay: same bottom-sheet open/close as the
+  // candidates overlay (button, ✕, backdrop tap).
+  el.lorapop.addEventListener('click', () => { renderLoraOverlay(); el.loraoverlay.classList.add('open'); });
+  el.loraclose.addEventListener('click', () => el.loraoverlay.classList.remove('open'));
+  el.loraoverlay.addEventListener('click', e => {
+    if (e.target === el.loraoverlay) el.loraoverlay.classList.remove('open');
+  });
   el.genfab.addEventListener('click', () => {
     if (busy) return;
-    showVerb('generate');
-    generate();
+    // The fab runs the ACTIVE tab: Generate generates, Mask runs the
+    // mask edit, Provenance has nothing to run — go generate instead.
+    if (verb === 'mask') runMask();
+    else if (verb === 'generate') generate();
+    else { showVerb('generate'); generate(); }
   });
   let toastTimer;
   function showToast(msg) {

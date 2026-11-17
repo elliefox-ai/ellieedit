@@ -1346,11 +1346,22 @@ def test_stage4_mask_and_provenance_pins():
     assert "/api/update/jobs/" in studio
     assert "async function runMask" in studio
     assert "cands.startRun([cand])" in studio
-    mask_run = studio[studio.index("async function runMask"):studio.index("el.mrun.addEventListener")]
+    mask_run = studio[studio.index("async function runMask"):studio.index("el.madvance.addEventListener")]
     assert "cands.startRun" in mask_run and "previewed = cand" in mask_run
     assert "showCurrent" not in mask_run and "studioState().set" not in mask_run
     assert "pushRender" not in mask_run   # no auto-promote, no stack write
     assert "batch" not in mask_run        # single-shot: no batch loop
+    # Single run control (2026-11-16): the Mask panel's own run button
+    # is gone — the parent button already relabels per verb and routes
+    # to runMask on the Mask tab, and carries the disabled-during-run
+    # state now. The floating fab runs the active tab too.
+    assert 'data-id="mrun"' not in studio
+    assert "🎭 Run mask edit" in studio   # the parent button's mask label
+    assert "el.runbtn.disabled = true;" in mask_run
+    assert "el.runbtn.disabled = false;" in mask_run
+    assert "Run from the button below" in studio
+    assert "if (verb === 'mask') runMask();" in studio
+    assert "else if (verb === 'generate') generate();" in studio
     # model picker: schema-driven, edit-role models only, Klein 4B enabled
     assert "MASK_EDIT_WORKFLOWS" in studio
     assert "/api/foxden/workflows/schema" in studio
@@ -1393,6 +1404,54 @@ def test_stage4_mask_and_provenance_pins():
     assert "promoteCandidate(previewed)" in studio
     assert "setViewedAsBase(stack)" in studio
     assert "recipe: 'masked-inpaint'" in studio
+
+
+def test_stage4_lora_row_drag_and_inspector_pins():
+    """LoRA rework (2026-11-16): names show the filename's beginning
+    (directory span dropped from the row); weight is hold-and-drag on
+    the row itself — no click-to-expand slider anywhere; a LoRA
+    inspector overlay shows full names/paths and big sliders for
+    complex setups. Row drag is DOM/touch behavior: pinned by reading
+    here, not by a live browser."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    # Names: no directory span in the row; the name span keeps the full
+    # path in its title tooltip, ellipsis cuts the tail so the beginning
+    # of the filename shows.
+    assert "className = 'where'" not in studio
+    assert ".st-lrow .where" not in studio
+    assert "rn.title = name;" in studio
+    # Click-to-expand slider is gone entirely: no chevron, no expRow,
+    # no range slider in the tray (the inspector has its own sliders).
+    assert "expRow" not in studio
+    assert "st-lslider" not in studio
+    assert "className = 'chev'" not in studio
+    assert "pin ＋ to tune strength" not in studio
+    # Hold-and-drag: ~300ms hold arms the row (rocker-style .armed),
+    # then left/right drag tunes strength, 120px per 1.0, -1..2.
+    assert "function wireLoraRowDrag" in studio
+    assert "LORA_HOLD_MS = 300" in studio
+    assert "LORA_DRAG_PX_PER_UNIT = 120" in studio
+    assert "row.classList.add('armed')" in studio
+    assert "pins.setStrength(name, v);" in studio
+    assert "hold a row, drag ↔ to tune strength" in studio
+    # Scroll guard: the row lets the browser own vertical scrolling
+    # (touch-action pan-y) and a move before the hold completes cancels
+    # the arm; a quick tap does nothing.
+    assert "touch-action: pan-y" in studio
+    assert "LORA_DRAG_CANCEL_PX = 8" in studio
+    # Inspector overlay: button in the tray header, bottom-sheet overlay
+    # following the candidates-overlay pattern, full names/paths, big
+    # sliders, grouped by workflow folder, with search. In-panel
+    # controls stay as-is (the tray still renders).
+    assert 'data-id="lorapop"' in studio
+    assert 'data-id="loraoverlay"' in studio
+    assert 'data-id="loraovbody"' in studio
+    assert 'data-id="loraclose"' in studio
+    assert "function renderLoraOverlay" in studio
+    assert "st-lovslider" in studio
+    assert ".st-loraoverlay.open" in studio
+    assert "el.loraoverlay.classList.add('open')" in studio
+    assert "renderLoras(); renderLoraOverlay();" in studio
 
 
 def test_stage4_studio_activation_never_reloads_config():
