@@ -1255,6 +1255,33 @@ def test_stage4_bugfix_batch_pins():
     assert "if (selPath && c.path === selPath) d.classList.add('sel');" in studio
 
 
+def test_stage4_stale_source_pins():
+    """Stale-source fix (2026-11-16, Alexander's live report): sending a
+    new image to Studio showed it in the source slot but generated as if
+    from the previous source. Two holes, both closed: the ComfyUI upload
+    sent no overwrite flag (same basename, different paths → the first
+    file's bytes win, silently), and the prepared-input cache was keyed
+    on path alone (same path, overwritten file → the stale upload was
+    returned). The same-path openWorking guard now refreshes the entry's
+    bytes in place instead of returning early, and provenance/settings
+    emits skip openWorking (no path change)."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    # upload overwrites a colliding name on the Comfy box
+    assert "fd.append('overwrite', 'true')" in studio
+    # prepared-input cache keyed on path + store timestamp
+    assert "inputTs" in studio
+    assert "inputParent === st.path && inputTs === st.ts && inputName" in studio
+    assert "inputTs = st.ts;" in studio
+    assert "inputName = null; inputParent = null; inputDims = null; inputTs = null;" in studio
+    # same-path re-send refreshes the entry's bytes in place, history intact
+    assert "function fetchWorkingBlob" in studio
+    assert "stack.entries.find(en => en.path === path)" in studio
+    assert "existing.url = URL.createObjectURL(blob);" in studio
+    # provenance/settings emits carry no path change — skip openWorking
+    assert "d.reason === 'provenance'" in studio
+    assert "d.reason === 'settings'" in studio
+
+
 def test_stage4_batch_and_candidate_pins():
     """Stage 4: batch count = hold-to-arm rocker 1-4 default 1 (pure math
     module, pointer capture + touch-action none + aria slider); the rocker
