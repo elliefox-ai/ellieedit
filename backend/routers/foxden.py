@@ -51,8 +51,8 @@ WORKFLOW_FILES = {"klein": "klein_gen_basic.json",           # Klein 9B generate
 # them, and composes the concrete workflow id from the selection.
 WORKFLOW_FAMILIES = {
     "klein": {
-        "models": {"9b": {"gen": "klein", "edit": None},
-                   "4b": {"gen": "klein-4b", "edit": None}},   # klein-4b self-edits via denoise
+        "models": {"9b": {"gen": "klein", "edit": "klein"},
+                   "4b": {"gen": "klein-4b", "edit": "klein-4b"}},   # edit = same graph, denoise-gated
     },
     "moss": {
         "models": {"turbo": {"gen": "moss", "edit": "moss-edit"}},
