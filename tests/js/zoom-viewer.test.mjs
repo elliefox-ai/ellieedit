@@ -1,6 +1,7 @@
-// Viewer zoom gesture math (2026-10-29, viewers first).
+// Viewer zoom gesture math (2026-10-29, viewers first; swipe removed
+// 2026-11-16 — no drag ever changes images, so swipeDir is gone).
 import assert from 'node:assert/strict';
-import { dist, pinchScale, swipeDir, clampPan, wheelScale }
+import { dist, pinchScale, clampPan, wheelScale }
   from '../../frontend/js/modules/zoom-viewer.js';
 
 // Pinch: scale follows distance ratio, clamped to 1..4.
@@ -10,13 +11,11 @@ assert.equal(pinchScale(1, 100, 900), 4, 'clamped at max');
 assert.equal(pinchScale(1, 100, 10), 1, 'clamped at min');
 assert.equal(pinchScale(1.5, 0, 200), 1.5, 'zero start distance is a no-op');
 
-// Swipe: only at fit, horizontal, > 50px, dominant over vertical.
-assert.equal(swipeDir(-80, 10, 1), 1);
-assert.equal(swipeDir(80, 10, 1), -1);
-assert.equal(swipeDir(40, 0, 1), 0, 'below threshold');
-assert.equal(swipeDir(-80, 80, 1), 0, 'diagonal is not a swipe');
-assert.equal(swipeDir(-80, 10, 2), 0, 'zoomed: swipe disabled, drag pans');
-assert.equal(swipeDir(-80, 10, 1.5), 0, 'any zoom disables swipe');
+// No swipe: the swipe detector is gone entirely (2026-11-16). A drag
+// never changes images — cycling is tap/click on the nav zones or
+// buttons, or the keyboard arrows. Pinch math above is the only
+// two-finger rule left, and it runs wherever the fingers land
+// (viewer-root tracking, so a finger on a nav zone still pinches).
 
 // Pan clamp: at fit there is nowhere to pan; at 2x on a 400-wide
 // stage showing a 400-wide image, pan is limited to 200 each way.

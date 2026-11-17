@@ -1435,14 +1435,14 @@ export class Gallery {
       else if (e.key === 'ArrowRight') this.nav(1);
     };
     document.addEventListener('keydown', this.onKey);
-    // Zoom stage (2026-10-29): pinch to zoom, pan while zoomed,
-    // swipe only at fit. The old touchstart/touchend swipe code
-    // is gone — it could not tell a pinch from a swipe, which
-    // is exactly the bug this replaces.
+    // Zoom stage (2026-10-29, swipe removed 2026-11-16): pinch to zoom,
+    // pan while zoomed. No drag ever changes images — cycling is
+    // tap/click on the nav zones or buttons, or the keyboard arrows.
+    // A pinch finger may start on a nav zone; the binder tracks
+    // pointers at the viewer root so the pinch still forms.
     this.viewerZoom = bindViewerZoom({
       stage: this.el.viewer.querySelector('.stage'),
       img: this.el.viewerImg, viewer: this.el.viewer,
-      onSwipe: dir => this.nav(dir),
     });
   }
 }

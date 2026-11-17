@@ -3,7 +3,8 @@
 // Backend: /api/library/list|thumb|file|retag|pending-delete. Thumbnails
 // reuse the same fingerprinted-thumb pipeline as gallery/dupe.
 // Lightbox (2026-10-09e): thumbnails open the shared viewer experience —
-// full image, nav within the filtered listing, Esc/backdrop close, swipe.
+// full image, nav within the filtered listing, Esc/backdrop close,
+// tap/click nav zones or arrows to cycle (swipe removed 2026-11-16).
 // Viewer bar: 🏷 retag (moved here from the cell) · ✎ send-to-update ·
 // 🗑 delete (explicit confirm → /api/library/pending-delete: the file is
 // MOVED to the deletion queue's pending area, never unlinked). No
@@ -1297,14 +1298,12 @@ class LibraryView {
       else if (e.key === 'ArrowRight') this.nav(1);
     };
     document.addEventListener('keydown', this.onKey);
-    // Zoom stage (2026-10-29): same shared module as Gallery —
-    // pinch to zoom, pan while zoomed, swipe only at fit. The
-    // old touchstart/touchend swipe code is gone for the same
-    // reason: it could not tell a pinch from a swipe.
+    // Zoom stage (2026-10-29, swipe removed 2026-11-16): same shared
+    // module as Gallery — pinch to zoom, pan while zoomed. No drag
+    // ever changes images; cycling is tap/click or the arrows.
     this.viewerZoom = bindViewerZoom({
       stage: this.el.viewer.querySelector('.stage'),
       img: this.el.vImg, viewer: this.el.viewer,
-      onSwipe: dir => this.nav(dir),
     });
   }
 
