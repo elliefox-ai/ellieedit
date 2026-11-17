@@ -625,20 +625,39 @@ export function mountStudio(panel, jobbar) {
       if (en.url && en.url.startsWith('blob:')) URL.revokeObjectURL(en.url);
     }
   }
+  // Fetch a working image's bytes (foxden outputs live outside the
+  // gallery jail — fall back to the candidate's own view URL; strip
+  // thumbnails prove it serves fine).
+  async function fetchWorkingBlob(path) {
+    const r0 = await fetch(galleryFileUrl(path));
+    const r = r0.ok ? r0 : await (cands.find(path)
+      ? fetch(cands.find(path).url) : Promise.resolve(r0));
+    if (!r.ok) throw new Error(r.status);
+    return r.blob();
+  }
   // Load a working image as the stack original. Same-path guard: the
   // store event, send-to, and our own promote must not rebuild a stack
-  // that already contains this path (version history survives).
+  // that already contains this path (version history survives). But a
+  // re-send of the same path may mean the file was overwritten in place
+  // since the stack was built (stale-source bug 2026-11-16) — so a
+  // same-path set refreshes that entry's bytes in place instead of
+  // returning early: the canvas shows the current file, history intact.
+  // (The painted mask is kept: it belongs to the entry, and a same-path
+  // re-send is usually a re-select, not new bytes.)
   async function openWorking(path, name) {
     if (!path) return;
-    if (stack && stack.entries.some(en => en.path === path)) return;
+    const existing = stack && stack.entries.find(en => en.path === path);
+    if (existing) {
+      try {
+        const blob = await fetchWorkingBlob(path);
+        if (existing.url && existing.url.startsWith('blob:')) URL.revokeObjectURL(existing.url);
+        existing.url = URL.createObjectURL(blob);
+        showCurrent();
+      } catch { /* keep the old bytes on fetch failure */ }
+      return;
+    }
     try {
-      const r0 = await fetch(galleryFileUrl(path));
-      // foxden outputs live outside the gallery jail — fall back to the
-      // candidate's own view URL (strip thumbnails prove it serves fine)
-      const r = r0.ok ? r0 : await (cands.find(path)
-        ? fetch(cands.find(path).url) : Promise.resolve(r0));
-      if (!r.ok) throw new Error(r.status);
-      const blob = await r.blob();
+      const blob = await fetchWorkingBlob(path);
       const outEntry = { url: URL.createObjectURL(blob), name: name || path.split('/').pop(), path };
       // An input image makes the compare real (studio wishlist §2): when
       // the working image's provenance names one, seed the stack with it
@@ -692,6 +711,10 @@ export function mountStudio(panel, jobbar) {
       revokeStackUrls(prevStack);
       return;
     }
+    // Provenance/settings emits carry no path change — the working image
+    // is the same one openWorking already loaded; re-running it would
+    // re-fetch the bytes on every provenance refresh.
+    if (d.reason === 'provenance' || d.reason === 'provenance-failed' || d.reason === 'settings') return;
     openWorking(d.path, d.name);
     if (verb === 'provenance') renderProvenance();
   });
@@ -976,7 +999,7 @@ export function mountStudio(panel, jobbar) {
         // Save-over replaces the bytes at the original's path — if the
         // prepared img2img input was cached for that path, it is stale
         // (studio eval §9): drop it so the next run re-prepares.
-        if (d.overwritten === inputParent) { inputName = null; inputParent = null; inputDims = null; }
+        if (d.overwritten === inputParent) { inputName = null; inputParent = null; inputDims = null; inputTs = null; }
         showToast(`Saved over ${d.overwritten}`);
         say(`saved over ${d.overwritten} (${d.bytes} bytes)`);
       } else if (kind === 'new') {
@@ -1153,12 +1176,16 @@ export function mountStudio(panel, jobbar) {
   }
 
   // ── generate: batch N = N sequential runs, one candidate set ──
-  let inputName = null, inputParent = null, inputDims = null;
+  // Prepared-input cache (stale-source bug 2026-11-16): keyed on the
+  // working-image path AND the store timestamp. set() refreshes ts on
+  // every set — even the same path — so a re-send of an overwritten
+  // file re-prepares instead of returning the old upload.
+  let inputName = null, inputParent = null, inputDims = null, inputTs = null;
   async function prepareInput() {
     const st = studioState().get();
     const denoise = parseFloat(el.denoise.value) || 1;
-    if (!st.path) { inputName = null; inputParent = null; return null; }   // denoise gating lives in generate(); edit workflows always inject
-    if (inputParent === st.path && inputName) return inputName;   // cached per working image
+    if (!st.path) { inputName = null; inputParent = null; inputTs = null; return null; }   // denoise gating lives in generate(); edit workflows always inject
+    if (inputParent === st.path && inputTs === st.ts && inputName) return inputName;   // cached per working image
     say('preparing working image as img2img input…');
     const r0 = await fetch(galleryFileUrl(st.path));
     if (!r0.ok) throw new Error(`working image fetch failed: ${r0.status}`);
@@ -1166,9 +1193,16 @@ export function mountStudio(panel, jobbar) {
     const fname = st.name || st.path.split('/').pop();
     const fd = new FormData();
     fd.append('image', new File([blob], fname, { type: blob.type || 'image/png' }));
+    // ComfyUI /upload/image keeps the first file's bytes under a
+    // colliding name unless overwrite is sent (backend/comfy.py
+    // _comfy_upload passes overwrite=true for the same reason) — two
+    // different images sharing a basename would otherwise silently
+    // generate from the first one's bytes.
+    fd.append('overwrite', 'true');
     const j = await api('/upload', { method: 'POST', body: fd });
     inputName = j.subfolder ? `${j.subfolder}/${j.name}` : j.name;
     inputParent = st.path;   // provenance parent chain: generation links back
+    inputTs = st.ts;
     const probe = new Image();
     await new Promise(res => { probe.onload = res; probe.onerror = res; probe.src = galleryFileUrl(st.path); });
     inputDims = [probe.naturalWidth, probe.naturalHeight];
