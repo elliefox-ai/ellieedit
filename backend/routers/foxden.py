@@ -448,12 +448,19 @@ def reachable() -> bool:
 
 EDIT_WORKFLOWS = {"moss-edit"}   # always-feed graphs; klein-4b gates by denoise now
 
+def _workflow_is_edit(k: str) -> bool:
+    from ..workflow_schema import workflow_is_edit
+    return workflow_is_edit(k)
+
+
 @router.get("/config")
 def config():
     return {
         "workflows": [{"id": k, "file": v,
                        "available": (workflows_dir() / v).is_file(),
-                       "edit": workflow_schema.workflow_is_edit(k),
+                       # lazy: workflow_schema imports this module's registry maps (circular
+        # at module level) — same pattern as /workflows/schema below.
+        "edit": _workflow_is_edit(k),
                        "family": next((f for f, fd in WORKFLOW_FAMILIES.items()
                                        if any((WORKFLOW_FAMILY_ALIASES.get(k, k)) in mv.values()
                                               for mv in fd["models"].values())),
