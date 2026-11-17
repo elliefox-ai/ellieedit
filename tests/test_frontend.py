@@ -129,18 +129,19 @@ def test_js_deploy_gate_covers_filters():
 
 
 def test_kept_gens_share_the_layers_row():
-    """Task 10, revised 2026-10-16f: the tools drawer is ONE row now; the gen
-    strip still lives in it, right-aligned; data-id unchanged."""
+    """Task 10, revised 2026-11-16: the gen strip moved out of the tools
+    drawer row (it wrapped the row tall at 45% max-width) into the media
+    row — thumbs left, gens right, hiding with the media drawer; data-id
+    unchanged."""
     src = (HERE.parent / "frontend" / "js" / "modules" / "facecycle.js").read_text()
     html = src[src.index("function panelHTML"):src.index("export class FaceCycle")]
-    row_start = html.index('data-id="tools-drawer"')
-    row_end = html.index('data-id="repaint-drawer"')
-    row = html[row_start:row_end]
-    assert 'data-id="gen-strip"' in row, "gen strip must live inside the tools drawer row"
-    # 2026-10-21: the vestigial 'Edit layer' toggle is gone; the strip follows undo
-    assert row.index('data-act="undo"') < row.index('data-id="gen-strip"')
-    main = html[html.index('data-id="main-view"'):]
-    assert 'data-id="gen-strip"' not in main, "no gens bar below the canvas"
+    controls = html[html.index('data-id="tools-drawer"'):html.index('data-id="repaint-drawer"')]
+    assert 'data-id="gen-strip"' not in controls, "gen strip must leave the controls row"
+    media = html[html.index('data-id="thumbs-drawer"'):]
+    assert 'data-id="gen-strip"' in media, "gen strip must live in the media drawer"
+    assert media.index('data-id="thumbnail-strip"') < media.index('data-id="gen-strip"'), \
+        "thumbs left, gens right in the media row"
+    assert 'class="fc-mediarow"' in media
     assert html.count('data-id="gen-strip"') == 1
     assert "margin-left: auto" in html[html.index(".fc-gens {"):html.index(".fc-gens .label")]
 

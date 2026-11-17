@@ -29,7 +29,6 @@ function panelHTML() {
        Alexander prefers vertical space over a scrollbar. */
     .fc-row.oneline { flex-wrap: wrap; gap: 8px; }
     .fc-row.oneline > * { flex-shrink: 0; }
-    .fc-row.oneline > .fc-gens { flex-shrink: 1; min-width: 0; }
     .fc-header h1 { font-size: 17px; font-weight: 600; color: #e0e0f0; }
     .fc-header h1 .subtitle { color: #6c6c8e; font-weight: 400; font-size: 12px; margin-left: 8px; }
     label { font-size: 11px; color: #8a8aaa; display: flex; align-items: center; gap: 6px; }
@@ -76,9 +75,16 @@ function panelHTML() {
       display: flex; gap: 6px; padding: 8px 10px; background: #161628; border-radius: 8px;
       overflow-x: auto; border: 1px solid #2a2a44; transition: border-color .2s, background .2s;
     }
+    /* Gens live in the media row now (2026-11-16): the strip used to sit in
+       the controls row at 45% max-width and wrap it tall. Thumbs take the
+       left, gens the right (margin-left: auto on .fc-gens); the whole row
+       hides with the media drawer. */
+    .fc-mediarow { display: flex; align-items: center; gap: 10px; }
+    .fc-mediarow .fc-thumbs { flex: 1; min-width: 0; }
     .fc-thumbs.drag-over { border-color: #7a6aaa; background: rgba(90,74,138,0.08); }
-    /* Task 10: kept gens live IN the layers row (keep/discard/undo),
-       right-aligned — no extra bar, no canvas-height cost. */
+    /* Kept gens live in the media row (2026-11-16, was the layers row):
+       right-aligned, no extra bar, no canvas-height cost — and they hide
+       with the media drawer. */
     .fc-zoom { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:#9a9ab8; }
     .fc-zoom input[type=range] { width: 90px; }
     .fc-zoom .val { min-width: 34px; font-family: monospace; }
@@ -150,7 +156,6 @@ function panelHTML() {
         <input type="range" data-id="zoom-slider" min="25" max="300" step="5" value="100" aria-label="Zoom">
         <span class="val" data-id="zoom-val">Fit</span>
         <button class="ee-btn" data-act="zoom-fit">Fit</button></span>
-      <div class="fc-gens" data-id="gen-strip"></div>
     </div>
     </div>
   </div>
@@ -184,7 +189,10 @@ function panelHTML() {
     <div class="fc-canvas-wrap" data-id="canvas-container"></div>
     <button class="ee-btn fc-drawer-toggle" data-act="toggle-thumbs" aria-expanded="false" style="align-self:flex-start" title="Show/hide the media strip (drop images here too)">🎞 Media</button>
     <div class="fc-drawer" data-id="thumbs-drawer" hidden>
+    <div class="fc-mediarow">
     <div class="fc-thumbs" data-id="thumbnail-strip"></div>
+    <div class="fc-gens" data-id="gen-strip"></div>
+    </div>
     </div>
   </div>
   </div>`;
