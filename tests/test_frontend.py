@@ -768,15 +768,16 @@ def test_library_pending_sidebar_restore_no_grid_reload():
 
 
 def test_viewer_zoom_stage_gallery_and_library():
-    """2026-10-29 viewers-first zoom: Gallery + Library share
-    zoom-viewer.js (pinch, pan while zoomed, swipe only at fit).
-    The old touchstart/touchend swipe code — which could not tell
-    a pinch from a swipe — is gone from both viewers, and every
-    new image starts at fit."""
+    """2026-10-29 viewers-first zoom, swipe removed 2026-11-16: Gallery +
+    Library share zoom-viewer.js (pinch, pan while zoomed). No drag ever
+    changes images — cycling is tap/click on the nav zones or buttons,
+    or the keyboard arrows. The old touchstart/touchend swipe code is
+    gone from both viewers, and every new image starts at fit."""
     for mod in ("gallery", "library"):
         src = (HERE.parent / "frontend" / "js" / "modules" / f"{mod}.js").read_text()
         assert "from './zoom-viewer.js'" in src
         assert "bindViewerZoom({" in src
+        assert "onSwipe" not in src, "no swipe callback — drags never cycle"
         assert "viewerZoom?.reset()" in src
         assert 'data-act="viewer-zoom-in"' in src
         assert 'data-act="viewer-zoom-out"' in src
@@ -791,6 +792,21 @@ def test_viewer_zoom_stage_gallery_and_library():
         assert "addEventListener('touchend'" not in src, mod
         # Click-to-close is fit-only when zoomed.
         assert "classList.contains('zoomed')" in src
+    zoom = (HERE.parent / "frontend" / "js" / "modules" / "zoom-viewer.js").read_text()
+    # Swipe is gone from the shared module, not just unplugged: no
+    # swipeDir helper, no SWIPE_PX, no onSwipe option, no swipe state.
+    assert "swipeDir" not in zoom
+    assert "SWIPE_PX" not in zoom
+    assert "onSwipe" not in zoom
+    assert "let swipe" not in zoom
+    # Pointers are tracked at the viewer root so a pinch finger starting
+    # on a nav zone still joins the pinch; capture happens only once a
+    # gesture is a pinch or a pan, so taps still click.
+    assert "viewer.addEventListener('pointerdown'" in zoom
+    assert "viewer.addEventListener('pointermove'" in zoom
+    assert "viewer.addEventListener('pointerup'" in zoom
+    assert "stage.addEventListener('pointerdown'" not in zoom
+    assert "onStage" in zoom
 
 
 def test_update_zoom_stage():

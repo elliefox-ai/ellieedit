@@ -8,15 +8,21 @@
 //   - The transform applies ONLY to the image, never to the page
 //     or the viewer bar. The bar stays fixed and reachable.
 //   - Two fingers down = pinch/pan mode, always. Pinch distance
-//     scales the image; two-finger drag pans it. Swipe is
-//     suspended while two fingers are down, and a pinch never
-//     completes a swipe — the pending swipe is discarded.
-//   - One finger, at fit (scale 1): a horizontal drag > 50px
-//     with low vertical movement is a swipe, as before, but
-//     only for touch/pen pointers — mouse drags never swipe.
-//   - One finger, zoomed (scale > 1): drag pans the image.
-//     Swipe is disabled until the image returns to fit, so
-//     zoomed means "I am looking", not "I am leaving".
+//     scales the image; two-finger drag pans it. A pinch finger
+//     may start on a nav zone: pointers are tracked at the viewer
+//     root (stage + nav zones + bar), so the pinch forms wherever
+//     the fingers land. Before 2026-11-16 the binder listened on
+//     the stage only, so a pinch starting near the edge put one
+//     finger on a nav zone, the stage saw a single finger, and its
+//     horizontal travel read as a swipe on release — the image
+//     cycled instead of zooming.
+//   - NO SWIPE (2026-11-16): no drag ever changes images. Cycling
+//     is only by tap/click — the nav zones, the prev/next controls,
+//     or the keyboard arrows. One finger at fit: a drag does
+//     nothing; one finger zoomed: a drag pans the image.
+//   - Pointer capture happens only once a gesture is a pinch or a
+//     pan, and only for pointers that started on the stage — a tap
+//     never captures, so it still clicks its nav zone or button.
 //   - While zoomed, nav zones are hidden (viewer gets the
 //     .zoomed class; each viewer's CSS hides its navzones
 //     under it) and a click on the image does NOT close the
@@ -47,13 +53,11 @@
 //     the viewer is the app's, never the browser's. Taps
 //     still work; only gestures are blocked.
 //
-// Pure helpers (dist, pinchScale, swipeDir, clampPan,
-// wheelScale) are exported for node unit tests; the DOM
-// binding is bindViewerZoom.
+// Pure helpers (dist, pinchScale, clampPan, wheelScale) are
+// exported for node unit tests; the DOM binding is bindViewerZoom.
 
 export const ZOOM_MIN = 1;
 export const ZOOM_MAX = 4;
-export const SWIPE_PX = 50;
 
 export function dist(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -62,14 +66,6 @@ export function dist(a, b) {
 export function pinchScale(scale0, d0, d1) {
   if (!d0) return scale0;
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, scale0 * (d1 / d0)));
-}
-
-export function swipeDir(dx, dy, scale) {
-  if (scale !== 1) return 0;
-  if (Math.abs(dx) > SWIPE_PX && Math.abs(dx) > Math.abs(dy) * 1.5) {
-    return dx < 0 ? 1 : -1;
-  }
-  return 0;
 }
 
 export function clampPan(tx, ty, stageW, stageH, fitW, fitH, scale) {
@@ -85,11 +81,10 @@ export function wheelScale(scale, deltaY) {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, scale * Math.exp(-deltaY * 0.0015)));
 }
 
-export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
+export function bindViewerZoom({ stage, img, viewer }) {
   let scale = 1, tx = 0, ty = 0;
   const pointers = new Map();
   let pinch = null;   // { d0, mid0, scale0, tx0, ty0 }
-  let swipe = null;   // { x, y } — touch/pen only, at fit only
 
   function fitSize() {
     const r = stage.getBoundingClientRect();
@@ -118,7 +113,7 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
 
   function reset() {
     scale = 1; tx = 0; ty = 0;
-    pointers.clear(); pinch = null; swipe = null;
+    pointers.clear(); pinch = null;
     // A tap on the previous image must not pair with a tap on
     // the next one as a double-tap. (reset() is only called
     // after binding completes, so these are initialized.)
@@ -144,23 +139,32 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
   // Double-tap reset state (while zoomed only, see header).
   let lastTap = null, tapStart = null, suppressClickUntil = 0;
 
-  stage.addEventListener('pointerdown', e => {
+  // Pointer tracking lives on the VIEWER root, not the stage: the nav
+  // zones cover 30% of each side, and a pinch finger starting on one
+  // must still join the pinch (see header). Events bubble from every
+  // descendant, so no capture is needed while fingers stay inside the
+  // viewer. Capture happens only once a gesture is a pinch or a pan,
+  // and only for pointers that started on the stage — a tap never
+  // captures, so it still clicks its nav zone or button.
+  viewer.addEventListener('pointerdown', e => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY,
+      onStage: e.target === stage || stage.contains(e.target) });
     if (pointers.size === 2) {
-      // Pinch wins: discard any pending swipe, enter pinch mode.
-      swipe = null; tapStart = null;
+      // Pinch wins, wherever the fingers landed.
+      tapStart = null;
       const [a, b] = [...pointers.values()];
       pinch = { d0: dist(a, b), mid0: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
                 scale0: scale, tx0: tx, ty0: ty };
+      for (const [id, p] of pointers) {
+        if (p.onStage) { try { viewer.setPointerCapture(id); } catch (_) {} }
+      }
     } else if (pointers.size === 1 && e.pointerType !== 'mouse') {
-      swipe = { x: e.clientX, y: e.clientY };
       tapStart = { x: e.clientX, y: e.clientY };
     }
   });
 
-  stage.addEventListener('pointermove', e => {
+  viewer.addEventListener('pointermove', e => {
     const p = pointers.get(e.pointerId);
     if (!p) return;
     const dx = e.clientX - p.x, dy = e.clientY - p.y;
@@ -175,18 +179,21 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
       tx = pinch.tx0 + (m.x - pinch.mid0.x);
       ty = pinch.ty0 + (m.y - pinch.mid0.y);
       clamp(); apply();
-    } else if (pointers.size === 1 && scale > 1) {
+    } else if (pointers.size === 1 && scale > 1 && p.onStage) {
+      // First pan move: capture so the pan keeps tracking past the
+      // viewer's edge. A tap never moves, so it never captures; a
+      // drag starting on a bar button is a click attempt, not a pan.
+      try { viewer.setPointerCapture(e.pointerId); } catch (_) {}
       tx += dx; ty += dy; clamp(); apply();
     }
-    // At fit with one finger, no visual pan — the swipe is
-    // decided on pointerup, exactly as the old code did.
+    // At fit with one finger, a drag does nothing — no swipe, ever.
   });
 
   function onUp(e) {
     const wasPinch = pointers.size >= 2;
     pointers.delete(e.pointerId);
     if (wasPinch) {
-      pinch = null; swipe = null; tapStart = null;
+      pinch = null; tapStart = null;
       if (pointers.size < 2) {
         if (scale <= 1.05) { scale = 1; tx = 0; ty = 0; }
         else clamp();
@@ -203,7 +210,7 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
       const now = Date.now();
       if (lastTap && now - lastTap.t < 350 &&
           Math.hypot(tapStart.x - lastTap.x, tapStart.y - lastTap.y) < 25) {
-        lastTap = null; tapStart = null; swipe = null;
+        lastTap = null; tapStart = null;
         reset();
         // The click following this second tap would otherwise
         // close the viewer now that zoomed is gone — suppress it.
@@ -213,16 +220,13 @@ export function bindViewerZoom({ stage, img, viewer, onSwipe }) {
       lastTap = { t: now, x: tapStart.x, y: tapStart.y };
     }
     tapStart = null;
-    if (swipe && pointers.size === 0) {
-      const dir = swipeDir(e.clientX - swipe.x, e.clientY - swipe.y, scale);
-      swipe = null;
-      if (dir && onSwipe) onSwipe(dir);
-    }
+    // No swipe: a drag never changes images. Cycling is tap/click
+    // on the nav zones or buttons, or the keyboard arrows.
   }
-  stage.addEventListener('pointerup', onUp);
-  stage.addEventListener('pointercancel', e => {
+  viewer.addEventListener('pointerup', onUp);
+  viewer.addEventListener('pointercancel', e => {
     pointers.delete(e.pointerId);
-    pinch = null; swipe = null; tapStart = null;
+    pinch = null; tapStart = null;
     if (pointers.size === 0 && scale <= 1) { scale = 1; tx = 0; ty = 0; apply(); }
   });
 
