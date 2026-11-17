@@ -943,11 +943,11 @@ def test_klein4b_denoise_below_1_switches_to_i2i(env):
     assert out["140"]["inputs"]["denoise"] == 0.6
 
 
-def test_klein4b_nonsquare_size_is_rejected(env):
-    with pytest.raises(Exception) as e:
-        foxden.apply_edits(_klein4b_graph(), "a fox", 7,
-                           width=512, height=768, denoise=1.0)
-    assert "square" in str(e.value)
+def test_klein4b_nonsquare_size_writes_long_side(env):
+    # resize keeps the input's aspect ratio; the constant is the long-side bound
+    out = foxden.apply_edits(_klein4b_graph(), "a fox", 7,
+                             width=512, height=768, denoise=1.0)
+    assert out["138"]["inputs"]["value"] == 768
 
 
 def test_klein4b_registry_swap(env):

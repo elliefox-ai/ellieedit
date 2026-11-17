@@ -2039,6 +2039,10 @@ export function mountStudio(panel, jobbar) {
           label: `${modelLabel(fam)} ${modelLabel(model)}` });
       }
     }
+    // klein-4b self-edits via denoise (2026-11-17 swap) — its family entry has
+    // no edit role, so add it explicitly or the picker only offers moss.
+    if (!options.some(o => o.family === 'klein'))
+      options.unshift({ family: 'klein', model: '4b', edit: 'klein-4b', label: 'Klein 4B' });
     // Both sources failed: Klein 4B is the one mask path that exists.
     if (!options.length) options.push({ family: 'klein', model: '4b', edit: 'klein-4b', label: 'Klein 4B' });
     for (const o of options) {

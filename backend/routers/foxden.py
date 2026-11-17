@@ -407,10 +407,11 @@ def apply_edits(wf: dict, prompt: str, seed: int, width=None, height=None,
                 if n["class_type"] == "INTConstant" and k in srcs
                 and isinstance(n["inputs"].get("value"), int)]
         if len(ints) == 1:
-            if width != height:
-                raise HTTPException(400, "this workflow takes one square "
-                                         "size (width == height)")
-            wf[ints[0]]["inputs"]["value"] = snap16(width)
+            # One constant feeds both sides of the size chain; the resize node
+            # keeps the input's aspect ratio, so this is the long-side bound —
+            # the ratio comes from the input image in both t2i and i2i
+            # (operator rule 2026-11-17: never reject non-square).
+            wf[ints[0]]["inputs"]["value"] = snap16(max(width, height))
     # Baselines exported from the UI carry PreviewImage (temp outputs), which
     # ComfyUI purges and our status filter rightly ignores. Inject a real
     # SaveImage so renders persist as type=output (2026-10-14 inaugural).
