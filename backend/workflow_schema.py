@@ -59,6 +59,17 @@ def _family_of(wid: str) -> str:
     return wid
 
 
+def workflow_is_edit(wid: str) -> bool:
+    """Legacy EDIT_WORKFLOWS membership OR any family role maps to wid as
+    "edit" (denoise-gated klein: gen and edit share one workflow id, and
+    _model_and_role only reports the FIRST role)."""
+    return wid in EDIT_WORKFLOWS or any(
+        r == "edit"
+        for fd in WORKFLOW_FAMILIES.values()
+        for variants in fd["models"].values()
+        for r, cid in variants.items() if cid == wid)
+
+
 def _model_and_role(wid: str) -> tuple[str | None, str]:
     plain = WORKFLOW_FAMILY_ALIASES.get(wid, wid)
     for fam, fd in WORKFLOW_FAMILIES.items():
@@ -77,14 +88,7 @@ def build_manifest() -> dict:
             "family": _family_of(wid),
             "model": model,
             "role": role,                       # "gen" | "edit" | legacy roles
-            # requires input_image; _model_and_role returns the FIRST matching
-            # role, and denoise-gated klein maps to BOTH gen and edit — so
-            # scan all roles for this wid instead of trusting `role`.
-            "edit": wid in EDIT_WORKFLOWS or any(
-                r == "edit"
-                for fd in WORKFLOW_FAMILIES.values()
-                for variants in fd["models"].values()
-                for r, cid in variants.items() if cid == wid),
+            "edit": workflow_is_edit(wid),   # requires input_image
             "available": (workflows_dir() / fname).is_file(),
             "inputs": COMMON_INPUTS,
             "aliases": [k for k, v in WORKFLOW_FAMILY_ALIASES.items() if v == wid],

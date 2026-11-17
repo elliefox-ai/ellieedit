@@ -453,7 +453,7 @@ def config():
     return {
         "workflows": [{"id": k, "file": v,
                        "available": (workflows_dir() / v).is_file(),
-                       "edit": k in EDIT_WORKFLOWS,
+                       "edit": workflow_schema.workflow_is_edit(k),
                        "family": next((f for f, fd in WORKFLOW_FAMILIES.items()
                                        if any((WORKFLOW_FAMILY_ALIASES.get(k, k)) in mv.values()
                                               for mv in fd["models"].values())),
