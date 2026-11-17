@@ -77,7 +77,7 @@ def build_manifest() -> dict:
             "family": _family_of(wid),
             "model": model,
             "role": role,                       # "gen" | "edit" | legacy roles
-            "edit": wid in EDIT_WORKFLOWS,      # requires input_image
+            "edit": wid in EDIT_WORKFLOWS or role == "edit",  # requires input_image (denoise-gated klein: role=edit)
             "available": (workflows_dir() / fname).is_file(),
             "inputs": COMMON_INPUTS,
             "aliases": [k for k, v in WORKFLOW_FAMILY_ALIASES.items() if v == wid],
