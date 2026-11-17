@@ -154,6 +154,13 @@ function panelHTML() {
     .st-verbswitch button.on { background: #5b4a8a; color: #fff; }
     .st-railbody { flex: 1; overflow-y: auto; padding: 0 16px 16px; min-height: 0; }
     .st-verbpanel[hidden] { display: none; }
+    /* Range inputs fill the panel: the four sliders (Generate size /
+    denoise, Mask brush / denoise) sat at the browser's intrinsic ~130px
+    in a ~298px panel with nothing beside them. Labels are already
+    display: block, so this resolves cleanly, including the label-wrapped
+    Brush / Mask-denoise inputs. (LoRA inspector sliders live outside
+    the verb panels and are untouched.) */
+    .st-verbpanel input[type=range] { width: 100%; box-sizing: border-box; }
     .st-railactions { flex: 0 0 auto; padding: 12px 16px; border-top: 1px solid #2a2a44; background: #161628; }
     .st-railactions .row { display: flex; gap: 8px; }
     .st-railactions .row + .row { margin-top: 8px; }
@@ -388,6 +395,7 @@ function panelHTML() {
               <div class="st-row2">
                 <button data-id="mask-clear">Clear</button>
                 <button data-id="mask-undo" disabled>↩ Undo</button>
+                <button data-id="mask-hide" aria-pressed="false">👁 Hide mask</button>
               </div>
               <span class="st-hintline">White = regenerate; everything else stays pixel-exact.</span>
             </div>
@@ -469,7 +477,7 @@ export function mountStudio(panel, jobbar) {
     'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui', 'lorapop',
     'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all',
     'mmodel', 'mprompt', 'mdenoise', 'mdenoise-val', 'mseed', 'mrandom',
-    'mask', 'mask-paint', 'mask-erase', 'brush', 'mask-clear', 'mask-undo',
+    'mask', 'mask-paint', 'mask-erase', 'brush', 'mask-clear', 'mask-undo', 'mask-hide',
     'madvance', 'mstatus',
     'provtable', 'parentchain', 'runbtn', 'edgetab', 'genfab', 'fabring', 'fabinner',
     'bottomhandle', 'candoverlay', 'ovcands', 'loraoverlay', 'loraovbody', 'loraclose',
@@ -490,6 +498,10 @@ export function mountStudio(panel, jobbar) {
   let previewUrl = null;       // candidate preview URL shown on the canvas
   let previewed = null;        // candidate currently viewed (⬇ promotes it)
   let maskCanvas = null, maskMode = 'paint', maskPainted = false, maskUndoStack = [], maskWhiteCount = 0;
+  // Hide-mask toggle state: session-persistent — never reset on verb
+  // switch or source change (a fresh mask is all black, i.e. invisible
+  // anyway, so keeping the state is harmless).
+  let maskHidden = false;
   let _maskLastPt = null;
 
   const say = (msg, isErr) => { if (jobbar) jobbar.innerHTML = `<span class="badge${isErr ? ' err' : ''}">${esc(msg)}</span>`; };
@@ -785,10 +797,11 @@ export function mountStudio(panel, jobbar) {
 
   // ── mask painting (masked-inpaint recipe) ──
   let masking = false;
-  // The mask is paintable only while the Mask verb is active and a mask
-  // canvas exists for the current source.
+  // The mask is paintable only while the Mask verb is active, a mask
+  // canvas exists for the current source, and the overlay is not hidden
+  // (can't paint what you can't see).
   function maskVisible() {
-    return verb === 'mask' && !!maskCanvas;
+    return verb === 'mask' && !!maskCanvas && !maskHidden;
   }
   // Visible overlay: the mask itself is an offscreen canvas, so without
   // this the user would paint blind. Red tint, alpha = mask brightness,
@@ -798,7 +811,7 @@ export function mountStudio(panel, jobbar) {
   function drawMaskView() {
     const mv = el.maskview;
     if (!mv) return;
-    const show = verb === 'mask' && !!maskCanvas && !!stack;
+    const show = verb === 'mask' && !!maskCanvas && !!stack && !maskHidden;
     mv.hidden = !show;
     if (!show) return;
     const OW = 320, OH = Math.max(1, Math.round(320 * maskCanvas.height / maskCanvas.width));
@@ -892,6 +905,17 @@ export function mountStudio(panel, jobbar) {
   }
   el['mask-paint'].addEventListener('click', () => { maskMode = 'paint'; });
   el['mask-erase'].addEventListener('click', () => { maskMode = 'erase'; });
+  // Hide-mask toggle: hides only the overlay canvas — the mask data is
+  // never cleared. Paint/Erase are disabled while hidden (clear
+  // feedback); maskVisible() blocks strokes too.
+  function syncMaskHide() {
+    el['mask-hide'].textContent = maskHidden ? '👁 Show mask' : '👁 Hide mask';
+    el['mask-hide'].setAttribute('aria-pressed', String(maskHidden));
+    el['mask-paint'].disabled = maskHidden;
+    el['mask-erase'].disabled = maskHidden;
+    drawMaskView();
+  }
+  el['mask-hide'].addEventListener('click', () => { maskHidden = !maskHidden; syncMaskHide(); });
   el['mask-clear'].addEventListener('click', () => {
     if (!maskCanvas) return;
     pushMaskUndo();
