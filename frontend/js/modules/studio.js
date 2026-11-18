@@ -89,6 +89,9 @@ function panelHTML() {
     .st-striphead h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8a8aaa; margin: 0; }
     .st-striphead .note { font-size: 11px; color: #6c6c8e; }
     .st-striphead .note em { color: #b39ae0; font-style: normal; }
+    /* Save-all candidates (2026-11-18): on-demand, same endpoint as the
+       checkbox flow; right-aligned in the striphead. */
+    .st-striphead .st-saveall { margin-left: auto; min-height: 44px; font-size: 12px; }
     .st-loraui { display: flex; flex-direction: column; gap: 8px; }
     .st-lsec { border: 1px solid #2a2a44; border-radius: 8px; background: #12121f; overflow: hidden; }
     .st-lsec-h { display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer;
@@ -146,10 +149,15 @@ function panelHTML() {
     .st-cand.sel .pick { opacity: 1; }
     .st-cand.empty { display: grid; place-items: center; height: 86px; color: #6c6c8e; font-size: 11px;
       border: 2px dashed #2a2a44; background: transparent; cursor: default; }
-    .st-src{position:relative;flex:0 0 auto;margin-left:auto;display:grid;place-items:center;min-height:88px;min-width:88px;border:1px dashed #4a4a6c;border-radius:8px;color:#8a8aaa;font-size:12px;cursor:pointer;overflow:hidden}
+    .st-src{position:relative;flex:0 0 auto;display:grid;place-items:center;min-height:88px;min-width:88px;border:1px dashed #4a4a6c;border-radius:8px;color:#8a8aaa;font-size:12px;cursor:pointer;overflow:hidden}
     .st-src.has{border-style:solid}
     .st-src.has img{width:88px;height:88px;object-fit:cover;display:block}
-    .st-src-dn,.st-src-up{position:absolute;top:2px;left:2px;width:44px;height:44px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:16px;color:#b39ae0}
+    /* Source group (2026-11-18): pinned to the row's right edge; the
+       promote control is a full-height button LEFT of the thumbnail —
+       the overlaid 44px circle was too small to target. */
+    .st-srcgroup{display:flex;gap:8px;align-items:stretch;margin-left:auto}
+    .st-src-promote{min-width:60px;font-size:22px;background:#161628;border:1px solid #4a4a6c;border-radius:8px;color:#b39ae0}
+    .st-src-up{position:absolute;top:2px;left:2px;width:44px;height:44px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:16px;color:#b39ae0}
     .st-src-x{position:absolute;top:2px;right:2px;width:44px;height:44px;display:grid;place-items:center;background:#161628cc;border-radius:50%;font-size:14px;color:#fff}
     /* ---- right rail ---- */
     .st-rail { flex: 0 0 330px; min-width: 0; overflow: hidden; background: #12121f; border-left: 1px solid #2a2a44; display: flex; flex-direction: column; min-height: 0; }
@@ -233,6 +241,20 @@ function panelHTML() {
       color: #8a8aaa; font-size: 11px; padding: 6px 26px 8px; min-height: 44px; letter-spacing: .08em; }
     .st-root.st-immersive .st-bottomhandle { display: block; }
     .st-bottomhandle .grip { display: block; width: 44px; height: 4px; border-radius: 2px; background: #4a4a6c; margin: 0 auto 5px; }
+    /* Immersive prompt drawer (2026-11-18): the rail — and its prompt
+       fields — is hidden in fullscreen, so the prompt lives in a
+       bottom-left pop-out. Toggle and drawer exist only in immersive. */
+    .st-promptfab { position: fixed; left: calc(24px + env(safe-area-inset-left, 0px)); bottom: calc(24px + env(safe-area-inset-bottom, 0px)); z-index: 96; display: none;
+      background: rgba(22,22,40,.9); border: 1px solid #4a4a6c; border-radius: 12px; color: #b39ae0;
+      font-size: 12.5px; padding: 10px 16px; min-height: 44px; box-shadow: 0 6px 24px rgba(0,0,0,.6); }
+    .st-root.st-immersive .st-promptfab { display: block; }
+    .st-promptdrawer { position: fixed; left: calc(12px + env(safe-area-inset-left, 0px)); bottom: calc(84px + env(safe-area-inset-bottom, 0px)); z-index: 95; width: min(320px, calc(100vw - 24px));
+      max-height: 50vh; display: none; flex-direction: column; gap: 8px; background: rgba(18,18,31,.97);
+      border: 1px solid #4a4a6c; border-radius: 10px; padding: 12px; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
+    .st-root.st-immersive .st-promptdrawer.open { display: flex; }
+    .st-promptdrawer textarea { width: 100%; box-sizing: border-box; min-height: 90px; resize: vertical; }
+    .st-promptdrawer .st-pd-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: #8a8aaa; }
+    .st-promptdrawer .st-pd-head button { min-height: 44px; min-width: 44px; }
     .st-candoverlay { position: fixed; left: 0; right: 0; bottom: 0; z-index: 95; background: rgba(18,18,31,.97);
       border-top: 1px solid #4a4a6c; padding: 14px 20px 18px; transform: translateY(105%); transition: transform .25s ease;
       max-height: 45vh; overflow-y: auto; }
@@ -272,6 +294,10 @@ function panelHTML() {
       .st-verbswitch { position: sticky; top: 0; z-index: 5; margin: 0; border-radius: 0;
         border-left: 0; border-right: 0; background: #12121f; }
       .st-root button { min-height: 44px; }
+      /* Generate reachable on mobile (2026-11-18): the rail's run button
+         sits below the canvas in a scrollable rail, so the floating
+         button shows in normal mode too — not just immersive. */
+      .st-genfab { display: grid; }
       .st-cand { flex-basis: 110px; }
       .st-cand img { height: 72px; }
       .st-provchip { max-width: 34vw; }
@@ -311,6 +337,7 @@ function panelHTML() {
           <div class="st-striphead">
             <h2>Candidates</h2>
             <span class="note">nothing auto-saves — <em>next run overwrites unretrieved candidates</em></span>
+            <button data-id="saveall" class="st-saveall" title="Save all candidates to the gallery">⬇ Save all</button>
           </div>
           <div class="st-cands" data-id="cands" aria-label="Candidate outputs of this generation run"></div>
         </div>
@@ -445,6 +472,11 @@ function panelHTML() {
     <button class="st-genfab" data-id="genfab" aria-label="Generate">
       <span class="ring" data-id="fabring"></span><span class="inner" data-id="fabinner">⚡<br>Gen</span>
     </button>
+    <button class="st-promptfab" data-id="promptfab" title="Edit the prompt in fullscreen">✎ Prompt</button>
+    <div class="st-promptdrawer" data-id="promptdrawer">
+      <div class="st-pd-head"><span>Prompt</span><button data-id="promptdrawer-close" title="Close prompt drawer">✕</button></div>
+      <textarea data-id="promptdrawer-text" rows="4" placeholder="describe the image…"></textarea>
+    </div>
     <button class="st-bottomhandle" data-id="bottomhandle"><span class="grip"></span>CANDIDATES ▴</button>
     <div class="st-candoverlay" data-id="candoverlay">
       <div class="st-striphead">
@@ -478,12 +510,13 @@ export function mountStudio(panel, jobbar) {
     'canvasarea', 'frame', 'img-a', 'wrap-b', 'img-b', 'maskview', 'cmpbar', 'cmpdiv',
     'strip', 'cands', 'wf', 'segrow', 'seg-model', 'seg-model-lab', 'seg-edit', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
     'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui', 'lorapop',
-    'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all',
+    'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all', 'saveall',
     'mmodel', 'mprompt', 'mdenoise', 'mdenoise-val', 'mseed', 'mrandom',
     'mask', 'mask-paint', 'mask-erase', 'brush', 'mask-clear', 'mask-undo', 'mask-hide',
     'madvance', 'mstatus',
     'provtable', 'parentchain', 'runbtn', 'edgetab', 'genfab', 'fabring', 'fabinner',
     'bottomhandle', 'candoverlay', 'ovcands', 'loraoverlay', 'loraovbody', 'loraclose',
+    'promptfab', 'promptdrawer', 'promptdrawer-text', 'promptdrawer-close',
     'toast', 'toasttext'].map(k => [k, $(k)]));
 
   let verb = 'generate';
@@ -1208,7 +1241,7 @@ export function mountStudio(panel, jobbar) {
         d.addEventListener('click', () => {
           // Viewing ONLY (§7.2/§10 review 12:23): a candidate tap previews it
           // on the canvas; becoming the working image is the explicit
-          // down-arrow on the source slot.
+          // down-arrow beside the source slot.
           previewed = c;
           previewUrl = c.url;
           // The preview always lands, comparer or not: compare yields so the
@@ -1217,10 +1250,18 @@ export function mountStudio(panel, jobbar) {
           // ring is re-applied by renderCandidates() from previewed.
           compareOn = false; cmpPct = 100;
           el['img-a'].src = previewUrl;
+          // Cleared canvas (2026-11-18): after ✕ the frame is hidden, so a
+          // tap would set the src but fitFrame would early-return — unhide
+          // here so the preview lands. Preview only: becoming the working
+          // image is still the explicit ⬇ beside the source slot.
+          if (el.frame.hidden) {
+            el.frame.hidden = false;
+            el.canvasarea.classList.add('has-image');
+          }
           el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
           syncComparer();
           renderCandidates();
-          say(`viewing ${c.path.split('/').pop()} — tap ⬇ on source to use it`);
+          say(`viewing ${c.path.split('/').pop()} — tap ⬇ beside the source to use it`);
         });
         target.appendChild(d);
       });
@@ -1230,24 +1271,29 @@ export function mountStudio(panel, jobbar) {
         d.textContent = `slot ${i + 1}`;
         target.appendChild(d);
       }
-      // source slot: pinned to the row's right edge, visually separate
-      // from candidates (§10 review 12:23). Down-arrow promotes the canvas
-      // image; ✕ clears; upload when empty.
+      // Source group: pinned to the row's right edge, visually separate
+      // from candidates (§10 review 12:23). The promote control is a
+      // full-height button LEFT of the thumbnail (2026-11-18) — the
+      // overlaid 44px circle was too small to target. ✕ clears; upload
+      // when empty.
       const st = studioState().get();
+      const group = document.createElement('span');
+      group.className = 'st-srcgroup';
       const src = document.createElement('span');
       src.className = 'st-src' + (st.path ? ' has' : '');
       // Promote is offered only when the viewed candidate has a server
       // path — a mask run whose render failed to store still previews (its
       // image is a data URL) but cannot become the working image.
       if (previewed && previewed.path) {
-        const dn = document.createElement('span');
-        dn.className = 'st-src-dn'; dn.textContent = '⬇';
+        const dn = document.createElement('button');
+        dn.className = 'st-src-promote'; dn.textContent = '⬇';
         dn.title = `Use viewed image (${previewed.path.split('/').pop()}) as source`;
+        dn.setAttribute('aria-label', 'Use viewed image as source');
         dn.addEventListener('click', (e) => {
           e.stopPropagation();
           promoteCandidate(previewed);
         });
-        src.appendChild(dn);
+        group.appendChild(dn);
       }
       if (st.path) {
         const im = document.createElement('img');
@@ -1267,9 +1313,12 @@ export function mountStudio(panel, jobbar) {
         up.addEventListener('click', (e) => { e.stopPropagation(); pickSource(); });
         src.appendChild(up);
       }
-      target.appendChild(src);
+      group.appendChild(src);
+      target.appendChild(group);
     }
     el.strip.classList.toggle('st-running', busy);
+    // Save-all button: disabled while no candidate has a server path.
+    el.saveall.disabled = !list.some(c => c.path);
     syncAdvance();
   }
 
@@ -1377,7 +1426,7 @@ export function mountStudio(panel, jobbar) {
       // image only on explicit candidate selection — otherwise edit chains
       // silently drift off the user's chosen source image.
       if (el['save-all'].checked && collected.length) await saveAllOutputs(collected.map(c => c.path));
-      flashOverlayInImmersive();
+      openOverlayInImmersive();
       say(`done — ${collected.length} candidate${collected.length === 1 ? '' : 's'}`);
     } catch (err) {
       say(`generate failed: ${err.message}`, true);
@@ -1423,6 +1472,16 @@ export function mountStudio(panel, jobbar) {
       say(`saved ${j.saved.length} output${j.saved.length === 1 ? '' : 's'} to gallery`);
     } catch (e) { say(`save all failed: ${e.message}`, true); }
   }
+
+  // Save-all candidates button (2026-11-18): same endpoint/toast as the
+  // checkbox flow, but on demand for the current strip. Wired once at
+  // mount — the striphead is static markup. Disabled while no candidate
+  // has a server path; renderCandidates() refreshes that state.
+  el.saveall.addEventListener('click', async () => {
+    const paths = cands.get().filter(c => c.path).map(c => c.path);
+    if (!paths.length) return;
+    await saveAllOutputs(paths);
+  });
 
   // ── batch rocker (usability pass 2026-11-15, replaces the drag pips):
   // hold ~1s to arm, then drag vertically — up adds, down subtracts, 1..4.
@@ -2181,7 +2240,7 @@ export function mountStudio(panel, jobbar) {
       el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
       syncComparer();
       showToast(`Mask edit complete — seed ${data.seed}`);
-      flashOverlayInImmersive();
+      openOverlayInImmersive();
       say(`mask edit done (seed ${data.seed}) — Use as source to advance it to the working image`);
     } catch (err) {
       say('mask run failed: ' + err.message, true);
@@ -2268,7 +2327,7 @@ export function mountStudio(panel, jobbar) {
   function setImmersive(on) {
     root.classList.toggle('st-immersive', on);
     el.imm.textContent = on ? '⧉ Expanded' : '⛶ Fullscreen';
-    if (!on) { el.candoverlay.classList.remove('open'); el.loraoverlay.classList.remove('open'); }
+    if (!on) { el.candoverlay.classList.remove('open'); el.loraoverlay.classList.remove('open'); el.promptdrawer.classList.remove('open'); }
     else fitFrame();
   }
   el.imm.addEventListener('click', () => setImmersive(!root.classList.contains('st-immersive')));
@@ -2292,6 +2351,23 @@ export function mountStudio(panel, jobbar) {
     else if (verb === 'generate') generate();
     else { showVerb('generate'); generate(); }
   });
+  // Immersive prompt drawer (2026-11-18): the rail (and its prompt
+  // fields) is hidden in fullscreen, so a bottom-left pop-out mirrors
+  // the ACTIVE verb's prompt — Generate → prompt, Mask → mprompt,
+  // Provenance falls back to the Generate prompt. Two-way sync: opening
+  // fills from the field, typing in the drawer writes back, and typing
+  // in the main field while the drawer is open updates the drawer.
+  const activePromptEl = () => (verb === 'mask' ? el.mprompt : el.prompt);
+  const syncDrawerFromField = () => { el['promptdrawer-text'].value = activePromptEl().value; };
+  const openPromptDrawer = () => { syncDrawerFromField(); el.promptdrawer.classList.add('open'); };
+  const closePromptDrawer = () => el.promptdrawer.classList.remove('open');
+  el.promptfab.addEventListener('click', () => {
+    el.promptdrawer.classList.contains('open') ? closePromptDrawer() : openPromptDrawer();
+  });
+  el['promptdrawer-close'].addEventListener('click', closePromptDrawer);
+  el['promptdrawer-text'].addEventListener('input', () => { activePromptEl().value = el['promptdrawer-text'].value; });
+  el.prompt.addEventListener('input', () => { if (el.promptdrawer.classList.contains('open') && verb !== 'mask') syncDrawerFromField(); });
+  el.mprompt.addEventListener('input', () => { if (el.promptdrawer.classList.contains('open') && verb === 'mask') syncDrawerFromField(); });
   let toastTimer;
   function showToast(msg) {
     el.toasttext.textContent = msg;
@@ -2299,10 +2375,12 @@ export function mountStudio(panel, jobbar) {
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => el.toast.classList.remove('show'), 2600);
   }
-  function flashOverlayInImmersive() {
+  // Candidates overlay stays open (2026-11-18): it used to auto-close
+  // after 3.5s; now it opens on run completion in immersive mode and
+  // stays until the user closes it (handle, backdrop tap, or exit).
+  function openOverlayInImmersive() {
     if (!root.classList.contains('st-immersive')) return;
     el.candoverlay.classList.add('open');
-    setTimeout(() => el.candoverlay.classList.remove('open'), 3500);
   }
   function setFabProgress(frac, label) {
     el.fabring.style.setProperty('--p', frac > 0 ? `${Math.round(frac * 100)}%` : '0%');
