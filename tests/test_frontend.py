@@ -1321,6 +1321,46 @@ def test_stage4_wide_sliders_hide_mask_pins():
     assert "el['mask-erase'].disabled = maskHidden;" in studio
 
 
+def test_stage4_canvas_aspect_compare_pins():
+    """Canvas aspect + compare (2026-11-17, Alexander's live report):
+    selecting a landscape working image after a portrait one kept the
+    portrait-tall frame (showCurrent fitted synchronously on the
+    not-yet-loaded image) and the same image rendered twice at idx 0;
+    and the Before/Split/Result bar was unreachable — display: none
+    unless .comparing was on, which needed compareOn, which only a
+    click on the hidden bar could set."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    show = studio.split("function showCurrent()")[1].split("function syncComparer()")[0]
+    # A: showCurrent fits AFTER load, mirroring the candidate-tap /
+    # run-completion pattern; the complete guard covers the same-URL
+    # re-select, whose dims are already correct. No synchronous fit on
+    # the not-yet-loaded image.
+    assert "el['img-a'].addEventListener('load', () => fitFrame(), { once: true });" in show
+    assert "if (el['img-a'].complete) fitFrame();" in show
+    assert "syncComparer(); fitFrame(); updateSaveButtons();" not in show
+    # B+C: the bar is visible whenever there is something to compare —
+    # a render in the stack, or a candidate preview against the source
+    # (a preview with no working image has no source, so that term
+    # needs a stack too)
+    assert "el.cmpbar.style.display = ((s && s.idx > 0) || (previewUrl && s)) ? 'flex' : 'none';" in studio
+    # compare engages in preview mode too (not just idx > 0), so the
+    # bar is not just visible but functional on a single-entry stack;
+    # the divider drag is waived the same way
+    assert "const compare = !!(compareOn && (previewUrl || (s && s.idx > 0)));" in studio
+    assert "if (!compareOn || (!previewUrl && (!stack || stack.idx <= 0))) return;" in studio
+    # .comparing still gates the divider and the clip; the now-redundant
+    # CSS rule is left alone
+    assert "el.frame.classList.toggle('comparing', compare);" in studio
+    assert ".st-frame.comparing .st-cmpbar { display: flex; }" in studio
+    # C: Before is preview-aware — in preview mode img-a is the
+    # candidate and img-b the source, so Before needs img-b fully
+    # visible (cmpPct 100), not clipped away (0)
+    assert "cmpPct = b.dataset.c === 'before' ? (previewUrl ? 100 : 0) : 50;" in studio
+    assert "(previewUrl ? cmpPct >= 100 : cmpPct <= 0)" in studio
+    # Split highlight already excludes the preview-Before state (100)
+    assert "mode === 'split' && compare && cmpPct < 100" in studio
+
+
 def test_stage4_batch_and_candidate_pins():
     """Stage 4: batch count = hold-to-arm rocker 1-4 default 1 (pure math
     module, pointer capture + touch-action none + aria slider); the rocker

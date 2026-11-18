@@ -576,11 +576,24 @@ export function mountStudio(panel, jobbar) {
     el.badge.textContent = `${cur.name}` +
       (prov && prov.width ? ` · ${prov.width}×${prov.height}` : '') +
       (prov && prov.seed != null ? ` · seed ${prov.seed}` : '');
-    syncComparer(); fitFrame(); updateSaveButtons();
+    // Fit after load: fitting synchronously here reads the previous
+    // image's dimensions (or nothing — the new image hasn't loaded),
+    // so a portrait→landscape switch kept the portrait-tall frame and
+    // img-a/img-b rendered the same image twice at idx 0. The once
+    // load listener mirrors the candidate-tap / run-completion pattern;
+    // the complete guard covers the same-URL re-select, whose dims are
+    // already correct.
+    syncComparer(); updateSaveButtons();
+    el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
+    if (el['img-a'].complete) fitFrame();
   }
   function syncComparer() {
     const s = stack;
-    const compare = !!(compareOn && s && s.idx > 0);
+    // Compare engages in stack mode (viewing a render, idx > 0) or while
+    // a candidate preview is up. The bar was a dead end before: it was
+    // display: none unless .comparing was on, and .comparing needed
+    // compareOn, which only a click on the hidden bar could set.
+    const compare = !!(compareOn && (previewUrl || (s && s.idx > 0)));
     el.frame.classList.toggle('comparing', compare);
     el.cmpdiv.style.left = cmpPct + '%';
     // img-b paints over img-a: while a candidate preview is up, clip it
@@ -589,18 +602,30 @@ export function mountStudio(panel, jobbar) {
       : (previewUrl ? 'inset(0 100% 0 0)' : 'inset(0 0 0 0)');
     for (const b of el.cmpbar.querySelectorAll('button')) {
       const mode = b.dataset.c;
-      const on = (mode === 'after' && !compare) || (mode === 'split' && compare && cmpPct < 100) || (mode === 'before' && compare && cmpPct <= 0);
+      // Before shows the older image: in stack mode that's the previous
+      // entry (img-a, cmpPct 0 clips img-b away); in preview mode the
+      // layers are swapped — img-a is the candidate, img-b the source —
+      // so Before needs img-b fully visible (cmpPct 100).
+      const on = (mode === 'after' && !compare) || (mode === 'split' && compare && cmpPct < 100) || (mode === 'before' && compare && (previewUrl ? cmpPct >= 100 : cmpPct <= 0));
       b.classList.toggle('on', on);
     }
-    el.cmpbar.style.display = s && s.idx > 0 ? '' : 'none';
+    // The bar is visible whenever there is something to compare — a
+    // render in the stack, or a candidate preview against the source.
+    // A preview with no working image has no source to compare against,
+    // so the preview term needs a stack too.
+    // Result stays active by default (compareOn false); .comparing still
+    // gates the divider and the clip.
+    el.cmpbar.style.display = ((s && s.idx > 0) || (previewUrl && s)) ? 'flex' : 'none';
   }
   el.cmpbar.addEventListener('click', e => {
     const b = e.target.closest('[data-c]');
     if (!b) return;
     if (b.dataset.c === 'after') { compareOn = false; }
     // Split opens at the middle — 100 left it indistinguishable from
-    // Result (studio wishlist §2).
-    else { compareOn = true; cmpPct = b.dataset.c === 'before' ? 0 : 50; }
+    // Result (studio wishlist §2). Before is preview-aware: in stack
+    // mode 0 clips img-b away (img-a is the older image); in preview
+    // mode img-a is the candidate, so 100 shows img-b, the source.
+    else { compareOn = true; cmpPct = b.dataset.c === 'before' ? (previewUrl ? 100 : 0) : 50; }
     syncComparer();
   });
 
@@ -609,7 +634,9 @@ export function mountStudio(panel, jobbar) {
   // pan/zoom, so the divider must be grabbed, not the frame.
   let cmpDrag = null;
   el.cmpdiv.addEventListener('pointerdown', e => {
-    if (!compareOn || !stack || stack.idx <= 0) return;
+    // Preview mode compares the candidate against the source with no
+    // stack entry to step back to, so the idx > 0 gate is waived there.
+    if (!compareOn || (!previewUrl && (!stack || stack.idx <= 0))) return;
     cmpDrag = e.pointerId;
     el.cmpdiv.setPointerCapture(e.pointerId);
     e.preventDefault();
