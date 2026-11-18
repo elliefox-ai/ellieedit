@@ -1334,9 +1334,11 @@ def test_stage4_canvas_aspect_compare_pins():
     # A: showCurrent fits AFTER load, mirroring the candidate-tap /
     # run-completion pattern; the complete guard covers the same-URL
     # re-select, whose dims are already correct. No synchronous fit on
-    # the not-yet-loaded image.
+    # the not-yet-loaded image. (The guard moved to img-b with the
+    # frame-from-primary change; both layers carry a load listener.)
     assert "el['img-a'].addEventListener('load', () => fitFrame(), { once: true });" in show
-    assert "if (el['img-a'].complete) fitFrame();" in show
+    assert "el['img-b'].addEventListener('load', () => fitFrame(), { once: true });" in show
+    assert "if (el['img-b'].complete) fitFrame();" in show
     assert "syncComparer(); fitFrame(); updateSaveButtons();" not in show
     # B+C: the bar is visible whenever there is something to compare —
     # a render in the stack, or a candidate preview against the source
@@ -1348,10 +1350,11 @@ def test_stage4_canvas_aspect_compare_pins():
     # the divider drag is waived the same way
     assert "const compare = !!(compareOn && (previewUrl || (s && s.idx > 0)));" in studio
     assert "if (!compareOn || (!previewUrl && (!stack || stack.idx <= 0))) return;" in studio
-    # .comparing still gates the divider and the clip; the now-redundant
-    # CSS rule is left alone
+    # .comparing still gates the divider and the clip; the
+    # .st-frame.comparing .st-cmpbar rule went away with the bar's move
+    # to the header (syncComparer's inline display owns visibility now)
     assert "el.frame.classList.toggle('comparing', compare);" in studio
-    assert ".st-frame.comparing .st-cmpbar { display: flex; }" in studio
+    assert ".st-frame.comparing .st-cmpbar" not in studio
     # C: Before is preview-aware — in preview mode img-a is the
     # candidate and img-b the source, so Before needs img-b fully
     # visible (cmpPct 100), not clipped away (0)
@@ -1359,6 +1362,51 @@ def test_stage4_canvas_aspect_compare_pins():
     assert "(previewUrl ? cmpPct >= 100 : cmpPct <= 0)" in studio
     # Split highlight already excludes the preview-Before state (100)
     assert "mode === 'split' && compare && cmpPct < 100" in studio
+
+
+def test_stage4_compare_scale_header_pins():
+    """Compare scale + header bar + no badge (2026-11-17, Alexander):
+    source and output aspects differ slightly, so Before/Split compared
+    at two scales — the frame is now sized from the primary layer and
+    the secondary is explicitly sized to the primary's displayed scale,
+    centered and clipped. The Result/Before/Split bar moved from the
+    frame to the header so it stops overlaying the image. The filename
+    badge overlay is gone (the name already lives in the header chip;
+    dims/seed stay in the Provenance tab)."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    # frame sized from the PRIMARY layer (output in stack mode, candidate
+    # preview while previewing) — not unconditionally from img-a
+    assert "const primary = previewUrl ? el['img-a'] : el['img-b'];" in studio
+    fit = studio.split("function fitFrame()")[1].split("function syncLayerScale()")[0]
+    assert "primary.naturalWidth" in fit
+    assert "const img = el['img-a'];" not in fit
+    # secondary layer explicitly sized to the primary's displayed scale
+    # (scale = frame width / primary natural width), centered in the
+    # frame; img-a absolutely positioned with no max clamps, so the 60vh
+    # cap and the 44vh mobile cap cannot distort it
+    assert "function syncLayerScale()" in studio
+    assert "const scale = fW / pW;" in studio
+    assert "img.style.transform = 'translate(-50%, -50%)';" in studio
+    assert '.st-frame img[data-id="img-a"] { position: absolute; max-width: none; max-height: none; }' in studio
+    # showCurrent listens on both layers' loads; the complete guard is on
+    # img-b (the primary in stack mode — showCurrent nulls previewUrl)
+    show = studio.split("function showCurrent()")[1].split("function syncComparer()")[0]
+    assert "el['img-b'].addEventListener('load', () => fitFrame(), { once: true });" in show
+    assert "if (el['img-b'].complete) fitFrame();" in show
+    # cmpbar lives in the header, not inside the frame; static pill, no
+    # absolute positioning; the divider stays in the frame
+    head = studio.split('<header class="st-head">')[1].split('</header>')[0]
+    assert 'data-id="cmpbar"' in head
+    frame = studio.split('<div class="st-frame" data-id="frame" hidden>')[1].split('<div class="st-strip"')[0]
+    assert 'data-id="cmpbar"' not in frame
+    assert ".st-cmpbar { position: static; transform: none; display: none;" in studio
+    assert 'data-id="cmpdiv"' in frame
+    # filename badge gone: no markup, no ids entry, no assignment, no CSS
+    # (the jobbar status pill's `badge` class in say() is unrelated)
+    assert 'data-id="badge"' not in studio
+    assert "el.badge" not in studio
+    assert ".st-badge" not in studio
+    assert "'badge'," not in studio
 
 
 def test_stage4_batch_and_candidate_pins():
@@ -1409,10 +1457,11 @@ def test_stage4_canvas_preview_pins():
     assert "if (!compareOn) {" not in studio   # candidate gates gone; the
     # filter preview that shared the flag went with the filters section
     assert "previewed = collected[0]" in studio   # first candidate is the viewed one
-    # with no working image yet, the run unhides the frame and names the
-    # candidate on the badge (showCurrent is the only other unhide)
+    # with no working image yet, the run unhides the frame (showCurrent is
+    # the only other unhide); it no longer names the candidate on a badge
+    # — the badge overlay is gone, the name lives in the header chip
     assert studio.count("el.frame.hidden = false;") == 2
-    assert "el.badge.textContent = collected[0].path.split('/').pop();" in studio
+    assert "el.badge.textContent" not in studio
     # the strip rebuild re-applies the viewed candidate's ring from previewed
     assert "const selPath = previewed ? previewed.path : null;" in studio
     assert "if (selPath && c.path === selPath) d.classList.add('sel');" in studio
