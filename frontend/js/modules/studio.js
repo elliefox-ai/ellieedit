@@ -60,15 +60,19 @@ function panelHTML() {
     .st-frame { position: relative; border: 1px solid #4a4a6c; border-radius: 8px; overflow: hidden;
       box-shadow: 0 8px 40px rgba(0,0,0,.5); touch-action: none; user-select: none; -webkit-user-select: none; transform-origin: center; }
     .st-frame img { display: block; max-width: min(100%, 1100px); max-height: 60vh; object-fit: contain; pointer-events: none; }
+    /* img-a is explicitly sized to the primary layer's displayed scale
+    (syncLayerScale), so it is absolutely positioned with no max clamps
+    — the 60vh cap above and the 44vh mobile cap would distort it. */
+    .st-frame img[data-id="img-a"] { position: absolute; max-width: none; max-height: none; }
     .st-frame .st-imgb img { object-fit: contain; }
     .st-frame .st-imgb { position: absolute; inset: 0; overflow: hidden; }
     .st-frame .st-imgb img { max-width: none; max-height: none; width: 100%; height: 100%; object-fit: contain; position: absolute; inset: 0; }
     .st-maskview { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-    .st-badge { position: absolute; top: 10px; left: 10px; z-index: 6; background: rgba(15,15,26,.85);
-      border: 1px solid #4a4a6c; border-radius: 5px; padding: 3px 10px; font-size: 11px; color: #b39ae0; pointer-events: none; }
-    .st-cmpbar { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 6; display: none;
+    /* Compare bar lives in the header now, not over the image: static,
+    no bottom/transform; syncComparer still owns its visibility via
+    inline display flex/none. */
+    .st-cmpbar { position: static; transform: none; display: none;
       gap: 0; background: rgba(15,15,26,.9); border: 1px solid #4a4a6c; border-radius: 8px; overflow: hidden; }
-    .st-frame.comparing .st-cmpbar { display: flex; }
     .st-cmpbar button { border: 0; border-radius: 0; background: transparent; min-height: 44px; font-size: 12px; color: #8a8aaa; }
     .st-cmpbar button.on { background: #5b4a8a; color: #fff; }
     .st-frame.comparing .st-imgb { clip-path: inset(0 var(--cmp, 50%) 0 0); }
@@ -281,6 +285,11 @@ function panelHTML() {
         <span><b data-id="chip-name">—</b><span class="st-provchain" data-id="chip-chain"></span></span>
       </span>
       <span class="spacer"></span>
+      <div class="st-cmpbar" data-id="cmpbar">
+        <button class="on" data-c="after">Result</button>
+        <button data-c="before">Before</button>
+        <button data-c="split">Split</button>
+      </div>
       <button class="st-clear" data-id="clear" title="Clear working image" hidden>✕ clear</button>
       <button data-id="fit" title="Reset zoom to fit" hidden>⤢ Fit</button>
       <button data-id="imm" title="Hide chrome; image fills screen">⛶ Fullscreen</button>
@@ -292,15 +301,9 @@ function panelHTML() {
           <div class="st-emptymsg">No working image yet.<br>
             Set one from the Gallery (📌 Set as working image), the Ladder verb, or a candidate below.</div>
           <div class="st-frame" data-id="frame" hidden>
-            <span class="st-badge" data-id="badge"></span>
             <img data-id="img-a" alt="working image">
             <span class="st-imgb" data-id="wrap-b"><img data-id="img-b" alt="current render"></span>
             <canvas class="st-maskview" data-id="maskview" hidden></canvas>
-            <div class="st-cmpbar" data-id="cmpbar">
-              <button class="on" data-c="after">Result</button>
-              <button data-c="before">Before</button>
-              <button data-c="split">Split</button>
-            </div>
             <div class="st-cmpdiv" data-id="cmpdiv" title="Drag to compare"></div>
           </div>
         </div>
@@ -472,7 +475,7 @@ export function mountStudio(panel, jobbar) {
   const root = panel.querySelector('.st-root');
   const $ = id => panel.querySelector(`[data-id="${id}"]`);
   const el = Object.fromEntries(['chip', 'chip-name', 'chip-chain', 'clear', 'fit', 'imm',
-    'canvasarea', 'frame', 'badge', 'img-a', 'wrap-b', 'img-b', 'maskview', 'cmpbar', 'cmpdiv',
+    'canvasarea', 'frame', 'img-a', 'wrap-b', 'img-b', 'maskview', 'cmpbar', 'cmpdiv',
     'strip', 'cands', 'wf', 'segrow', 'seg-model', 'seg-model-lab', 'seg-edit', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
     'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui', 'lorapop',
     'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all',
@@ -513,9 +516,15 @@ export function mountStudio(panel, jobbar) {
   }
 
   // ── working-image display: one canvas ──
+  // The frame is sized from the PRIMARY layer: the output (img-b) in
+  // stack mode, the candidate preview (img-a) while a preview is up.
+  // Sizing from img-b unconditionally would break previews — in
+  // particular the no-working-image run flow, where img-b is unset and
+  // the frame would never size. (PR #31 fitted from img-a for the same
+  // reason; the primary is whichever layer is on display.)
   function fitFrame() {
-    const img = el['img-a'];
-    const natW = img.naturalWidth, natH = img.naturalHeight;
+    const primary = previewUrl ? el['img-a'] : el['img-b'];
+    const natW = primary.naturalWidth, natH = primary.naturalHeight;
     if (!natW || !natH || el.frame.hidden) return;
     const availW = Math.max(60, el.canvasarea.clientWidth - 24);
     const availH = Math.max(60, el.canvasarea.clientHeight - 24);
@@ -523,6 +532,44 @@ export function mountStudio(panel, jobbar) {
     el.frame.style.width = Math.round(natW * scale) + 'px';
     el.frame.style.height = Math.round(natH * scale) + 'px';
     clampZoomPan(); applyZoom();
+    syncLayerScale();
+  }
+  // Scale the SECONDARY layer to the primary's displayed scale, so
+  // Before/Split compares at one scale instead of two: source and
+  // output aspects differ slightly, and img-a used to drive the frame
+  // while img-b merely contained itself in it. Both layers are
+  // explicitly sized and centered in the frame; the frame clips the
+  // overflow. Runs once both images' natural dims are known — fitFrame
+  // calls it, and each layer's load calls fitFrame, so whichever loads
+  // last sizes it. At idx 0 both layers hold the same image, so the
+  // two sizes coincide exactly. The layer assignment is unchanged
+  // (img-a stays the source/before, img-b the output/after); the Split
+  // left/right flip between stack and preview modes stays as-is.
+  // Mask note: the mask canvas is sized to source(stack) and painting
+  // maps frame-fraction → mask pixels, so alignment needs the frame
+  // aspect to equal the mask source's aspect. In the normal Mask flow
+  // (viewing the run source) current == source, so img-b IS the mask
+  // source and the frame now always matches it — this fixes the
+  // idx > 0 different-aspect sub-case, which was misaligned before.
+  // (In a flow where the viewed entry isn't the run source, the mask
+  // already belonged to an undisplayed image; that is unchanged.)
+  function syncLayerScale() {
+    const primary = previewUrl ? el['img-a'] : el['img-b'];
+    const secondary = previewUrl ? el['img-b'] : el['img-a'];
+    const pW = primary.naturalWidth, pH = primary.naturalHeight;
+    const fW = el.frame.clientWidth, fH = el.frame.clientHeight;
+    if (!pW || !pH || !fW || !fH) return;
+    const scale = fW / pW;
+    const sizeLayer = (img, w, h) => {
+      img.style.width = Math.round(w) + 'px';
+      img.style.height = Math.round(h) + 'px';
+      img.style.left = '50%';
+      img.style.top = '50%';
+      img.style.transform = 'translate(-50%, -50%)';
+    };
+    sizeLayer(primary, pW * scale, pH * scale);
+    const sW = secondary.naturalWidth, sH = secondary.naturalHeight;
+    if (sW && sH) sizeLayer(secondary, sW * scale, sH * scale);
   }
   window.addEventListener('resize', fitFrame);
 
@@ -572,20 +619,20 @@ export function mountStudio(panel, jobbar) {
     el.canvasarea.classList.add('has-image');
     el['img-a'].src = prev.url;
     el['img-b'].src = cur.url;
-    const prov = studioState().get().provenance;
-    el.badge.textContent = `${cur.name}` +
-      (prov && prov.width ? ` · ${prov.width}×${prov.height}` : '') +
-      (prov && prov.seed != null ? ` · seed ${prov.seed}` : '');
     // Fit after load: fitting synchronously here reads the previous
     // image's dimensions (or nothing — the new image hasn't loaded),
     // so a portrait→landscape switch kept the portrait-tall frame and
     // img-a/img-b rendered the same image twice at idx 0. The once
-    // load listener mirrors the candidate-tap / run-completion pattern;
-    // the complete guard covers the same-URL re-select, whose dims are
-    // already correct.
+    // load listeners mirror the candidate-tap / run-completion pattern;
+    // both layers get one (each layer's load re-fits, so whichever
+    // loads last sizes both); the complete guard covers the same-URL
+    // re-select, whose dims are already correct. showCurrent always
+    // runs in stack mode (previewUrl is nulled above), so the primary
+    // here is img-b.
     syncComparer(); updateSaveButtons();
     el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
-    if (el['img-a'].complete) fitFrame();
+    el['img-b'].addEventListener('load', () => fitFrame(), { once: true });
+    if (el['img-b'].complete) fitFrame();
   }
   function syncComparer() {
     const s = stack;
@@ -742,7 +789,7 @@ export function mountStudio(panel, jobbar) {
     renderCandidates();
     if (!d.path) {
       // Clearing the store must clear the canvas too (studio eval §3):
-      // otherwise the old image, badge, and save buttons linger.
+      // otherwise the old image and save buttons linger.
       const prevStack = stack;
       stack = null; previewed = null; previewUrl = null;
       maskCanvas = null; maskPainted = false; maskUndoStack = [];
@@ -1316,12 +1363,11 @@ export function mountStudio(panel, jobbar) {
         previewUrl = collected[0].url;
         // The preview always lands, comparer or not (see the candidate tap):
         // compare yields, and with no working image yet the frame is still
-        // hidden, so unhide it and name the candidate on the badge.
+        // hidden, so unhide it.
         compareOn = false; cmpPct = 100;
         if (!stack) {
           el.frame.hidden = false;
           el.canvasarea.classList.add('has-image');
-          el.badge.textContent = collected[0].path.split('/').pop();
         }
         el['img-a'].src = previewUrl;
         el['img-a'].addEventListener('load', () => fitFrame(), { once: true });
