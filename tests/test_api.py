@@ -82,3 +82,51 @@ def test_repaint_error_propagates(client, monkeypatch):
     r = client.post("/api/facecycle/repaint", json=payload)
     assert r.status_code == 500
     assert "ComfyUI down" in r.json()["detail"]
+
+
+def test_repaint_klein_method_routes_to_inpaint_klein(client, monkeypatch):
+    """method="klein" runs the Studio Mask engine (comfy_inpaint_klein) with
+    the same args — and never touches the Krea2 path."""
+    calls = {}
+
+    def fake_klein(image_b64, mask_b64, prompt, denoise=0.45, seed=0, timeout=600):
+        calls.update(image_b64=image_b64, mask_b64=mask_b64, prompt=prompt,
+                     denoise=denoise, seed=seed)
+        return make_png_bytes()
+
+    def boom(*a, **kw):
+        raise AssertionError("Krea2 path must not run for method=klein")
+
+    monkeypatch.setattr("backend.comfy.comfy_inpaint_klein", fake_klein)
+    monkeypatch.setattr("backend.comfy.comfy_repaint", boom)
+    img = base64.b64encode(make_png_bytes()).decode()
+    payload = {"image_b64": img, "mask_b64": img, "prompt": "test",
+               "denoise": 0.65, "seed": 7, "method": "klein"}
+    r = client.post("/api/facecycle/repaint", json=payload)
+    assert r.status_code == 200
+    assert base64.b64decode(r.json()["image_b64"]).startswith(b"\x89PNG")
+    assert calls == {"image_b64": img, "mask_b64": img, "prompt": "test",
+                     "denoise": 0.65, "seed": 7}
+
+
+def test_repaint_default_method_is_krea(client, monkeypatch):
+    """No method sent → Krea2, exactly as before (and Klein never runs)."""
+    def boom(*a, **kw):
+        raise AssertionError("Klein must not run by default")
+
+    monkeypatch.setattr("backend.comfy.comfy_inpaint_klein", boom)
+    payload = {"image_b64": base64.b64encode(make_png_bytes()).decode(),
+               "mask_b64": base64.b64encode(make_png_bytes()).decode(),
+               "prompt": "test", "denoise": 0.5, "seed": 1}
+    r = client.post("/api/facecycle/repaint", json=payload)
+    assert r.status_code == 200
+    assert base64.b64decode(r.json()["image_b64"]).startswith(b"\x89PNG")
+
+
+def test_repaint_unknown_method_rejected(client):
+    """An unknown method fails loudly (422) — never a silent fallback."""
+    payload = {"image_b64": base64.b64encode(make_png_bytes()).decode(),
+               "mask_b64": base64.b64encode(make_png_bytes()).decode(),
+               "prompt": "test", "method": "bogus"}
+    r = client.post("/api/facecycle/repaint", json=payload)
+    assert r.status_code == 422

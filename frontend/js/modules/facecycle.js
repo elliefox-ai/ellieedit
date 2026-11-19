@@ -176,6 +176,7 @@ function panelHTML() {
         <label>Denoise <input type="range" data-id="denoise" min="0.2" max="0.8" step="0.05" value="0.5" style="max-width:140px"><span class="val" data-id="denoise-val">0.5</span></label>
         <label title="What the model sees. Current composite = exactly what Export would produce right now, so a new generation builds on the ones you've kept (generations chain). Base photo = ignore everything kept so far and start from the untouched base. Results differ per choice.">Source <select data-id="repaint-source"><option value="composite" selected>Current composite</option><option value="base">Base photo</option></select></label>
         <label>Variants <select data-id="variant-count"><option value="1" selected>1</option><option value="2">2</option><option value="4">4</option></select></label>
+        <label title="Krea2 repaint is the original engine. Klein 9B inpaint is the Studio Mask method: the prompt is in charge inside the mask and the original pixels are restored exactly outside it, so seams stay cleaner.">Method <select data-id="repaint-method"><option value="krea" selected>Krea2 repaint</option><option value="klein">Klein 9B inpaint</option></select></label>
         <label>Seed <input type="number" data-id="seed-input" placeholder="random" style="max-width:110px"></label>
         <label><input type="checkbox" data-id="randomize-seed" checked> Randomize each</label>
         <label><input type="checkbox" data-id="detail-crop" checked> Detail crop</label>
@@ -220,6 +221,7 @@ export class FaceCycle {
       preseedMaskBtn: act('preseed-mask'),
       repaintPromptInput: $('repaint-prompt'),
       repaintSourceSelect: $('repaint-source'),
+      repaintMethodSelect: $('repaint-method'),
       repaintDrawer: $('repaint-drawer'), repaintGenerateBtn: act('generate-sheet'),
       denoiseSlider: $('denoise'), denoiseVal: $('denoise-val'), seedInput: $('seed-input'),
       randomizeSeed: $('randomize-seed'), detailCrop: $('detail-crop'),
@@ -1826,6 +1828,7 @@ export class FaceCycle {
 
     const prompt = this.el.repaintPromptInput.value.trim(); // may be empty — conditioning from context only
     const denoise = parseFloat(this.el.denoiseSlider.value);
+    const method = this.el.repaintMethodSelect.value; // "krea" | "klein" — applies to every variant
     const variantCount = parseInt(this.el.variantCountSelect.value) || 1;
     const randomize = this.el.randomizeSeed.checked;
     let baseSeed = parseInt(this.el.seedInput.value);
@@ -1940,7 +1943,7 @@ export class FaceCycle {
         fetch(REPAINT_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image_b64, mask_b64, prompt, denoise, seed }),
+          body: JSON.stringify({ image_b64, mask_b64, prompt, denoise, seed, method }),
         }).then(async r => {
           const body = await r.json();
           if (!r.ok) throw new Error(body.detail || body.error || ('HTTP ' + r.status));
