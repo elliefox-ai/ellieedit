@@ -3,10 +3,13 @@
 Contract kept 1:1 with the original: JSON in {image_b64, mask_b64, prompt,
 denoise, seed} → JSON out {image_b64}. Multiple variants are requested as
 parallel calls from the client, exactly like the original UI does.
+Optional `method` picks the engine: "krea" (Krea2 repaint, default) or
+"klein" (Klein 9B inpaint — the Studio Mask engine).
 """
 
 import base64
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -25,15 +28,26 @@ class RepaintRequest(BaseModel):
     prompt: str = ""
     denoise: float = Field(0.5, ge=0.0, le=1.0)
     seed: int = 0
+    # Engine choice (2026-11-18): "krea" is the original Krea2 repaint;
+    # "klein" is the Studio Mask engine (Klein 9B inpaint + composite-back).
+    # Literal, so an unknown method fails loudly (422) — never silent fallback.
+    method: Literal["krea", "klein"] = "krea"
 
 
 @router.post("/repaint")
 def repaint(req: RepaintRequest):
-    """Run one Krea2 inpaint via ComfyUI. Blocking (long); runs in a worker thread."""
+    """Run one inpaint via ComfyUI. Blocking (long); runs in a worker thread.
+    Krea2 repaint by default; method="klein" runs the Studio Mask engine
+    (Klein 9B inpaint + composite-back). Denoise passes through unchanged."""
     try:
-        png = comfy.comfy_repaint(
-            req.image_b64, req.mask_b64, req.prompt,
-            denoise=req.denoise, seed=req.seed)
+        if req.method == "klein":
+            png = comfy.comfy_inpaint_klein(
+                req.image_b64, req.mask_b64, req.prompt,
+                denoise=req.denoise, seed=req.seed)
+        else:
+            png = comfy.comfy_repaint(
+                req.image_b64, req.mask_b64, req.prompt,
+                denoise=req.denoise, seed=req.seed)
     except Exception as e:
         log.error("[repaint] ERROR: %s", e)
         raise HTTPException(status_code=500, detail=str(e))

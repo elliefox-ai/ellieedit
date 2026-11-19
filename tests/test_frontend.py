@@ -162,6 +162,22 @@ def test_facecycle_zoom_controls_and_persistence():
     assert "zoomFitBtn.addEventListener('click', () => this.setZoomPct(100))" in src
 
 
+def test_facecycle_repaint_method_select():
+    """FaceCycle repaint method choice (2026-11-18, Alexander): the drawer
+    offers Krea2 repaint (default) and Klein 9B inpaint — the Studio Mask
+    engine — and generateRepaint sends the choice with every variant."""
+    src = (HERE.parent / "frontend" / "js" / "modules" / "facecycle.js").read_text()
+    # drawer: Method select in the second row, Krea2 selected by default
+    assert 'data-id="repaint-method"' in src
+    assert '<option value="krea" selected>Krea2 repaint</option>' in src
+    assert '<option value="klein">Klein 9B inpaint</option>' in src
+    assert "original pixels are restored exactly outside it" in src
+    # wired: element in the el map, read in generateRepaint, sent with every variant
+    assert "repaintMethodSelect: $('repaint-method')" in src
+    assert "const method = this.el.repaintMethodSelect.value;" in src
+    assert "JSON.stringify({ image_b64, mask_b64, prompt, denoise, seed, method })" in src
+
+
 def test_foxden_pinned_chips_sit_above_the_list():
     """Task 5 add.6: pins + suspended tray render just above the scrollable
     list, and the submitted payload comes from the pin state (active only)."""
