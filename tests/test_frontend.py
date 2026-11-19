@@ -1204,7 +1204,7 @@ def test_stage4_fullscreen_chrome_pins():
     assert 'data-id="bottomhandle"' in studio and "CANDIDATES ▴" in studio
     assert 'data-id="candoverlay"' in studio
     assert "showToast" in studio
-    assert "flashOverlayInImmersive" in studio                            # overlay auto-opens on completion
+    assert "openOverlayInImmersive" in studio                            # overlay opens on completion, stays open (no auto-close)
     # immersive hides chrome (head/rail/strip) via CSS, never JS removal
     assert ".st-root.st-immersive .st-head" in studio
     assert ".st-root.st-immersive .st-rail" in studio
@@ -1409,6 +1409,61 @@ def test_stage4_compare_scale_header_pins():
     assert "'badge'," not in studio
 
 
+def test_stage4_six_fixes_pins():
+    """Six Studio fixes (2026-11-18, Alexander): bigger promote button
+    left of the source thumbnail; Save-all candidates button; generate
+    fab visible on mobile; fullscreen prompt drawer; candidates overlay
+    stays open; candidate tap lands on a cleared canvas."""
+    studio = (Path(__file__).parent.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    # 1 — the overlaid 44px promote circle is gone; a full-height button
+    # sits left of the source thumbnail in a right-pinned group, shown
+    # only when the viewed candidate has a server path, same handler
+    assert "st-src-dn" not in studio
+    assert ".st-srcgroup{display:flex;gap:8px;align-items:stretch;margin-left:auto}" in studio
+    assert ".st-src-promote{min-width:60px;font-size:22px;" in studio
+    assert "dn.className = 'st-src-promote'" in studio
+    assert "group.className = 'st-srcgroup'" in studio
+    assert "group.appendChild(dn)" in studio
+    assert "group.appendChild(src)" in studio
+    assert "tap ⬇ beside the source to use it" in studio
+    # 2 — Save-all button in the striphead: static markup, wired once at
+    # mount to the same saveAllOutputs endpoint; disabled while no
+    # candidate has a path; the checkbox flow is untouched
+    assert 'data-id="saveall"' in studio
+    assert ".st-striphead .st-saveall { margin-left: auto;" in studio
+    assert "el.saveall.addEventListener('click'" in studio
+    assert "await saveAllOutputs(paths)" in studio
+    assert "el.saveall.disabled = !list.some(c => c.path);" in studio
+    assert "if (el['save-all'].checked && collected.length) await saveAllOutputs(collected.map(c => c.path));" in studio
+    # 3 — generate fab shows on ≤900px in normal mode too, not only
+    # immersive; the rail run button is unchanged
+    mq = studio.split("@media (max-width: 900px)")[1].split("</style>")[0]
+    assert ".st-genfab { display: grid; }" in mq
+    assert 'data-id="runbtn"' in studio
+    # 4 — fullscreen prompt drawer: toggle + drawer exist, immersive-only
+    # (base display none, shown only under .st-immersive), two-way sync
+    # with the active verb's prompt field, closed on immersive exit
+    assert 'data-id="promptfab"' in studio
+    assert 'data-id="promptdrawer"' in studio
+    assert 'data-id="promptdrawer-text"' in studio
+    assert ".st-root.st-immersive .st-promptfab { display: block; }" in studio
+    assert ".st-root.st-immersive .st-promptdrawer.open { display: flex; }" in studio
+    assert "el['promptdrawer-text'].addEventListener('input'" in studio
+    assert "el.promptdrawer.classList.remove('open')" in studio
+    # 5 — candidates overlay opens on completion and stays open: no
+    # auto-close timeout remains anywhere on it
+    assert "flashOverlayInImmersive" not in studio
+    assert "openOverlayInImmersive" in studio
+    assert "setTimeout(() => el.candoverlay.classList.remove('open'), 3500)" not in studio
+    # 6 — candidate tap unhides a cleared frame so the preview lands;
+    # preview only, no auto-promote
+    rc = studio.split("function renderCandidates()")[1].split("// ── generate: batch")[0]
+    assert "if (el.frame.hidden) {" in rc
+    assert "el.frame.hidden = false;" in rc
+    assert "el.canvasarea.classList.add('has-image')" in rc
+    assert "promoteCandidate(previewed)" in rc
+
+
 def test_stage4_batch_and_candidate_pins():
     """Stage 4: batch count = hold-to-arm rocker 1-4 default 1 (pure math
     module, pointer capture + touch-action none + aria slider); the rocker
@@ -1457,10 +1512,12 @@ def test_stage4_canvas_preview_pins():
     assert "if (!compareOn) {" not in studio   # candidate gates gone; the
     # filter preview that shared the flag went with the filters section
     assert "previewed = collected[0]" in studio   # first candidate is the viewed one
-    # with no working image yet, the run unhides the frame (showCurrent is
-    # the only other unhide); it no longer names the candidate on a badge
-    # — the badge overlay is gone, the name lives in the header chip
-    assert studio.count("el.frame.hidden = false;") == 2
+    # with no working image yet, the run unhides the frame; the candidate
+    # tap is the third unhide site (2026-11-18: a tap after clearing the
+    # canvas unhides the frame so the preview lands) alongside
+    # showCurrent; it no longer names the candidate on a badge — the
+    # badge overlay is gone, the name lives in the header chip
+    assert studio.count("el.frame.hidden = false;") == 3
     assert "el.badge.textContent" not in studio
     # the strip rebuild re-applies the viewed candidate's ring from previewed
     assert "const selPath = previewed ? previewed.path : null;" in studio
