@@ -45,7 +45,8 @@ WORKFLOW_FILES = {"klein": "klein_gen_basic.json",           # Klein 9B generate
                   "zengorestyle": "zengostyle_restyle_f2k4b_mkl.json",
                   "qwen21": "qwen21_gen_basic.json",
                   "moss": "moss_gen_basic.json",
-                  "moss-edit": "moss_edit_basic.json"}       # MOSS edit (patch adapter)
+                  "moss-edit": "moss_edit_basic.json",      # MOSS edit (patch adapter)
+                  "klein-9b-mask": "klein_9b_mask.json"}    # Klein 9B inpaint/outpaint (uncrop LoRA)
 # Model/edit variants per family (§10 review 12:44): the workflow list stays
 # short — the UI offers a model toggle + edit toggle for families that have
 # them, and composes the concrete workflow id from the selection.
@@ -446,7 +447,7 @@ def reachable() -> bool:
         return False
 
 
-EDIT_WORKFLOWS = {"moss-edit"}   # always-feed graphs; klein-4b gates by denoise now
+EDIT_WORKFLOWS = {"moss-edit", "klein-9b-mask"}   # always-feed graphs; klein-4b gates by denoise now
 
 def _workflow_is_edit(k: str) -> bool:
     from ..workflow_schema import workflow_is_edit

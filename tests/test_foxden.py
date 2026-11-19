@@ -299,11 +299,11 @@ def test_config_scans_loras_and_reports_reachability(client, monkeypatch):
     assert {w["id"]: w["available"] for w in c["workflows"]} == {
         "klein": True, "krea2": False, "zengorestyle": False, "qwen21": False,
         "moss": False, "klein-4b": False,
-        "moss-edit": False}  # restyle 2026-10-20, qwen21 2026-10-23, moss 2026-10-26, moss-edit 2026-11-14, klein-4b denoise-gated swap 2026-11-17 (jsons live in data workflows dir, not the test fixture)
+        "moss-edit": False, "klein-9b-mask": False}  # restyle 2026-10-20, qwen21 2026-10-23, moss 2026-10-26, moss-edit 2026-11-14, klein-4b denoise-gated swap 2026-11-17, klein-9b-mask 2026-11-18 (jsons live in data workflows dir, not the test fixture)
     assert {w["id"]: w["edit"] for w in c["workflows"]} == {
         "klein": True, "krea2": False, "zengorestyle": False, "qwen21": False,
         "moss": False,
-        "klein-4b": True, "moss-edit": True}  # klein gen/edit share one denoise-gated id (2026-11-17)
+        "klein-4b": True, "moss-edit": True, "klein-9b-mask": True}  # klein gen/edit share one denoise-gated id (2026-11-17); 9b-mask is an always-feed edit (2026-11-18)
 
 
 def test_config_comfy_unreachable_is_graceful(client, monkeypatch):

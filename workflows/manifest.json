@@ -198,6 +198,88 @@
       "model": "4b",
       "role": "gen"
     },
+    "klein-9b-mask": {
+      "aliases": [],
+      "available": true,
+      "edit": true,
+      "family": "klein-9b-mask",
+      "inputs": [
+        {
+          "name": "prompt",
+          "note": "non-empty; injected into the positive conditioning literal",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "name": "seed",
+          "note": "omit for a random seed; response carries the seed used",
+          "range": [
+            0,
+            2147483647
+          ],
+          "required": false,
+          "type": "int"
+        },
+        {
+          "name": "width",
+          "note": "graph may be size-link-driven and ignore it; snapped to /16",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "name": "height",
+          "note": "graph may be size-link-driven and ignore it; snapped to /16",
+          "required": false,
+          "type": "int"
+        },
+        {
+          "name": "steps",
+          "range": [
+            1,
+            150
+          ],
+          "required": false,
+          "type": "int"
+        },
+        {
+          "default": 1.0,
+          "name": "denoise",
+          "note": "always sent; whether the graph consumes it is wire_denoise's business",
+          "range": [
+            0.0,
+            1.0
+          ],
+          "required": true,
+          "type": "float"
+        },
+        {
+          "name": "input_image",
+          "note": "name from /api/foxden/inputs or /upload; REQUIRED for edit workflows (see per-workflow edit flag)",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "name": "parent_image",
+          "note": "optional provenance link (gallery/library path)",
+          "required": false,
+          "type": "string"
+        },
+        {
+          "name": "loras",
+          "note": "max 8; strength_model -4.0..4.0",
+          "required": false,
+          "type": "array[{name,strength_model}]"
+        },
+        {
+          "name": "suspended_loras",
+          "note": "never reach the graph; recorded for ReUse only",
+          "required": false,
+          "type": "array[{name,strength_model}]"
+        }
+      ],
+      "model": null,
+      "role": "edit"
+    },
     "krea2": {
       "aliases": [],
       "available": true,
