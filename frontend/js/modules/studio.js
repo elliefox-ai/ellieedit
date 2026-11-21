@@ -1375,8 +1375,15 @@ export function mountStudio(panel, jobbar) {
         say('edit workflows need a working image — set one from Gallery or a candidate first', true);
         return;
       }
-      // edit graphs consume the reference at any denoise — always inject
-      const useInput = (denoise < 1 || isEdit) ? await prepareInput() : null;
+      // edit graphs consume the reference at any denoise — always inject.
+      // BUT "edit" in the config means the id is reachable as an edit role,
+      // and the klein family shares ONE id for gen+edit (denoise-gated
+      // self-edit). Only the Edit toggle (wfEdit) selects an always-feed
+      // graph; in Generate mode the denoise slider alone gates i2i —
+      // otherwise a shared gen/edit id poisons Generate into always
+      // injecting the working image even at denoise 1.0 (2026-11-21 bug:
+      // workflow=klein denoise=1.0 input_image=<set>).
+      const useInput = (denoise < 1 || (isEdit && wfEdit)) ? await prepareInput() : null;
       let seed = nextSeed({ locked: el.lock.checked, current: el.seed.value });
       for (let i = 0; i < batch; i++) {
         if (i > 0 && !el.lock.checked) seed = String(Math.floor(Math.random() * 2 ** 31));
