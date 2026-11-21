@@ -680,7 +680,12 @@ def view_url(im: dict) -> str:
     q = urllib.parse.urlencode({"filename": im["filename"],
                                 "subfolder": im.get("subfolder", ""),
                                 "type": im.get("type", "output")})
-    return f"/api/foxden/view?{q}"
+    # Cache-buster (2026-11-21): Comfy reuses output filenames (its counter
+    # resets), and browsers that cached /view responses under the old
+    # max-age=3600 keep serving stale copies until expiry — no-store only
+    # affects future responses. A per-render unique URL makes reuse unable
+    # to collide with an old cache entry. The view route ignores the param.
+    return f"/api/foxden/view?{q}&v={time.time_ns()}"
 
 
 def log_tail(n: int = 30) -> list[str]:
