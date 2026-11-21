@@ -1055,8 +1055,12 @@ def view(filename: str, subfolder: str = "", type: str = "output"):
         raise HTTPException(404, "image not found in ComfyUI")
     ctype = next((v for k, v in hdr.items() if k.lower() == "content-type"),
                  "image/png")
+    # no-store (2026-11-21): Comfy reuses output filenames (its counter
+    # resets), so a max-age cached copy of Klein_00001_.png can be an older
+    # render entirely — the "canvas shows the wrong image" bug. Filenames
+    # are not content-addressed; never cache them.
     return Response(body, media_type=ctype,
-                    headers={"Cache-Control": "public, max-age=3600"})
+                    headers={"Cache-Control": "no-store"})
 
 
 @router.post("/upload")
