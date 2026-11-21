@@ -1350,11 +1350,7 @@ export function mountStudio(panel, jobbar) {
     inputName = j.subfolder ? `${j.subfolder}/${j.name}` : j.name;
     inputParent = st.path;   // provenance parent chain: generation links back
     inputTs = st.ts;
-    const probe = new Image();
-    await new Promise(res => { probe.onload = res; probe.onerror = res; probe.src = galleryFileUrl(st.path); });
-    inputDims = [probe.naturalWidth, probe.naturalHeight];
-    return inputName;
-  }
+    return inputName;  }
 
   async function generate() {
     if (busy) return;
@@ -1392,7 +1388,13 @@ export function mountStudio(panel, jobbar) {
         if (i > 0 && !el.lock.checked) seed = String(Math.floor(Math.random() * 2 ** 31));
         el.seed.value = seed;
         let [width, height] = sizeFor(aspect, sizeIdx);
-        if (useInput && inputDims) [width, height] = inputDims;
+        // i2i sizing (2026-11-21): the SIZE PICKER wins — its long side
+        // bounds the render and the input image contributes only its
+        // aspect (backend snaps the long side into the workflow's size
+        // constant; the resize node keeps the input ratio). Never send
+        // the input's raw pixel dims — a 2896px source used to drag the
+        // render up to its own resolution (the slow-render bug).
+        // (inputDims retained only for cache invalidation.)
         const body = {
           workflow: wfId, prompt: promptText, width, height,
           loras: pins.payload(), suspended_loras: pins.suspendedPayload(),
