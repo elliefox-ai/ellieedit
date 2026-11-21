@@ -378,6 +378,18 @@ def apply_edits(wf: dict, prompt: str, seed: int, width=None, height=None,
     wf[s["guider"]]["inputs"]["model"] = prev
     if input_image:
         inject_input_image(wf, name=input_image)
+    else:
+        # Reference-free t2i (klein astronaut bug 2026-11-21): klein gen
+        # graphs carry LoadImage -> VAEEncode -> ReferenceLatent feeding the
+        # POSITIVE conditioning, alongside the Crystools latent switch. The
+        # switch picks the starting latent, but ReferenceLatent rides the
+        # image in through conditioning regardless — with its latent link
+        # present, a no-input run still renders the shipped LoadImage. Strip
+        # the latent link (ReferenceLatent then passes conditioning through).
+        for k, n in wf.items():
+            if n["class_type"] == "ReferenceLatent" and is_link(
+                    n["inputs"].get("latent")):
+                del n["inputs"]["latent"]
     # Denoise-gated I2I switch (klein-4b 2026-11-17): a Crystools latent switch
     # with a literal `boolean` selects I2I (on_true=VAEEncode) vs empty latent.
     # Operator rule: denoise 1.0 -> t2i (false); denoise < 1.0 -> I2I (true),
