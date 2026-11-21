@@ -1371,7 +1371,10 @@ export function mountStudio(panel, jobbar) {
       const wfDef = wfDefs.find(w => w.id === wfId);
       const isEdit = !!(wfDef && wfDef.edit);
       const st0 = studioState().get();
-      if (isEdit && !st0.path) {
+      // guard only for the Edit toggle's always-feed graphs: the klein
+      // family shares gen/edit ids, so isEdit alone is true in Generate
+      // mode and would refuse t2i without a working image (2026-11-21).
+      if (isEdit && wfEdit && !st0.path) {
         say('edit workflows need a working image — set one from Gallery or a candidate first', true);
         return;
       }
