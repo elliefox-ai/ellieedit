@@ -344,7 +344,8 @@ def inject_input_image(wf: dict, name: str) -> None:
 
 def apply_edits(wf: dict, prompt: str, seed: int, width=None, height=None,
                 loras=(), steps=None, denoise: float = 1.0,
-                input_image: str | None = None) -> dict:
+                input_image: str | None = None,
+                use_reference: bool | None = None) -> dict:
     """Return an edited DEEP COPY. LoRAs chain loader -> l1 -> l2 -> guider.
     `denoise` is always supplied (default 1.0); wire_denoise decides whether
     the graph consumes it. `input_image` switches to img2img."""
@@ -378,14 +379,15 @@ def apply_edits(wf: dict, prompt: str, seed: int, width=None, height=None,
     wf[s["guider"]]["inputs"]["model"] = prev
     if input_image:
         inject_input_image(wf, name=input_image)
-    else:
-        # Reference-free t2i (klein astronaut bug 2026-11-21): klein gen
-        # graphs carry LoadImage -> VAEEncode -> ReferenceLatent feeding the
-        # POSITIVE conditioning, alongside the Crystools latent switch. The
-        # switch picks the starting latent, but ReferenceLatent rides the
-        # image in through conditioning regardless — with its latent link
-        # present, a no-input run still renders the shipped LoadImage. Strip
-        # the latent link (ReferenceLatent then passes conditioning through).
+    # Reference-free runs (klein astronaut bug 2026-11-21 + Alexander's
+    # rule: reference conditioning is EDIT machinery — Generate with an
+    # input at denoise<1 is pure latent-start, never reference). klein
+    # gen graphs carry LoadImage -> VAEEncode -> ReferenceLatent feeding
+    # the POSITIVE conditioning alongside the Crystools latent switch.
+    # Strip the latent link unless explicitly requested: ReferenceLatent
+    # without a latent input passes conditioning through.
+    want_ref = use_reference if use_reference is not None else bool(input_image)
+    if not want_ref:
         for k, n in wf.items():
             if n["class_type"] == "ReferenceLatent" and is_link(
                     n["inputs"].get("latent")):
@@ -526,6 +528,11 @@ class GenerateBody(BaseModel):
     # FoxDen as its input, so the new render's provenance record can link
     # back to the source image's record. Set by the frontend on receive.
     parent_image: str | None = None
+    # Studio mode (2026-11-21): reference conditioning is EDIT machinery.
+    # False = Generate: an input image may seed the latent (i2i) but never
+    # feeds ReferenceLatent. True = Edit: reference rides in conditioning.
+    # None = legacy callers: keep reference whenever an input exists.
+    reference: bool | None = None
 
 
 def _node_errors_text(resp: dict) -> str:
@@ -638,7 +645,7 @@ def generate(body: GenerateBody):
     seed = body.seed if body.seed is not None else random.randrange(2 ** 31)
     wf = apply_edits(load_workflow(body.workflow), body.prompt, seed,
                      body.width, body.height, body.loras, body.steps,
-                     body.denoise, body.input_image)
+                     body.denoise, body.input_image, body.reference)
     try:
         status, resp = _json(
             "/prompt", data=json.dumps({"prompt": wf}).encode(),

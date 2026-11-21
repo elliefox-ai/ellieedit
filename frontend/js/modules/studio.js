@@ -1397,6 +1397,9 @@ export function mountStudio(panel, jobbar) {
           workflow: wfId, prompt: promptText, width, height,
           loras: pins.payload(), suspended_loras: pins.suspendedPayload(),
           denoise, seed,
+          // reference conditioning is EDIT machinery (2026-11-21): Generate
+          // may use an image as latent start (i2i) but never as reference.
+          reference: isEdit && wfEdit,
         };
         if (useInput) { body.input_image = useInput; body.parent_image = inputParent; }
         say(`generating candidate ${i + 1}/${batch}…`);
