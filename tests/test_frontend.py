@@ -703,10 +703,21 @@ def test_dupe_per_mark_persistence_wiring():
     assert "persistDraft();   // one POST for the bulk action" in dupe
     # queue + retry + flush
     assert "saveQueue = saveQueue.then(() => attempt(1))" in dupe
-    assert "visibilitychange" in dupe and "flushSaves()" in dupe
-    assert "beforeunload" in dupe
+    assert "visibilitychange" in dupe and "flushSaves(false)" in dupe
+    assert "beforeunload" in dupe and "flushSaves(true)" in dupe
     assert "navigator.sendBeacon" in dupe and "keepalive: true" in dupe
     assert "if (!savePending && !saveFailed) return;" in dupe
+    # flush race (2026-11-24): the beacon fires outside the save queue,
+    # so on HIDE it is skipped while a send is in flight or queued —
+    # the queued POST carries the latest cumulative payload, and a
+    # beacon landing before the in-flight older POST would be
+    # overwritten by it (latest-wins), dropping the newest mark. On
+    # CLOSE the beacon still fires: the page is dying, the queued POST
+    # would die with it, and the in-flight fetch is cancelled by unload.
+    assert "function flushSaves(forClose)" in dupe
+    assert "if (!forClose && savePending) return;" in dupe
+    assert "if (document.hidden) flushSaves(false);" in dupe
+    assert "window.addEventListener('beforeunload', () => flushSaves(true));" in dupe
     # visible durability state, not silent
     assert "id=\"ss-save-badge\"" in dupe and "saveStateText()" in dupe
     # draft seeded from the ledger on entry (pre-existing mechanism, kept)

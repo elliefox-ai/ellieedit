@@ -536,6 +536,350 @@ def test_incremental_never_rewrites_existing_and_skips_given_paths(world):
     assert _fams(world) == before
 
 
+def _rect(seed: int, w: int, h: int) -> Image.Image:
+    """A smooth-seed image at a non-square size (aspect-gate fixtures)."""
+    return _img(seed).resize((w, h), Image.BICUBIC)
+
+
+def _hand_family(w, fid: str, files, edges, source="dupelib", related=None,
+                 extra_members=None):
+    """Hand-write a family JSON over real files — the shape another engine
+    (dupelib) writes: dense edges, any tiers, no width/height on members.
+    files: [(rel, Image)]; edges/related: lists of dicts, written verbatim.
+    extra_members: raw member dicts appended as-is (e.g. a dead path)."""
+    d = w["dupe"]
+    members = []
+    for rel, img in files:
+        _save(img, d / rel)
+        p = d / rel
+        ph, dh = ds.hash_file(p)
+        st = p.stat()
+        members.append({"path": rel, "size": st.st_size, "mtime": int(st.st_mtime),
+                        "dhash": ds.hex64(dh), "phash": ds.hex64(ph)})
+    members += list(extra_members or [])
+    fam = {"format": "dupe-analyzer.family", "version": 1, "id": fid,
+           "created": "x", "root": str(d), "authored": False,
+           "source": source,
+           "tiers": sorted({e.get("tier") for e in edges}),
+           "members": members, "edges": edges}
+    if related:
+        fam["related"] = related
+    (w["data"] / "families" / f"{fid}.json").write_text(json.dumps(fam, indent=1))
+    idx = _index(w)
+    idx["families"].append({"id": fid, "size": len(members), "tiers": fam["tiers"],
+                            "first_member": members[0]["path"], "authored": False,
+                            "source": source})
+    (w["data"] / "index.json").write_text(json.dumps(idx))
+    return fam
+
+
+def _all_member_abs_paths(w) -> list[str]:
+    return [ce._abs_of(m, w["dupe"]) for f in _fams(w).values()
+            for m in f["members"]]
+
+
+def _related_families(fam) -> dict[str, dict]:
+    return {r["related_family"]: r for r in fam.get("related", [])}
+
+
+# ------------------------------------------- Change 1: decompose in rebuild
+
+def test_reform_decomposes_dupelib_mega_family(world):
+    # fam-a2b8a69a999e's shape, synthetic and small: 10 members, dense
+    # "related" edges chaining three allowed-tier components plus three
+    # related-only strays into one mega-family.
+    d = world["dupe"]
+    # a second, ordinary family for the pre-existing related entry to point at
+    _save(_img(900), d / "o1.png")
+    _save(_jpeg(_img(900)), d / "o2.png")
+    _existing_family(world, "fam-999999999999", ["o1.png", "o2.png"])
+    files = [("m0.png", _img(100)), ("m1.png", _jpeg(_img(100))),
+             ("m2.png", _bright(_img(100))),
+             ("m3.png", _img(110)), ("m4.png", _jpeg(_img(110))),
+             ("m5.png", _img(1)),
+             ("m6.png", Image.blend(_img(1), _img(2), 0.45)),
+             ("m7.png", _img(700)), ("m8.png", _img(701)), ("m9.png", _img(702))]
+    edges = [
+        {"a": 0, "b": 1, "tier": "near-identical", "mode": "dhash", "distance": 1},
+        {"a": 1, "b": 2, "tier": "near-identical", "mode": "dhash", "distance": 2},
+        {"a": 0, "b": 2, "tier": "near-identical", "mode": "dhash", "distance": 2},
+        {"a": 3, "b": 4, "tier": "regional", "mode": "dhash", "distance": 8},
+        {"a": 5, "b": 6, "tier": "style", "mode": "style", "distance": 0.78},
+        # the weak tier, chaining everything into one mega-family
+        {"a": 0, "b": 3, "tier": "related", "distance": 12},
+        {"a": 1, "b": 4, "tier": "related", "distance": 13},
+        {"a": 2, "b": 6, "tier": "related", "distance": 14},
+        {"a": 3, "b": 5, "tier": "related", "distance": 11},
+        {"a": 5, "b": 7, "tier": "related", "distance": 15},
+        {"a": 7, "b": 8, "tier": "related", "distance": 16},
+        {"a": 8, "b": 9, "tier": "related", "distance": 17},
+        {"a": 0, "b": 9, "tier": "related", "distance": 18},
+    ]
+    mega = "fam-a2b8a69a999e"
+    _hand_family(world, mega, files, edges,
+                 related=[{"related_family": "fam-999999999999",
+                           "tier": "regional", "distance": 5}])
+    r = _run(world, rebuild=True)
+    assert r["reformed"] == 1 and r["reformed_created"] == 3
+    assert r["reformed_unclaimed"] == 3 and r["reformed_dead"] == 0
+    fams = _fams(world)
+    assert mega not in fams
+    by_names = _by_names(world)
+    comp_a = by_names[frozenset({"m0.png", "m1.png", "m2.png"})]
+    comp_b = by_names[frozenset({"m3.png", "m4.png"})]
+    comp_c = by_names[frozenset({"m5.png", "m6.png"})]
+    # the related-only strays are in NO family (unclaimed, re-pooled as
+    # singletons — their images are unrelated to everything)
+    in_fams = {Path(m["path"]).name for f in fams.values() for m in f["members"]}
+    assert not ({"m7.png", "m8.png", "m9.png"} & in_fams)
+    # no family file anywhere contains a "related" edge
+    for f in fams.values():
+        assert all(e.get("tier") != "related" for e in f.get("edges", []))
+        assert f["source"] == "dupelib" or f["id"] == "fam-999999999999"
+        assert _fully_edged(f)
+    # sources preserved (NOT cluster-engine-v2) + reformed_from marker
+    for f in (comp_a, comp_b, comp_c):
+        assert f["source"] == "dupelib"
+        assert f["reformed_from"] == {"family": mega}
+        assert f["tiers"] == sorted({e["tier"] for e in f["edges"]})
+    # cross-family related links, from the disallowed edges
+    assert set(_related_families(comp_a)) >= {comp_b["id"], comp_c["id"],
+                                              "fam-999999999999"}
+    assert set(_related_families(comp_b)) >= {comp_a["id"], comp_c["id"],
+                                              "fam-999999999999"}
+    assert set(_related_families(comp_c)) >= {comp_a["id"], comp_b["id"],
+                                              "fam-999999999999"}
+    assert _related_families(comp_a)[comp_b["id"]]["tier"] == "related"
+    # the pre-existing related entry is preserved, deduped by family
+    assert len([r for r in comp_a["related"]
+                if r["related_family"] == "fam-999999999999"]) == 1
+    # index rows: the mega row is replaced in place by the three new rows
+    ids = [x["id"] for x in _index(world)["families"]]
+    assert mega not in ids
+    assert len(ids) == len(set(ids)) == 4      # 3 re-formed + the other family
+    assert all(next(x for x in _index(world)["families"] if x["id"] == f["id"])
+               ["source"] == "dupelib" for f in (comp_a, comp_b, comp_c))
+    # the "other" family is byte-identical: re-form never touched it
+    other = _fams(world)["fam-999999999999"]
+    assert _names(other) == {"o1.png", "o2.png"}
+
+    # second rebuild is a no-op on the re-formed families (idempotent):
+    # all their edges are allowed tiers now, and their (non-v2) source
+    # means the drop step never touches them either
+    before = {fid: (world["data"] / "families" / f"{fid}.json").read_bytes()
+              for fid in fams}
+    r2 = _run(world, rebuild=True)
+    assert r2["reformed"] == 0 and r2["reformed_created"] == 0
+    assert r2["families"] == 0
+    assert {fid: (world["data"] / "families" / f"{fid}.json").read_bytes()
+            for fid in fams} == before
+
+
+def test_reform_near_identical_only_family_survives_intact(world):
+    # the acceptance's allowance: a large family formed SOLELY by
+    # near-identical/exact edges stays whole, byte-identical.
+    files = []
+    base = _img(100)
+    files.append(("n00.png", base))
+    files.append(("n01.png", base))                    # exact twin of n00
+    files.append(("n02.png", base))                    # exact twin of n00
+    for k in range(3, 20):
+        files.append((f"n{k:02d}.png",
+                      _jpeg(base) if k % 2 else _bright(base, 8)))
+    edges = ([{"a": 0, "b": 1, "tier": "exact", "mode": "exact", "distance": 0},
+              {"a": 0, "b": 2, "tier": "exact", "mode": "exact", "distance": 0}]
+             + [{"a": k, "b": k + 1, "tier": "near-identical",
+                 "mode": "dhash", "distance": 1} for k in range(19)])
+    fid = "fam-202020202020"
+    _hand_family(world, fid, files, edges)
+    before = (world["data"] / "families" / f"{fid}.json").read_bytes()
+    r = _run(world, rebuild=True)
+    assert r["reformed"] == 0 and r["families"] == 0
+    assert (world["data"] / "families" / f"{fid}.json").read_bytes() == before
+    assert len(_fams(world)[fid]["members"]) == 20
+
+
+def test_reform_skips_protected_resolved_families(world):
+    # past reviews are never rewritten: a resolved mega-family is left
+    # alone by the re-form step, even with "related" edges.
+    files = [("p0.png", _img(100)), ("p1.png", _jpeg(_img(100))),
+             ("p2.png", _img(700))]
+    edges = [{"a": 0, "b": 1, "tier": "near-identical", "mode": "dhash",
+              "distance": 1},
+             {"a": 1, "b": 2, "tier": "related", "distance": 12}]
+    fid = "fam-303030303030"
+    _hand_family(world, fid, files, edges)
+    before = (world["data"] / "families" / f"{fid}.json").read_bytes()
+    r = _run(world, rebuild=True, protected_ids={fid})
+    assert r["reformed"] == 0 and r["reformed_skipped_protected"] == 1
+    assert (world["data"] / "families" / f"{fid}.json").read_bytes() == before
+
+
+# ------------------------------------------- Change 2: aspect gate
+
+def test_aspect_gate_blocks_cross_orientation_edges():
+    # a hash-identical pair (dhash 0 / phash 0) in different orientation
+    # classes forms NO edge at all; same-orientation pairs form edges
+    # exactly as before; dims=None keeps the old ungated callers working.
+    dh = [0, 0b11]
+    ph = [0, 0]
+    p63 = [0, (1 << 50) - 1]                          # far in phash63
+    coarse = np.zeros((2, 256), np.float32)
+    cl, cands = ce.compute_edges(dh, ph, p63, coarse,
+                                 dims=[(96, 128), (128, 96)])
+    assert cl == [] and cands == []                   # portrait vs landscape
+    cl, cands = ce.compute_edges(dh, ph, p63, coarse,
+                                 dims=[(96, 128), (90, 120)])
+    assert cl == [(0, 1, 1)]                         # both portrait: near edge
+    assert len(cands) == 1 and cands[0][3] == "dhash"
+    assert cands[0][4] == 2
+    cl, cands = ce.compute_edges(dh, ph, p63, coarse,
+                                 dims=[(100, 250), (89, 100)])
+    assert cl == [] and cands == []                   # portrait, 2.2x divergence
+    cl, cands = ce.compute_edges(dh, ph, p63, coarse,
+                                 dims=[(120, 100), (240, 100)])
+    assert cl == [(0, 1, 1)]                         # landscape, exactly 2x: allowed
+    cl, cands = ce.compute_edges(dh, ph, p63, coarse,
+                                 dims=[(120, 100), (241, 100)])
+    assert cl == []                                  # landscape, just over 2x
+    cl, cands = ce.compute_edges(dh, ph, p63, coarse,
+                                 dims=[(100, 100), (100, 200)])
+    assert cl == []                                  # square vs portrait
+    cl, cands = ce.compute_edges(dh, ph, p63, coarse,
+                                 dims=[(96, 128), None])
+    assert cl == [(0, 1, 1)]                         # unmeasurable fails open
+    cl, cands = ce.compute_edges(dh, ph, p63, coarse)
+    assert cl == [(0, 1, 1)]                         # dims=None: ungated
+
+
+def test_aspect_gate_end_to_end_members_carry_dimensions(world):
+    # the same smooth seed at portrait and landscape sizes is
+    # hash-IDENTICAL (dhash 0 / phash 0) — without the gate it would be
+    # an exact family; with it, no edge forms between the orientations.
+    # The portrait pair still families normally, and its member records
+    # carry width/height. The landscape twin is not silently dropped:
+    # it stays unclaimed this scan, and on the NEXT scan it surfaces as
+    # a single-member proposal against the now-existing portrait family,
+    # for a human to rule on.
+    d = world["dupe"]
+    _save(_rect(100, 96, 128), d / "port_a.png")
+    _save(_rect(100, 96, 128), d / "port_b.png")       # same bytes, portrait
+    _save(_rect(100, 128, 96), d / "land_a.png")       # same content, landscape
+    s = _run(world)
+    assert s["families"] == 1 and s["proposals"] == 0
+    fam, = _fams(world).values()
+    assert _names(fam) == {"port_a.png", "port_b.png"}
+    assert all(m["width"] == 96 and m["height"] == 128 for m in fam["members"])
+    assert "land_a.png" not in {Path(m["path"]).name
+                                for f in _fams(world).values()
+                                for m in f["members"]}
+    s2 = _run(world)
+    assert s2["families"] == 1 and s2["proposals"] == 1
+    prop, = [f for f in _fams(world).values() if f.get("proposed_merge")]
+    assert _names(prop) == {"land_a.png"}
+    assert prop["proposed_merge"]["family_id"] == fam["id"]
+
+
+def test_aspect_gate_drops_cross_orientation_edge_on_reform(world):
+    # a re-formed family: A(portrait)—C(portrait) near-identical survives,
+    # A—B(portrait—landscape) near-identical is dropped, so B is unclaimed.
+    # The family needs a disallowed edge to be re-formed at all.
+    files = [("a.png", _rect(100, 96, 128)),
+             ("b.png", _rect(800, 128, 96)),
+             ("c.png", _rect(100, 96, 128))]
+    edges = [{"a": 0, "b": 1, "tier": "near-identical", "mode": "dhash",
+              "distance": 0},
+             {"a": 0, "b": 2, "tier": "near-identical", "mode": "dhash",
+              "distance": 0},
+             {"a": 1, "b": 2, "tier": "related", "distance": 12}]
+    _hand_family(world, "fam-404040404040", files, edges)
+    r = _run(world, rebuild=True)
+    assert r["reformed"] == 1 and r["reformed_created"] == 1
+    fam, = [f for f in _fams(world).values()
+            if f["id"] != "fam-404040404040"]
+    assert _names(fam) == {"a.png", "c.png"}
+    assert fam["edges"] == [{"a": 0, "b": 1, "tier": "near-identical",
+                             "mode": "dhash", "distance": 0}]
+    assert "b.png" not in {Path(m["path"]).name
+                           for f in _fams(world).values()
+                           for m in f["members"]}
+
+
+# ------------------------------------------- Change 4: dead member paths
+
+def test_dead_paths_dropped_on_reform(world):
+    # a dupelib family with a dead member: the re-formed family excludes
+    # it, edges remap, and NO written family file contains a nonexistent
+    # member path.
+    files = [("d0.png", _img(100)), ("d1.png", _jpeg(_img(100)))]
+    ghost = {"path": "gone/ghost.png", "size": 123, "mtime": 0,
+             "dhash": "0" * 16, "phash": "0" * 16}
+    edges = [{"a": 0, "b": 1, "tier": "near-identical", "mode": "dhash",
+              "distance": 1},
+             {"a": 0, "b": 2, "tier": "near-identical", "mode": "dhash",
+              "distance": 2},
+             {"a": 1, "b": 2, "tier": "related", "distance": 12}]
+    _hand_family(world, "fam-505050505050", files, edges,
+                 extra_members=[ghost])
+    r = _run(world, rebuild=True)
+    assert r["reformed"] == 1 and r["dead_members"] == 1
+    assert r["reformed_dead"] == 1
+    fam, = _fams(world).values()
+    assert _names(fam) == {"d0.png", "d1.png"}
+    assert fam["edges"] == [{"a": 0, "b": 1, "tier": "near-identical",
+                             "mode": "dhash", "distance": 1}]
+    for ap in _all_member_abs_paths(world):
+        assert Path(ap).is_file()
+
+
+def test_dead_paths_dropped_on_merge(world):
+    # apply_decisions: a dead member in the TARGET family never reaches
+    # the merged family file; edges remap, and the proposal edge is
+    # found by path among the survivors.
+    d = world["dupe"]
+    files = [("t1.png", _img(100)), ("t2.png", _jpeg(_img(100))),
+             ("t3.png", _bright(_img(100), 10))]
+    edges = [{"a": 0, "b": 1, "tier": "near-identical", "mode": "dhash",
+              "distance": 1},
+             {"a": 0, "b": 2, "tier": "near-identical", "mode": "dhash",
+              "distance": 2}]
+    _hand_family(world, "fam-606060606060", files, edges)
+    _save(_jpeg(_img(100), 40), d / "n.png")
+    p = d / "n.png"
+    ph, dh = ds.hash_file(p)
+    st = p.stat()
+    prop_id = "fam-616161616161"
+    prop = {"format": "dupe-analyzer.family", "version": 1, "id": prop_id,
+            "created": "x", "root": str(d), "authored": False,
+            "source": ce.SOURCE_V2, "tiers": ["regional"],
+            "members": [{"path": "n.png", "size": st.st_size,
+                         "mtime": int(st.st_mtime), "dhash": ds.hex64(dh),
+                         "phash": ds.hex64(ph)}],
+            "edges": [],
+            "proposed_merge": {"family_id": "fam-606060606060",
+                               "matched_member": "t1.png", "distance": 0,
+                               "new_member": "n.png"}}
+    (world["data"] / "families" / f"{prop_id}.json").write_text(json.dumps(prop))
+    (world["dupe"] / "t2.png").unlink()                # target member dies
+    r = ce.apply_decisions(world["dupe"], world["data"], {prop_id: "merge"})
+    assert r["dead_dropped"] == 1
+    merged = _fams(world)[r["merged"][0]]
+    assert _names(merged) == {"t1.png", "t3.png", "n.png"}
+    assert merged["edges"] == [
+        {"a": 0, "b": 1, "tier": "near-identical", "mode": "dhash",
+         "distance": 2},
+        {"a": 0, "b": 2, "tier": "regional", "mode": "proposal",
+         "distance": 0}]
+    assert _fully_edged(merged)
+    # the dead-path rule bites at WRITE time: the merged file is clean.
+    # The old target file is deliberately untouched by apply_decisions
+    # (its resolved ledger entry stays), so it still lists the dead
+    # member — that staleness is the re-form step's job on the next
+    # rebuild, not the merge's.
+    for m in merged["members"]:
+        assert Path(ce._abs_of(m, world["dupe"])).is_file()
+
+
 # -------------------------------------------------- rebuild (CLI-only)
 
 def test_rebuild_protects_resolved_and_regenerates_rest(world):
