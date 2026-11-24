@@ -62,6 +62,71 @@ TIER_EXACT, TIER_NEAR, TIER_REGIONAL, TIER_STYLE = (
     "exact", "near-identical", "regional", "style")
 _TIER_BY_CODE = {0: TIER_EXACT, 1: TIER_NEAR, 2: TIER_REGIONAL, 3: TIER_STYLE}
 
+# Tiers that may contribute to family GROUPING (Change 1, 2026-11-24).
+# Anything NOT in this allowlist — notably dupelib's "related" — is
+# excluded from grouping: A-related-to-B-related-to-C chains re-create
+# mega-families from raw edge quantity. "pixel-identical" is dupelib's
+# vocabulary (this engine's "exact"); both are allowed. Related edges
+# stay stored as cross-family links (see reform_families), never as
+# grouping evidence.
+GROUPING_TIERS = frozenset({
+    TIER_EXACT, TIER_NEAR, TIER_REGIONAL, TIER_STYLE, "pixel-identical"})
+
+# Orientation bands for the aspect gate (Change 2, 2026-11-24). Aspect =
+# width/height POST-EXIF-transpose, i.e. the orientation the reviewer
+# sees: portrait < 0.9, square 0.9–1.1, landscape > 1.1. Two images are
+# aspect-compatible when they share a band AND their aspect ratios
+# diverge by no more than 2x within it. The gate exists because
+# dhash/phash of a portrait and a landscape crop of the same subject can
+# score close while being different review decisions.
+ASPECT_PORTRAIT_MAX = 0.9
+ASPECT_LANDSCAPE_MIN = 1.1
+ASPECT_MAX_DIVERGENCE = 2.0
+
+
+def _orientation_band(aspect: float) -> int:
+    if aspect < ASPECT_PORTRAIT_MAX:
+        return 0                                            # portrait
+    if aspect > ASPECT_LANDSCAPE_MIN:
+        return 2                                            # landscape
+    return 1                                                # square
+
+
+def aspect_compatible(d1, d2) -> bool:
+    """Same orientation band AND aspect ratios within 2x. A missing
+    dimension (None) fails OPEN — an unmeasurable image never silently
+    drops an edge."""
+    if not d1 or not d2:
+        return True
+    w1, h1 = d1
+    w2, h2 = d2
+    if not w1 or not h1 or not w2 or not h2:
+        return True
+    a1, a2 = w1 / h1, w2 / h2
+    if _orientation_band(a1) != _orientation_band(a2):
+        return False
+    return max(a1, a2) / max(min(a1, a2), 1e-9) <= ASPECT_MAX_DIVERGENCE
+
+
+def image_dimensions(path: Path) -> tuple[int, int] | None:
+    """Post-EXIF-transpose (w, h) from a HEADER-ONLY read: Image.open +
+    .size never decodes pixels; the EXIF orientation tag (274) is read
+    from the header and swaps the axes exactly when the transpose would
+    (orientations 5–8 involve a 90-degree rotation). None when the file
+    cannot be read at all."""
+    try:
+        with Image.open(path) as im:
+            w, h = im.size
+            try:
+                ori = im.getexif().get(274)
+            except Exception:
+                ori = None
+            if ori in (5, 6, 7, 8):
+                w, h = h, w
+            return w, h
+    except Exception:
+        return None
+
 
 # ---------------------------------------------------------------- dialects
 
@@ -116,8 +181,10 @@ def hash_file_v2(path: Path) -> dict:
         except Exception:
             pass
         img = ImageOps.exif_transpose(img)
+        w, h = img.size          # post-transpose: the orientation seen
         return {"dhash": ds.dhash(img), "phash": ds.phash(img),
-                "phash63": phash63(img), "coarse": coarse_sig(img)}
+                "phash63": phash63(img), "coarse": coarse_sig(img),
+                "width": w, "height": h}
 
 
 def coarse_b64(c: np.ndarray) -> str:
@@ -199,7 +266,7 @@ def _popcount(x: np.ndarray) -> np.ndarray:
     return _POP8[b].sum(axis=-1).astype(np.int32)
 
 
-def compute_edges(dh, ph, p63, coarse, *, chunk: int = CH):
+def compute_edges(dh, ph, p63, coarse, *, chunk: int = CH, dims=None):
     """One chunked distance pass -> (cluster_edges, pair_candidates).
 
     cluster_edges: [(i, j, tier_code)] i<j — union-find input. INCLUDES d==0.
@@ -211,6 +278,12 @@ def compute_edges(dh, ph, p63, coarse, *, chunk: int = CH):
       dhash    64-bit dhash distance <= 6
       phash63  63-bit DC-dropped phash distance <= 10
       style    0.7 <= Pearson r <= 0.999 on the 16x16 coarse signature
+
+    dims (Change 2, 2026-11-24): optional per-item (width, height); when
+    given, the aspect gate applies across ALL channels — an edge forms
+    only between aspect-compatible images. Exact duplicates are
+    dimension-identical, so the gate is a no-op there. dims=None (the
+    old callers, incl. the unit tests) means ungated.
     """
     dh = np.asarray(dh, dtype=np.uint64)
     ph = np.asarray(ph, dtype=np.uint64)
@@ -219,6 +292,13 @@ def compute_edges(dh, ph, p63, coarse, *, chunk: int = CH):
     n = len(dh)
     cluster, cands = [], []
     cols = np.arange(n)[None, :]
+    if dims is not None:
+        _w = np.array([d[0] if d and d[0] else 0 for d in dims], dtype=np.float64)
+        _h = np.array([d[1] if d and d[1] else 0 for d in dims], dtype=np.float64)
+        _aspect = np.where(_h > 0, _w / np.maximum(_h, 1), 1.0)
+        _band = np.where(_aspect < ASPECT_PORTRAIT_MAX, 0,
+                         np.where(_aspect > ASPECT_LANDSCAPE_MIN, 2, 1))
+        _known = (_w > 0) & (_h > 0)
     for i0 in range(0, n, chunk):
         i1 = min(n, i0 + chunk)
         dd = _popcount(dh[i0:i1, None] ^ dh[None, :])
@@ -232,7 +312,17 @@ def compute_edges(dh, ph, p63, coarse, *, chunk: int = CH):
         dh_ok = dd <= DHASH_TOL
         p3_ok = p3 <= PHASH63_TOL
         st_ok = (r >= STYLE_MIN) & (r <= STYLE_MAX)
-        any_edge = upper & (exact | t1 | t2 | dh_ok | p3_ok | st_ok)
+        if dims is not None:
+            _compat = (_band[i0:i1, None] == _band[None, :]) & (
+                np.maximum(_aspect[i0:i1, None], _aspect[None, :]) /
+                np.maximum(np.minimum(_aspect[i0:i1, None], _aspect[None, :]),
+                           1e-9) <= ASPECT_MAX_DIVERGENCE)
+            # unmeasurable on either side fails open — never drop an edge
+            # for a dimension we could not read
+            _compat = _compat | ~_known[i0:i1, None] | ~_known[None, :]
+        else:
+            _compat = True
+        any_edge = upper & _compat & (exact | t1 | t2 | dh_ok | p3_ok | st_ok)
         # tier code: exact 0 > near 1 > regional 2 (T2 or supplementary hash)
         # > style 3
         code = np.full(dd.shape, 3, dtype=np.int8)
@@ -247,7 +337,7 @@ def compute_edges(dh, ph, p63, coarse, *, chunk: int = CH):
         for a, b in zip(*np.nonzero(any_edge)):
             gi = int(a) + i0
             cluster.append((gi, int(b), int(code[a, b])))
-        for a, b in zip(*np.nonzero(upper & (hash_pair | st_pair))):
+        for a, b in zip(*np.nonzero(upper & _compat & (hash_pair | st_pair))):
             gi, gj = int(a) + i0, int(b)
             if hash_pair[a, b]:
                 kd = dd[a, b] / 64.0 if dh_pair[a, b] else np.inf
@@ -321,6 +411,235 @@ def stored_family_units(cluster_edges, cands, n: int):
     stored = pairs + exact_edges
     components = union_find_groups(n, [(e["a"], e["b"], 0) for e in stored])
     return stored, components
+
+
+def _drop_dead_members(members: list[dict], edges: list[dict],
+                       dupe_root: Path) -> tuple[list[dict], list[dict], int]:
+    """Change 4 (2026-11-24): drop members whose file no longer exists
+    BEFORE a family file is written, remapping positional edges and
+    dropping edges that touched a dropped member. Returns
+    (members, edges, n_dropped). A member with no resolvable path counts
+    as dead — a family file must never serve a 404 tile. One shared
+    helper for every family-file write in scan_incremental, the
+    apply_decisions merges, and reform_families."""
+    pos: dict[int, int] = {}
+    kept: list[dict] = []
+    for k, m in enumerate(members):
+        abs_path = _abs_of(m, dupe_root)
+        if abs_path and Path(abs_path).is_file():
+            pos[k] = len(kept)
+            kept.append(m)
+    new_edges = []
+    for e in edges:
+        a, b = e.get("a"), e.get("b")
+        if isinstance(a, int) and isinstance(b, int) and a in pos and b in pos:
+            new_edges.append({**e, "a": pos[a], "b": pos[b]})
+    return kept, new_edges, len(members) - len(kept)
+
+
+def _replace_index_row(idx: dict, old_id: str, new_rows: list[dict]):
+    """Swap one index row for several, in place (keeps queue order);
+    appends when the old row is missing."""
+    out, replaced = [], False
+    for r in idx.get("families", []):
+        if r.get("id") == old_id:
+            if not replaced:
+                out.extend(new_rows)
+                replaced = True
+            continue                                      # drop dup old rows
+        out.append(r)
+    if not replaced:
+        out.extend(new_rows)
+    idx["families"] = out
+
+
+def reform_families(families_dir: Path, dupe_root: Path, idx: dict, *,
+                    protected_ids=frozenset(), progress=None) -> dict:
+    """Change 1 (2026-11-24): re-form existing families whose edges
+    contain a disallowed tier (notably dupelib's "related") using only
+    allowed-tier edges. Rebuild branch only, BEFORE pool collection, so
+    split families claim their members before the pool is computed.
+
+    Per family (any source — the "related" tier arrives in
+    dupelib-written JSONs with dense pairwise edges, which this engine
+    never writes and the old rebuild never touched):
+      * dead members are dropped first (Change 4);
+      * components are the connected components over allowed-tier edges
+        that also pass the aspect gate (dupelib members carry no stored
+        dimensions, so those are read from disk, header-only);
+      * each component of >= 2 members with >= 1 allowed edge becomes a
+        NEW family under its content-derived id, with the original
+        `source` PRESERVED (not cluster-engine-v2) so repeated rebuilds
+        are stable — the step is idempotent on already-decomposed
+        families, which have only allowed-tier edges;
+      * members with no allowed-tier edge form no family: they become
+        unclaimed and are re-pooled by the scan that follows;
+      * new families start unresolved (membership change = re-review,
+        the same accepted cost as the merge path); the ledger is never
+        touched — old ids' verdicts stay as history;
+      * disallowed edges are REMOVED from `edges` (no re-formed family
+        file contains one); for each disallowed edge whose endpoints land
+        in DIFFERENT new families, a `related` entry is recorded on each
+        family pointing at the other (tier + distance when present);
+        within-component disallowed edges are dropped as redundant;
+        pre-existing `related` entries on the original family are
+        preserved onto each new family (dedupe by related_family) —
+        the relation was to the family, and no member-level attribution
+        exists to split it by component;
+      * the old family file is deleted and its index row replaced by
+        rows for the new families.
+
+    Families with no `edges` field at all (straggler-style) are left
+    alone — nothing to re-form by. Resolved families (protected_ids)
+    are never re-formed: past reviews are not rewritten. Large
+    near-identical/exact-only components stay whole.
+    """
+    reformed = created = unclaimed = dead = 0
+    skipped_protected = 0
+    for p in sorted(families_dir.glob("fam-*.json")):
+        try:
+            fam = json.loads(p.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        fid = fam.get("id", p.stem)
+        edges = fam.get("edges") or []
+        if not edges:
+            continue                                  # nothing to re-form by
+        if all(e.get("tier") in GROUPING_TIERS for e in edges):
+            continue                                  # already decomposed
+        if fid in protected_ids:
+            skipped_protected += 1
+            continue
+        members = fam.get("members", [])
+        members, edges, n_dead = _drop_dead_members(members, edges, dupe_root)
+        dead += n_dead
+        if len(members) < 2 or not edges:
+            # dissolved entirely: drop file + row; survivors unclaimed
+            unclaimed += len(members)
+            try:
+                p.unlink()
+            except OSError:
+                pass
+            _replace_index_row(idx, fid, [])
+            reformed += 1
+            continue
+        # dimensions for the aspect gate: stored when present, else a
+        # header-only read from disk (dupelib members carry none)
+        dims: list[tuple[int, int] | None] = []
+        for m in members:
+            w, h = m.get("width"), m.get("height")
+            if w and h:
+                dims.append((w, h))
+            else:
+                ap = _abs_of(m, dupe_root)
+                dims.append(image_dimensions(Path(ap)) if ap else None)
+        allowed = [e for e in edges
+                   if e.get("tier") in GROUPING_TIERS
+                   and isinstance(e.get("a"), int) and isinstance(e.get("b"), int)
+                   and aspect_compatible(dims[e["a"]], dims[e["b"]])]
+        disallowed = [e for e in edges
+                      if e.get("tier") not in GROUPING_TIERS
+                      and isinstance(e.get("a"), int) and isinstance(e.get("b"), int)]
+        comps = union_find_groups(len(members),
+                                  [(e["a"], e["b"], 0) for e in allowed])
+        # build the new families (members + edges) before assigning ids,
+        # so cross-component related links can point at real new ids
+        built: list[dict] = []
+        comp_of: dict[int, int] = {}
+        for comp in comps:
+            pos = {old: new for new, old in enumerate(comp)}
+            comp_edges = [{**e, "a": pos[e["a"]], "b": pos[e["b"]]}
+                          for e in allowed if e["a"] in pos and e["b"] in pos]
+            if not comp_edges:
+                continue
+            comp_members = [members[i] for i in comp]
+            for k, i in enumerate(comp):
+                if not comp_members[k].get("width") and dims[i]:
+                    comp_members[k] = {**comp_members[k],
+                                       "width": dims[i][0],
+                                       "height": dims[i][1]}
+            for i in comp:
+                comp_of[i] = len(built)
+            built.append({"members": comp_members, "edges": comp_edges,
+                          "id": _family_id(_abs_of(m, dupe_root)
+                                           for m in comp_members)})
+        if not built:
+            # allowed edges existed but no component survived them (cannot
+            # normally happen — components come from those edges); all
+            # members unclaimed
+            unclaimed += len(members)
+            try:
+                p.unlink()
+            except OSError:
+                pass
+            _replace_index_row(idx, fid, [])
+            reformed += 1
+            continue
+        # cross-component related links, from the disallowed edges
+        links: dict[int, list[dict]] = {k: [] for k in range(len(built))}
+        seen_link: set[tuple[int, str]] = set()
+        for e in disallowed:
+            ca, cb = comp_of.get(e["a"]), comp_of.get(e["b"])
+            if ca is None or cb is None or ca == cb:
+                continue              # unclaimed endpoint, or same component
+            for src, dst in ((ca, cb), (cb, ca)):
+                key = (src, built[dst]["id"])
+                if key in seen_link:
+                    continue
+                seen_link.add(key)
+                links[src].append({"related_family": built[dst]["id"],
+                                   "tier": e.get("tier"),
+                                   "distance": e.get("distance")})
+        # pre-existing related entries are preserved onto every new
+        # family (no member-level attribution exists); dedupe by family
+        pre = [r for r in (fam.get("related") or [])
+               if isinstance(r, dict) and r.get("related_family")
+               and r.get("related_family") != fid]
+        source = fam.get("source")
+        rows = []
+        for k, b in enumerate(built):
+            rel = list(links[k])
+            have = {r["related_family"] for r in rel}
+            for r in pre:
+                if r["related_family"] not in have:
+                    rel.append({"related_family": r["related_family"],
+                                "tier": r.get("tier"),
+                                "distance": r.get("distance")})
+                    have.add(r["related_family"])
+            tiers = sorted({e["tier"] for e in b["edges"]})
+            nfam = {"format": "dupe-analyzer.family", "version": 1,
+                    "id": b["id"], "created": _now(),
+                    "root": fam.get("root", str(dupe_root)), "authored": False,
+                    "source": source,
+                    "library_matches": sum(1 for m in b["members"]
+                                           if m.get("library_match")),
+                    "tiers": tiers, "members": b["members"],
+                    "edges": b["edges"],
+                    "reformed_from": {"family": fid}}
+            if rel:
+                nfam["related"] = rel
+            (families_dir / f"{b['id']}.json").write_text(
+                json.dumps(nfam, indent=1))
+            rows.append({"id": b["id"], "size": len(b["members"]),
+                         "tiers": tiers,
+                         "first_member": b["members"][0].get("path", ""),
+                         "authored": False, "source": source,
+                         "library_matches": nfam["library_matches"]})
+        # the old file goes — unless a new family reuses its id (same
+        # membership, only the disallowed edges dropped), in which case
+        # the file on disk already IS the new family
+        if fid not in {b["id"] for b in built}:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        _replace_index_row(idx, fid, rows)
+        reformed += 1
+        created += len(built)
+        unclaimed += len(members) - sum(len(b["members"]) for b in built)
+    return {"reformed": reformed, "reformed_created": created,
+            "reformed_unclaimed": unclaimed, "reformed_dead": dead,
+            "reformed_skipped_protected": skipped_protected}
 
 
 # ------------------------------------------------- existing-family matching
@@ -442,6 +761,8 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
     families_dir.mkdir(parents=True, exist_ok=True)
     idx = _read_index(dupe_data)
     dropped = 0
+    reform = {"reformed": 0, "reformed_created": 0, "reformed_unclaimed": 0,
+              "reformed_dead": 0, "reformed_skipped_protected": 0}
     if rebuild:
         keep, drop_ids = [], set()
         for f in idx.get("families", []):
@@ -456,6 +777,12 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
                 pass
         idx["families"] = keep
         dropped = len(drop_ids)
+        # Change 1: re-form any-source families whose edges contain a
+        # disallowed tier, BEFORE pool collection — split families claim
+        # their members before the pool is computed. Resolved families
+        # are protected (past reviews are never rewritten).
+        reform = reform_families(families_dir, dupe_root, idx,
+                                 protected_ids=protected_ids)
 
     def step(phase, done, total, label=""):
         if progress:
@@ -494,7 +821,16 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
                         continue
                     store.put(key, st.st_size, int(st.st_mtime), h)
                     hashed += 1
-                pool.append({**h, "size": st.st_size, "mtime": int(st.st_mtime),
+                # dimensions for the aspect gate (Change 2): fresh hashes
+                # carry them; a cache hit needs a header-only read — no
+                # cache invalidation, no SCHEMA_VERSION bump
+                if h.get("width") and h.get("height"):
+                    w, hgt = h["width"], h["height"]
+                else:
+                    _dims = image_dimensions(f)
+                    w, hgt = _dims if _dims else (None, None)
+                pool.append({**h, "width": w, "height": hgt,
+                             "size": st.st_size, "mtime": int(st.st_mtime),
                              "abs": absr, "rel": rel, "root_label": label,
                              "jailed": label == "dupe"})
             per_root[label] = {"files": len(files), "hashed": hashed,
@@ -509,7 +845,8 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
         [it["dhash"] for it in pool], [it["phash"] for it in pool],
         [int(it["phash63"]) for it in pool],
         np.array([it["coarse"] for it in pool], dtype=np.float32)
-        if n else np.zeros((0, COARSE_DIM), np.float32))
+        if n else np.zeros((0, COARSE_DIM), np.float32),
+        dims=[(it.get("width"), it.get("height")) for it in pool])
     pairs = greedy_pairs(cands)
     # Stored edges define family membership (Bugs 1+2, 2026-11-24). The old
     # code formed membership from union-find over ALL cluster_edges while
@@ -531,7 +868,7 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
     units = [list(g) for g in components] + \
         [[i] for i in range(n) if i not in edged]
     existing_ids = {f["id"] for f in idx.get("families", [])}
-    new_rows, n_fam, n_prop = [], 0, 0
+    new_rows, n_fam, n_prop, dead_members = [], 0, 0, 0
     for g in units:
         fams: dict[str, dict] = {}
         for i in g:
@@ -554,20 +891,31 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
         pos = {i: k for k, i in enumerate(g)}
         edges = [{**e, "a": pos[e["a"]], "b": pos[e["b"]]}
                  for e in stored_edges if e["a"] in pos and e["b"] in pos]
-        # tiers derive from the STORED edges only (Bugs 1+2): a cluster edge
-        # that lost the greedy race is not family evidence.
-        tiers = sorted({e["tier"] for e in edges})
-        if not tiers:                                  # single-member families
-            tiers = [TIER_REGIONAL]
-        fid_new = _family_id(m["abs"] for m in members_it)
-        if fid_new in existing_ids or (families_dir / f"{fid_new}.json").exists():
-            continue                                   # never rewrite
         members = [{
             "path": m["rel"] if m["jailed"] else m["abs"], "abs_path": m["abs"],
             "size": m["size"], "mtime": m["mtime"],
             "dhash": ds.hex64(m["dhash"]), "phash": ds.hex64(m["phash"]),
             "phash63": ds.hex64(int(m["phash63"])), "root": m["root_label"],
+            "width": m.get("width"), "height": m.get("height"),
         } for m in members_it]
+        # Change 4: dead paths never reach a family file. Pool members
+        # exist by construction, so this bites on proposal/merge paths
+        # that pull members from existing families — but it runs here
+        # for every write, so no write path can skip it.
+        members, edges, n_dead = _drop_dead_members(members, edges, dupe_root)
+        dead_members += n_dead
+        if len(g) >= 2 and (len(members) < 2 or not edges):
+            continue           # pruning dissolved the family; survivors re-pool
+        if len(g) == 1 and not members:
+            continue           # its only member is gone
+        # tiers derive from the STORED edges only (Bugs 1+2): a cluster edge
+        # that lost the greedy race is not family evidence.
+        tiers = sorted({e["tier"] for e in edges})
+        if not tiers:                                  # single-member families
+            tiers = [TIER_REGIONAL]
+        fid_new = _family_id(m["abs_path"] for m in members)
+        if fid_new in existing_ids or (families_dir / f"{fid_new}.json").exists():
+            continue                                   # never rewrite
         fam = {"format": "dupe-analyzer.family", "version": 1, "id": fid_new,
                "created": _now(), "root": str(dupe_root), "authored": False,
                "source": SOURCE_V2, "engine_schema": SCHEMA_VERSION,
@@ -586,7 +934,7 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
         existing_ids.add(fid_new)
         n_fam += 1
     step("write", n_fam, n_fam)
-    if new_rows or dropped:
+    if new_rows or dropped or reform["reformed"]:
         idx["families"] = idx.get("families", []) + new_rows
         _write_index(dupe_data, idx)
     return {"per_root": per_root, "pool": n, "families": n_fam,
@@ -594,6 +942,12 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
             "exact_edges": sum(1 for e in stored_edges
                                if e["mode"] == "exact"),
             "rebuild_dropped": dropped,
+            "reformed": reform["reformed"],
+            "reformed_created": reform["reformed_created"],
+            "reformed_unclaimed": reform["reformed_unclaimed"],
+            "reformed_dead": reform["reformed_dead"],
+            "reformed_skipped_protected": reform["reformed_skipped_protected"],
+            "dead_members": dead_members + reform["reformed_dead"],
             "seconds": round(time.time() - t0, 1)}
 
 
@@ -610,6 +964,7 @@ def apply_decisions(dupe_root: Path, dupe_data: Path, decisions: dict[str, str])
     Idempotent: an existing merged id is left alone."""
     families_dir = dupe_data / "families"
     done, skipped = [], []
+    dead_dropped = 0
     idx = None
     for pid, action in decisions.items():
         if action != "merge":
@@ -623,22 +978,33 @@ def apply_decisions(dupe_root: Path, dupe_data: Path, decisions: dict[str, str])
             continue
         tm, pmem = target.get("members", []), prop.get("members", [])
         merged = tm + pmem
+        edges = list(target.get("edges", []))
+        off = len(tm)
+        edges += [{**e, "a": e["a"] + off, "b": e["b"] + off}
+                  for e in prop.get("edges", [])
+                  if isinstance(e.get("a"), int) and isinstance(e.get("b"), int)]
+        # Change 4: a dead member in either side never reaches the merged
+        # family file; edges remap and the proposal edge (below) is found
+        # by path in the SURVIVING members, so a dead matched member
+        # simply means no proposal edge.
+        merged, edges, n_dead = _drop_dead_members(merged, edges, dupe_root)
+        dead_dropped += n_dead
+        if len(merged) < 2 or not edges:
+            skipped.append(pid)
+            continue
+        mi = next((k for k, m in enumerate(merged)
+                   if m.get("path") == pm.get("matched_member")), None)
+        pj = next((k for k, m in enumerate(merged)
+                   if pmem and m.get("path") == pmem[0].get("path")), None)
+        if mi is not None and pj is not None and pj != mi:
+            edges.append({"a": mi, "b": pj, "tier": TIER_REGIONAL,
+                          "mode": "proposal", "distance": pm.get("distance")})
         abs_paths = [_abs_of(m, dupe_root) for m in merged]
         fid = _family_id(abs_paths)
         path = families_dir / f"{fid}.json"
         if path.exists():
             skipped.append(pid)
             continue
-        edges = list(target.get("edges", []))
-        off = len(tm)
-        edges += [{**e, "a": e["a"] + off, "b": e["b"] + off}
-                  for e in prop.get("edges", [])
-                  if isinstance(e.get("a"), int) and isinstance(e.get("b"), int)]
-        mi = next((k for k, m in enumerate(tm)
-                   if m.get("path") == pm.get("matched_member")), None)
-        if mi is not None and pmem:
-            edges.append({"a": mi, "b": off, "tier": TIER_REGIONAL,
-                          "mode": "proposal", "distance": pm.get("distance")})
         tiers = sorted(set(target.get("tiers", [])) | set(prop.get("tiers", [])))
         fam = {"format": "dupe-analyzer.family", "version": 1, "id": fid,
                "created": _now(), "root": str(dupe_root), "authored": False,
@@ -656,4 +1022,4 @@ def apply_decisions(dupe_root: Path, dupe_data: Path, decisions: dict[str, str])
         done.append(fid)
     if idx is not None:
         _write_index(dupe_data, idx)
-    return {"merged": done, "skipped": skipped}
+    return {"merged": done, "skipped": skipped, "dead_dropped": dead_dropped}

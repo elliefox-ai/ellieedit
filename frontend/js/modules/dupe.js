@@ -472,13 +472,24 @@ registerModule({
           trace(`persistDraft failed: ${e.message}`);
         });
     }
-    function flushSaves() {
+    function flushSaves(forClose) {
       // Best-effort flush for a mark made just before the tab hides or
       // closes. Only when a write is actually outstanding — a clean
       // session adds no ledger record.
       if (!current || committed || !draft) return;
       if (!savePending && !saveFailed) return;
       if (!Object.keys(draft.verdicts).length) return;
+      // The race (2026-11-24): the beacon fires OUTSIDE the save queue,
+      // so a mark made while an earlier POST is in flight can lose to it
+      // — the beacon's newer payload lands first, then the in-flight
+      // older POST lands after and wins latest-wins, dropping the newest
+      // mark. On HIDE the page lives on, so the queue owns delivery: a
+      // queued POST carries the latest cumulative payload, and the
+      // beacon is skipped while a send is in flight or queued. On CLOSE
+      // the page is dying — the queued POST would die with it and the
+      // in-flight fetch is cancelled by unload — so the beacon still
+      // fires: it is the last write and the only one that can win.
+      if (!forClose && savePending) return;
       const url = `/api/dupe/families/${current.id}/verdict`;
       const body = JSON.stringify(toCommitPayload());
       try {
@@ -492,9 +503,9 @@ registerModule({
       } catch (_) { /* best-effort only */ }
     }
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden) flushSaves();
+      if (document.hidden) flushSaves(false);
     });
-    window.addEventListener('beforeunload', flushSaves);
+    window.addEventListener('beforeunload', () => flushSaves(true));
     // Single choke point for draft verdict mutations: mutate the draft
     // (optimistic UI) and persist the cumulative map immediately.
     // verdict null = un-mark. Keeps draft.picks in sync for kept marks.
