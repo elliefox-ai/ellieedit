@@ -247,6 +247,37 @@ def test_verdict_append_only_and_state_flow(env, client):
     assert d["verdicts"]["a.png"] == "deferred" and d["note"] == "a is the sharpest"
 
 
+def test_verdict_partial_posts_append_latest_wins_whole_entry(env, client):
+    # Bug 4 contract (2026-11-24): the endpoint ACCEPTS partial member
+    # sets — a single-member POST appends one ledger record — but
+    # latest-wins is WHOLE-ENTRY replacement: a second single-member POST
+    # supersedes the first in the read view. The client must therefore send
+    # the CUMULATIVE draft map on every per-mark POST; a bare single-member
+    # POST would clobber earlier marks.
+    root, _, tmp = env
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict",
+                    json={"members": {"a.png": "kept"}})
+    assert r.status_code == 200
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict",
+                    json={"members": {"b.png": "rejected"}})
+    assert r.status_code == 200
+    ledger = (tmp / "verdicts.jsonl").read_text().strip().split("\n")
+    assert len(ledger) == 2
+    # latest entry wins whole: only b.png is visible now
+    d = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
+    assert d["verdicts"] == {"a.png": None, "b.png": "rejected",
+                             "sub/c.png": None}
+    # the client sends the cumulative map per mark: both marks survive
+    r = client.post("/api/dupe/families/fam-aaaaaaaaaaaa/verdict",
+                    json={"members": {"a.png": "kept", "b.png": "rejected"}})
+    assert r.status_code == 200
+    ledger = (tmp / "verdicts.jsonl").read_text().strip().split("\n")
+    assert len(ledger) == 3
+    d = client.get("/api/dupe/families/fam-aaaaaaaaaaaa").json()
+    assert d["verdicts"]["a.png"] == "kept"
+    assert d["verdicts"]["b.png"] == "rejected"
+
+
 def test_verdict_ranks_additive(env, client):
     """Sift (2026-10-08c): optional 1-based pick ranks persist into the
     ledger additively; verdict strings and readers tolerate their absence."""

@@ -300,6 +300,29 @@ def union_find_groups(n: int, cluster_edges) -> list[list[int]]:
                   key=lambda g: g[0])
 
 
+def stored_family_units(cluster_edges, cands, n: int):
+    """Stored edges + their connected components (Bugs 1+2, 2026-11-24).
+
+    Returns (stored_edges, components). stored_edges are the greedy pairs
+    plus one edge per exact-duplicate pair (greedy pairing excludes d==0,
+    so exact twins otherwise get no stored edge at all); an exact pair
+    already covered by a greedy pair is not duplicated. Components are the
+    connected components over the stored edges — since greedy pairs are
+    1:1, components are the pairs themselves except where exact edges
+    chain (a 3-way exact set chains into one 3-member family). A member
+    in no stored edge is in no component: it forms no family.
+    """
+    pairs = greedy_pairs(cands)
+    _paired = {(min(e["a"], e["b"]), max(e["a"], e["b"])) for e in pairs}
+    exact_edges = [{"a": i, "b": j, "tier": TIER_EXACT, "mode": "exact",
+                    "distance": 0}
+                   for i, j, c in cluster_edges if c == 0
+                   and (i, j) not in _paired]
+    stored = pairs + exact_edges
+    components = union_find_groups(n, [(e["a"], e["b"], 0) for e in stored])
+    return stored, components
+
+
 # ------------------------------------------------- existing-family matching
 
 def _abs_of(m: dict, dupe_root: Path) -> str:
@@ -487,13 +510,26 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
         [int(it["phash63"]) for it in pool],
         np.array([it["coarse"] for it in pool], dtype=np.float32)
         if n else np.zeros((0, COARSE_DIM), np.float32))
-    groups = union_find_groups(n, cluster_edges)
     pairs = greedy_pairs(cands)
-    grouped = {i for g in groups for i in g}
+    # Stored edges define family membership (Bugs 1+2, 2026-11-24). The old
+    # code formed membership from union-find over ALL cluster_edges while
+    # the family JSON's edges were only the greedy pairs — the two disagreed:
+    # a member admitted by union-find but not by greedy pairing had zero
+    # stored edges (379 of them in fam-ef12d5c7fca1), and one union-find
+    # component could swallow hundreds of disjoint pairs into a mega-family.
+    # Families are now the connected components of the STORED edges (see
+    # stored_family_units). A pool member in no stored edge forms no family:
+    # it stays unclaimed and is re-pooled on the next scan — EXCEPT
+    # singletons that match an existing family, which still become proposal
+    # / ambiguity families exactly as before. No silent carry-along rule:
+    # membership requires a stored edge.
+    stored_edges, components = stored_family_units(cluster_edges, cands, n)
+    edged = {i for e in stored_edges for i in (e["a"], e["b"])}
     matches = match_existing(pool, load_existing_members(families_dir, dupe_root))
 
     # proposals for singletons that match exactly one existing family
-    units = [g for g in groups] + [[i] for i in range(n) if i not in grouped]
+    units = [list(g) for g in components] + \
+        [[i] for i in range(n) if i not in edged]
     existing_ids = {f["id"] for f in idx.get("families", [])}
     new_rows, n_fam, n_prop = [], 0, 0
     for g in units:
@@ -517,9 +553,10 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
         members_it = [pool[i] for i in g]
         pos = {i: k for k, i in enumerate(g)}
         edges = [{**e, "a": pos[e["a"]], "b": pos[e["b"]]}
-                 for e in pairs if e["a"] in pos and e["b"] in pos]
-        tiers = sorted({_TIER_BY_CODE[c] for a, b, c in cluster_edges
-                        if a in pos and b in pos})
+                 for e in stored_edges if e["a"] in pos and e["b"] in pos]
+        # tiers derive from the STORED edges only (Bugs 1+2): a cluster edge
+        # that lost the greedy race is not family evidence.
+        tiers = sorted({e["tier"] for e in edges})
         if not tiers:                                  # single-member families
             tiers = [TIER_REGIONAL]
         fid_new = _family_id(m["abs"] for m in members_it)
@@ -553,7 +590,10 @@ def scan_incremental(roots: list[dict], dupe_root: Path, dupe_data: Path,
         idx["families"] = idx.get("families", []) + new_rows
         _write_index(dupe_data, idx)
     return {"per_root": per_root, "pool": n, "families": n_fam,
-            "proposals": n_prop, "pairs": len(pairs), "rebuild_dropped": dropped,
+            "proposals": n_prop, "pairs": len(pairs),
+            "exact_edges": sum(1 for e in stored_edges
+                               if e["mode"] == "exact"),
+            "rebuild_dropped": dropped,
             "seconds": round(time.time() - t0, 1)}
 
 

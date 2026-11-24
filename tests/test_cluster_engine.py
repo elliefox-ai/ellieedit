@@ -215,13 +215,131 @@ def test_t2_identical_images_no_pair_but_one_family(world):
     ph, dh = ds.hash_file(d / "a.png")
     cl, cands = ce.compute_edges([dh, dh], [ph, ph], [0, 0],
                                  np.zeros((2, 256), np.float32))
-    assert cands == [] and ce.greedy_pairs(cands) == []        # no pair
+    assert cands == [] and ce.greedy_pairs(cands) == []        # no greedy pair
     assert len(cl) == 1 and cl[0][2] == 0                      # exact cluster edge
     s = _run(world)
     fam, = _fams(world).values()                               # one family
     assert _names(fam) == {"a.png", "b.png"}
-    assert fam["edges"] == [] and "exact" in fam["tiers"]
-    assert s["pairs"] == 0
+    # Bugs 1+2 (2026-11-24): the exact pair now gets a STORED edge (tier
+    # exact) instead of an empty edge list — the family is fully edged.
+    assert fam["edges"] == [{"a": 0, "b": 1, "tier": "exact",
+                             "mode": "exact", "distance": 0}]
+    assert "exact" in fam["tiers"]
+    assert s["pairs"] == 0 and s["exact_edges"] == 1
+
+
+def _fully_edged(fam) -> bool:
+    """Every member appears in >=1 stored edge (Bugs 1+2 invariant)."""
+    seen = {x for e in fam.get("edges", []) for x in (e["a"], e["b"])}
+    return seen == set(range(len(fam["members"])))
+
+
+def test_stored_edges_define_membership_chain_loser_forms_no_family():
+    # T4 chain at the formation rule: a-b d=2, b-c d=1 — greedy takes
+    # (b,c); a has a cluster edge to b but no stored edge, so it is in NO
+    # component and forms no family (the old union-find grouping admitted
+    # it unedged). The cluster still spans all three — only the STORED
+    # edges decide membership now.
+    dh = [0b0, 0b11, 0b111]
+    ph = [0, 0, 0]
+    p63 = [(1 << 40) * 0, (1 << 50) - 1, (1 << 20) - 1]       # far in phash63
+    cl, cands = ce.compute_edges(dh, ph, p63, np.zeros((3, 256), np.float32))
+    assert ce.union_find_groups(3, cl) == [[0, 1, 2]]          # cluster: all 3
+    stored, comps = ce.stored_family_units(cl, cands, 3)
+    assert [(e["a"], e["b"]) for e in stored] == [(1, 2)]
+    assert comps == [[1, 2]]                                   # member 0: no family
+
+
+def test_three_way_exact_set_is_one_fully_edged_family(world):
+    d = world["dupe"]
+    trip = _img(200)
+    for i, sub in enumerate(("x", "y", "z")):
+        _save(trip, d / sub / f"trip{i}.png")
+    s = _run(world)
+    assert s["families"] == 1 and s["exact_edges"] == 3
+    fam, = _fams(world).values()
+    assert len(fam["members"]) == 3
+    assert sorted(e["tier"] for e in fam["edges"]) == ["exact"] * 3
+    assert _fully_edged(fam)
+
+
+def test_reported_shape_668_pairs_plus_379_strays(world):
+    # fam-ef12d5c7fca1's shape, synthetic: 668 disjoint near-twin pairs +
+    # 379 unrelated pool members. Expected: 668 pair-families, every one
+    # fully edged, no mega-family, and no stray in any family.
+    d = world["dupe"]
+    for k in range(668):
+        base = _img(1000 + k, size=64)
+        _save(base, d / f"pair{k}_a.png")
+        _save(_jpeg(base), d / f"pair{k}_b.png")
+    for k in range(379):
+        _save(_img(5000 + k, size=64), d / f"stray{k}.png")
+    s = _run(world)
+    # every pair forms exactly one stored edge — greedy or exact (most
+    # JPEG recompressions of these smooth synthetics are hash-identical,
+    # so they land as exact edges, not greedy pairs)
+    assert s["families"] == 668
+    assert s["pairs"] + s["exact_edges"] == 668
+    fams = _fams(world)
+    assert len(fams) == 668
+    assert all(len(f["members"]) == 2 for f in fams.values())
+    assert all(_fully_edged(f) for f in fams.values())
+    in_fams = {Path(m["path"]).name for f in fams.values() for m in f["members"]}
+    assert not any(n.startswith("stray") for n in in_fams)
+    assert len(in_fams) == 668 * 2
+
+
+def test_rebuild_decomposes_overmerged_mega_family(world):
+    # The acceptance recluster on a fixture: a hand-written over-merged
+    # v2 family (4 members, 1 pair edge — the old shape) is dropped by
+    # --rebuild and the pool re-forms as decomposed pair-families.
+    d = world["dupe"]
+    for k, seed in ((1, 100), (2, 110)):
+        _save(_img(seed), d / f"m{k}a.png")
+        _save(_jpeg(_img(seed)), d / f"m{k}b.png")
+    members = []
+    for name in ("m1a.png", "m1b.png", "m2a.png", "m2b.png"):
+        p = d / name
+        ph, dh = ds.hash_file(p)
+        st = p.stat()
+        members.append({"path": name, "size": st.st_size, "mtime": int(st.st_mtime),
+                        "dhash": ds.hex64(dh), "phash": ds.hex64(ph)})
+    mega_id = "fam-" + "ab" * 6
+    mega = {"format": "dupe-analyzer.family", "version": 1, "id": mega_id,
+            "created": "x", "root": str(d), "authored": False,
+            "source": ce.SOURCE_V2, "tiers": ["near-identical"],
+            "members": members,
+            "edges": [{"a": 0, "b": 1, "tier": "near-identical",
+                       "mode": "dhash", "distance": 1}]}
+    (world["data"] / "families" / f"{mega_id}.json").write_text(json.dumps(mega))
+    idx = _index(world)
+    idx["families"].append({"id": mega_id, "size": 4,
+                            "tiers": ["near-identical"], "first_member": "m1a.png",
+                            "authored": False, "source": ce.SOURCE_V2})
+    (world["data"] / "index.json").write_text(json.dumps(idx))
+    r = _run(world, rebuild=True)
+    assert r["rebuild_dropped"] == 1
+    fams = _fams(world)
+    assert mega_id not in fams
+    assert len(fams) == 2
+    assert all(len(f["members"]) == 2 for f in fams.values())
+    assert all(_fully_edged(f) for f in fams.values())
+    assert {frozenset(_names(f)) for f in fams.values()} == \
+        {frozenset({"m1a.png", "m1b.png"}), frozenset({"m2a.png", "m2b.png"})}
+
+
+def test_merged_family_stays_fully_edged(world):
+    # apply_decisions: the merged family is the union of both families'
+    # stored edges + the proposal edge — every member in >=1 edge.
+    base, _ = _proposal_world(world)
+    _save(_jpeg(base), world["dupe"] / "new_near_F.png")
+    _run(world)
+    prop, = [f for f in _fams(world).values() if f.get("proposed_merge")]
+    r = ce.apply_decisions(world["dupe"], world["data"], {prop["id"]: "merge"})
+    merged = _fams(world)[r["merged"][0]]
+    assert len(merged["members"]) == 3
+    assert _fully_edged(merged)
+    assert any(e.get("mode") == "proposal" for e in merged["edges"])
 
 
 # --------------------------------------------------- T4 greedy 1:1

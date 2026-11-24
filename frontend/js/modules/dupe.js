@@ -19,7 +19,8 @@
 //   survey / focus — pinch-out on the fan (or Survey button) → grid; tap a
 //                    grid cell → focus deck: one full-size image, swipe
 //                    prev/next, tap = pick, verdict dots.
-// NOTHING persists before Commit; commit = verdict POST + send-pending.
+// Marks persist to the ledger as they are made (one verdict POST per mark,
+// cumulative map); Commit confirms the family + send-pending and advances.
 import { registerModule } from '../shell.js';
 import { isTypingTarget } from '../key-guards.js';
 import { sigIsOverride, sigChipText } from './dupe-signals.js';
@@ -126,6 +127,9 @@ registerModule({
       .ss-badge { border-radius:8px; padding:2px 9px; font-size:10px; font-weight:600; }
       .ss-badge.draft { background:#3a2f1d; color:#e8c37a; }
       .ss-badge.committed { background:#1d3a25; color:#7de08a; }
+      .ss-badge.saved { background:#1d3a25; color:#7de08a; }
+      .ss-badge.save-fail { background:#3a1d1d; color:#e87a7a; }
+      .ss-progress { font-weight:600; color:#b8b8d0; }
       .ss-fan { flex:0 0 130px; min-height:0; display:flex; gap:6px; padding:8px 12px;
                 overflow-x:auto; overflow-y:auto; touch-action:pan-x pan-y; }
       .ss-fan-card { flex:0 0 92px; width:92px; height:112px; background:#161628;
@@ -196,6 +200,14 @@ registerModule({
       .ss-menu .ee-btn { min-height:44px; text-align:left; }
       .ss-overlay { position:absolute; inset:0; z-index:40; background:#0c0c16;
                     display:flex; flex-direction:column; }
+      /* Bug 5 (2026-11-24): the zoom overlay takes every touch gesture
+         itself — a pinch starting anywhere inside it (top bar, tools,
+         nav zones) must never reach the browser's page pinch-zoom, which
+         shrinks the whole layout to thumbnail scale. The zoom overlay has
+         no scrollable content, so touch-action:none is safe here; the
+         survey/sift overlays keep their own behavior. The stage image
+         gets its own contained pinch instead (see openZoom). */
+      #ss-zoom { touch-action:none; }
       .ss-ov-top { display:flex; gap:8px; align-items:center; padding:8px 12px;
                    border-bottom:1px solid #2a2a44; flex-shrink:0; font-size:12px;
                    color:#8a8aaa; flex-wrap:wrap; }
@@ -378,7 +390,7 @@ registerModule({
       if (st) st.textContent = `[trace] ${msg}`;
       console.log(`[dupe trace] ${msg}`);
     }
-    // ── draft state (nothing persists before commit) ──
+    // ── draft state ──
     // Per-family drafts survive tab switches: switching away no longer
     // wipes an in-progress verdict when a family detail is open.
     const familyDrafts = new Map(); // family_id -> {verdicts, picks, melded}
@@ -386,6 +398,118 @@ registerModule({
     let championIdx = 0;       // index into current.members
     let committed = false;
     let commitSummary = null;
+    // ── PER-MARK VERDICT PERSISTENCE (Bug 4, 2026-11-24) ──
+    // Every mark writes to the ledger immediately. The ledger's
+    // latest-wins is WHOLE-ENTRY replacement, so each POST carries the
+    // CUMULATIVE draft map (toCommitPayload) — a bare single-member POST
+    // would clobber earlier marks. One POST per mark, no coalescing
+    // (N marks = N new ledger records); POSTs serialize in order through
+    // saveQueue, a failed POST retries, and the queue flushes on
+    // visibilitychange (hidden) and beforeunload — but only when a write
+    // is actually outstanding, so a clean session adds no extra records.
+    // The draft stays the optimistic UI state; the ledger is the source
+    // of truth. NOTE: the first non-deferred mark flips the family to
+    // "resolved" server-side (_family_state), so a partially-marked
+    // family leaves the unresolved queue until re-opened — resume goes
+    // through the existing ↺ Re-open flow (prior verdicts re-seed the
+    // draft); nothing here changes that.
+    let saveState = 'idle';            // idle | saving | saved | failed
+    let savePending = 0;               // POSTs queued or in flight
+    let saveFailed = false;            // a POST failed and is owed a retry
+    let saveQueue = Promise.resolve();
+    let saveStamp = '';                // HH:MM:SS of the last saved mark
+    function saveStateText() {
+      if (saveState === 'saving') return 'saving…';
+      if (saveState === 'failed') return '⚠ not saved — retrying';
+      if (saveState === 'saved') return `✓ saved${saveStamp ? ' ' + saveStamp : ''}`;
+      return 'marks save as you go';
+    }
+    function updateSaveBadge() {
+      // jobbar badge — visible in every view, including the zoom overlay.
+      jobbar.querySelectorAll('.badge.dupe-save').forEach(b => b.remove());
+      if (!current || committed) return;
+      const b = document.createElement('span');
+      b.className = `badge dupe-save${saveState === 'failed' ? ' err' : ''}`;
+      b.textContent = saveStateText();
+      jobbar.appendChild(b);
+      // spread header badge (renderSpread rebuilds it; update in place too)
+      const hb = el.detail.querySelector('#ss-save-badge');
+      if (hb) {
+        hb.textContent = saveStateText();
+        hb.className = `ss-badge ${saveState === 'failed' ? 'save-fail' : 'saved'}`;
+      }
+    }
+    function persistDraft() {
+      if (!current || committed || !draft) return;
+      const fid = current.id;
+      const payload = toCommitPayload();   // snapshot at mark time
+      savePending++;
+      saveState = 'saving';
+      updateSaveBadge();
+      const send = () => api(`/families/${fid}/verdict`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const attempt = (n) => send().catch(e =>
+        n < 3 ? new Promise(r => setTimeout(r, 1000 * n)).then(() => attempt(n + 1))
+              : Promise.reject(e));
+      saveQueue = saveQueue.then(() => attempt(1)).then(
+        () => {
+          savePending--;
+          saveFailed = false;
+          saveState = savePending ? 'saving' : 'saved';
+          saveStamp = new Date().toTimeString().slice(0, 8);
+          listDirty = true;   // the family may have left the unresolved queue
+          updateSaveBadge();
+        },
+        (e) => {
+          savePending--;
+          saveFailed = true;
+          saveState = 'failed';
+          updateSaveBadge();
+          job(`mark not saved (${e.message}) — will retry on the next mark`, 'err');
+          trace(`persistDraft failed: ${e.message}`);
+        });
+    }
+    function flushSaves() {
+      // Best-effort flush for a mark made just before the tab hides or
+      // closes. Only when a write is actually outstanding — a clean
+      // session adds no ledger record.
+      if (!current || committed || !draft) return;
+      if (!savePending && !saveFailed) return;
+      if (!Object.keys(draft.verdicts).length) return;
+      const url = `/api/dupe/families/${current.id}/verdict`;
+      const body = JSON.stringify(toCommitPayload());
+      try {
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
+        } else {
+          fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                       body, keepalive: true }).catch(() => {});
+        }
+        saveFailed = false;
+      } catch (_) { /* best-effort only */ }
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) flushSaves();
+    });
+    window.addEventListener('beforeunload', flushSaves);
+    // Single choke point for draft verdict mutations: mutate the draft
+    // (optimistic UI) and persist the cumulative map immediately.
+    // verdict null = un-mark. Keeps draft.picks in sync for kept marks.
+    function setVerdict(path, verdict) {
+      if (!draft) return;
+      if (verdict) {
+        draft.verdicts[path] = verdict;
+        if (verdict === 'kept' && !draft.picks.includes(path)) draft.picks.push(path);
+        if (verdict !== 'kept') draft.picks = draft.picks.filter(p => p !== path);
+      } else {
+        delete draft.verdicts[path];
+        draft.picks = draft.picks.filter(p => p !== path);
+      }
+      persistDraft();
+    }
     let surveyFocus = 0;       // keyboard-highlighted cell index in survey grid
     // signal-conflict surfacing (2026-10-08d)
     let signals = null;        // /families/{id}/signals payload for current
@@ -790,6 +914,7 @@ registerModule({
           else if (k === 't' || k === 'T') zoom.querySelector('#ss-zoom-twin')?.click();
           else if (k === 's' || k === 'S') zoom.querySelector('#ss-zoom-survey')?.click();
           else if (k === 'p' || k === 'P') zoom.querySelector('#ss-zoom-pin')?.click();
+          else if (k === 'r' || k === 'R') zoom.querySelector('#ss-zoom-reset')?.click();
           else if (k === ' ') zoom.querySelector('#ss-zoom-flip')?.click();
           else if (k === 'c' || k === 'C' || k === 'Enter') zoom.querySelector('#ss-zoom-commit')?.click();  // Enter: same path as C
           else return;
@@ -860,39 +985,40 @@ registerModule({
       draft.melded = [...draft.picks];
       draft.melded.forEach(p => { draft.verdicts[p] = 'melded'; });
       draft.picks = [];
+      persistDraft();   // one POST for the meld action
       renderSpread();
     }
     function doDeferFamily() {
       for (const m of unhandled()) draft.verdicts[m.path] = 'deferred';
       draft.picks = [];
+      persistDraft();   // one POST for the bulk action
       renderSpread();
     }
     function doRejectRemainder() {
       for (const m of unhandled()) draft.verdicts[m.path] = 'rejected';
       draft.picks = [];
+      persistDraft();   // one POST for the bulk action
       renderSpread();
     }
 
     function doPick(m) {
       if (verdictOf(m)) return;
       sigLogOverride(m.path, 'kept');
-      draft.verdicts[m.path] = 'kept';
-      draft.picks.push(m.path);
+      setVerdict(m.path, 'kept');
       renderSpread();
     }
     function unPick(m) {
-      delete draft.verdicts[m.path];
-      draft.picks = draft.picks.filter(p => p !== m.path);
+      setVerdict(m.path, null);
       renderSpread();
     }
     function doReject(m) {
       if (verdictOf(m)) return;
       sigLogOverride(m.path, 'rejected');
-      draft.verdicts[m.path] = 'rejected';
+      setVerdict(m.path, 'rejected');
       renderSpread();
     }
     function unReject(m) {
-      delete draft.verdicts[m.path];
+      setVerdict(m.path, null);
       renderSpread();
     }
     function duel(m) {
@@ -1016,15 +1142,16 @@ registerModule({
         apply.className = 'ee-btn primary';
         apply.id = 'ss-suggest-apply';
         apply.textContent = 'Apply suggestion';
-        apply.title = 'fills the DRAFT — nothing persists until Commit';
+        apply.title = 'fills the DRAFT and saves it to the ledger';
         apply.addEventListener('click', () => {
           for (const p of s.reject) draft.verdicts[p] = 'rejected';
           if (!draft.picks.includes(s.keep)) draft.picks.push(s.keep);
           draft.verdicts[s.keep] = 'kept';
           sigEvent('applied', s.label);
           sigDismissed = true;   // consumed — re-renders must not resurrect it
+          persistDraft();   // one POST for the applied suggestion
           renderSpread();
-          job('suggestion applied to draft — commit when ready');
+          job('suggestion applied and saved — commit when ready');
         });
         const dis = document.createElement('button');
         dis.className = 'ee-btn';
@@ -1229,7 +1356,7 @@ registerModule({
           pickBtn.disabled = rejBtn.disabled = true;
           dots.innerHTML = '';
           autoBtn.textContent = `Auto-advance: ${autoAdvanceOn() ? 'On' : 'Off'}`;
-          count.textContent = '0 of 0 unhandled';
+          count.textContent = '0 / 0 marked';
           count.style.color = '#7de08a';
           twinChip.style.display = 'none';
           pinInfo.textContent = `PIN: ${pinned ? '#' + (pinnedIdx + 1) : 'none'}`;
@@ -1284,10 +1411,12 @@ registerModule({
         } else {
           twinChip.style.display = 'none';
         }
-        // auto-advance toggle label + bottom unhandled counter
+        // auto-advance toggle label + bottom progress counter (Bug 6:
+        // marked/total, not just unhandled)
         autoBtn.textContent = `Auto-advance: ${autoAdvanceOn() ? 'On' : 'Off'}`;
         const un = list.filter(mm => !verdictOf(mm)).length;
-        count.textContent = un ? `${un} of ${list.length} unhandled`
+        const marked = list.length - un;
+        count.textContent = un ? `${marked} / ${list.length} marked · ${un} unhandled`
                                : 'all handled';
         count.style.color = un ? '#8a8aaa' : '#7de08a';        const v = verdictOf(m);
         pickBtn.textContent = v === 'kept' ? `Un-pick ✓ (#${draft.picks.indexOf(m.path) + 1})`
@@ -1297,15 +1426,15 @@ registerModule({
         rejBtn.disabled = !!v && v !== 'rejected';
         pickBtn.onclick = () => {
           const fresh = !v;
-          if (v === 'kept') { unPickNoRender(m); } else if (!v) { draft.verdicts[m.path] = 'kept'; draft.picks.push(m.path); }
+          if (v === 'kept') { unPickNoRender(m); } else if (!v) { setVerdict(m.path, 'kept'); }
           trace(`zoom pick idx=${idx + 1} verdict=${verdictOf(m)}`);
           if (fresh && autoAdvanceOn()) advance();
           else paint();
         };
         rejBtn.onclick = () => {
           const fresh = !v;
-          if (v === 'rejected') { delete draft.verdicts[m.path]; }
-          else if (!v) { draft.verdicts[m.path] = 'rejected'; }
+          if (v === 'rejected') { setVerdict(m.path, null); }
+          else if (!v) { setVerdict(m.path, 'rejected'); }
           trace(`zoom reject idx=${idx + 1} verdict=${verdictOf(m)}`);
           if (fresh && autoAdvanceOn()) advance();
           else paint();
@@ -1324,9 +1453,9 @@ registerModule({
       };
       // verdict helpers that DON'T re-render the spread (which would wipe
       // this overlay); draft mutation only, origin re-renders on exit.
+      // (setVerdict persists the mark; it renders nothing itself.)
       function unPickNoRender(m) {
-        delete draft.verdicts[m.path];
-        draft.picks = draft.picks.filter(p => p !== m.path);
+        setVerdict(m.path, null);
       }
       const setZoomMode = (mode) => {
         if (mode === zoomMode) return;
@@ -1373,23 +1502,91 @@ registerModule({
       };
       prev.addEventListener('click', () => cycle(-1));
       next.addEventListener('click', () => cycle(1));
+      // ── CONTAINED PINCH-ZOOM (Bug 5, 2026-11-24) ──
+      // Two-finger pinch scales ONLY the stage image (CSS transform on
+      // the img, clamped 1–3×, pan clamped to the stage) — it can never
+      // escape the viewport or shrink the layout to thumbnail scale. The
+      // overlay itself has touch-action:none, so the browser's page
+      // pinch-zoom never fires from a gesture starting inside it. The
+      // transform persists across members (same region, next twin);
+      // Reset view (button / R) restores the fit view without leaving
+      // the family.
+      let viewScale = 1, viewTx = 0, viewTy = 0;
+      const applyView = () => {
+        const t = `translate(${viewTx}px, ${viewTy}px) scale(${viewScale})`;
+        img.style.transform = t;
+        pinImg.style.transform = t;
+      };
+      const resetView = () => {
+        viewScale = 1; viewTx = 0; viewTy = 0;
+        applyView();
+        trace('zoom reset view');
+      };
+      const clampView = () => {
+        viewScale = Math.max(1, Math.min(3, viewScale));
+        const mx = (viewScale - 1) * stage.clientWidth / 2;
+        const my = (viewScale - 1) * stage.clientHeight / 2;
+        viewTx = Math.max(-mx, Math.min(mx, viewTx));
+        viewTy = Math.max(-my, Math.min(my, viewTy));
+      };
+      const resetBtn = document.createElement('button');
+      resetBtn.className = 'ee-btn';
+      resetBtn.id = 'ss-zoom-reset';
+      resetBtn.style.minHeight = '32px';
+      resetBtn.dataset.kbd = 'R';
+      resetBtn.title = 'reset the image view (R) — stays in this family';
+      resetBtn.textContent = '⟲ Reset view';
+      resetBtn.addEventListener('click', resetView);
       // swipe: left/right = cycle, down = dismiss, tap = flip. Pointer based,
       // touch-action:none on the stage — no page-scroll fight.
       // (2026-10-08m step 3: tap-to-pick REMOVED — tap now flips pinned/
       // current; verdicts only via the ≥44px Pin/Pick/Reject buttons.)
+      const pointers = new Map();   // pointerId -> {x, y}
+      let pinch = null;             // {d0, mx0, my0, scale0, tx0, ty0} | null
+      let pinched = false;          // a pinch happened this gesture: suppress tap/swipe
       let down = null;
       stage.addEventListener('pointerdown', e => {
-        down = { x: e.clientX, y: e.clientY, t: Date.now(), moved: false };
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (pointers.size === 2) {
+          const [p, q] = [...pointers.values()];
+          pinch = { d0: Math.hypot(p.x - q.x, p.y - q.y) || 1,
+                    mx0: (p.x + q.x) / 2, my0: (p.y + q.y) / 2,
+                    scale0: viewScale, tx0: viewTx, ty0: viewTy };
+          pinched = true;
+          down = null;   // a pinch is not a swipe origin
+        } else if (pointers.size === 1) {
+          down = { x: e.clientX, y: e.clientY, t: Date.now(), moved: false };
+        }
         try { stage.setPointerCapture(e.pointerId); } catch (_) {}
       });
       stage.addEventListener('pointermove', e => {
+        if (!pointers.has(e.pointerId)) return;
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (pinch && pointers.size === 2) {
+          const [p, q] = [...pointers.values()];
+          const d = Math.hypot(p.x - q.x, p.y - q.y);
+          viewScale = pinch.scale0 * (d / pinch.d0);
+          viewTx = pinch.tx0 + ((p.x + q.x) / 2 - pinch.mx0);
+          viewTy = pinch.ty0 + ((p.y + q.y) / 2 - pinch.my0);
+          clampView();
+          applyView();
+          return;
+        }
         if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 12) down.moved = true;
       });
+      const endPointer = (e) => {
+        pointers.delete(e.pointerId);
+        if (pointers.size < 2) pinch = null;
+      };
       stage.addEventListener('pointerup', e => {
-        if (!down) return;
+        endPointer(e);
+        if (!down) { if (!pointers.size) pinched = false; return; }
         const dx = e.clientX - down.x, dy = e.clientY - down.y;
-        const tap = !down.moved && Date.now() - down.t < 500;
+        const tap = !down.moved && !pinched && Date.now() - down.t < 500;
+        const wasPinch = pinched;
         down = null;
+        if (!pointers.size) pinched = false;
+        if (wasPinch) return;   // a pinch never cycles/dismisses/flips
         if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
           cycle(dx < 0 ? 1 : -1);
         } else if (dy > 80) {
@@ -1398,10 +1595,11 @@ registerModule({
           flip();
         }
       });
+      stage.addEventListener('pointercancel', endPointer);
       stage.append(img, pinImg, curBadge, pinBadge, prev, next, dots, tools,
         flipBtn);
       tools.append(pinBtn, pickBtn, rejBtn);
-      top.append(back, ...modeBtns, info, twinChip, pinInfo, autoBtn,
+      top.append(back, ...modeBtns, info, twinChip, pinInfo, autoBtn, resetBtn,
         surveyBtn,
         kbdLegendBtn([
           ['←/→', 'cycle members'],
@@ -1411,6 +1609,7 @@ registerModule({
           ['Space', 'flip pinned ↔ current'],
           ['T', 'jump to the twin'],
           ['S', 'survey grid'],
+          ['R', 'reset the image view'],
           ['C', 'commit & next family'],
           ['Esc', 'back'],
         ]));
@@ -1547,7 +1746,7 @@ registerModule({
     function closeSurvey() { el.detail.querySelector('#ss-survey')?.remove(); }
 
     // ── SIFT view (2026-10-08c) — keep-K-of-N over the family. Same draft
-    // state as the spread (verdicts + picks); nothing persists before Commit.
+    // state as the spread (verdicts + picks); marks persist per-mark (Bug 4).
     // Shows members that are NOT rejected (unhandled + kept) as a grid;
     // tap toggles keep with an ordinal badge; ✕ rejects individually;
     // 'Reject the rest' sweeps all unhandled non-kept members to rejected.
@@ -1584,12 +1783,13 @@ registerModule({
       sweep.id = 'ss-sift-sweep';
       const note = document.createElement('span');
       note.className = 'note';
-      note.textContent = 'state-in-layout: keeps + counter stay visible here; nothing saves until Commit';
+      note.textContent = 'state-in-layout: keeps + counter stay visible here; marks save as you go';
       sweep.addEventListener('click', () => {
         try {
           const n = unhandled().length;
           for (const m of unhandled()) draft.verdicts[m.path] = 'rejected';
           trace(`sift sweep — rejected ${n} remainder`);
+          persistDraft();   // one POST for the bulk action
           renderSiftBody();
         } catch (err) {
           job(`sift sweep: ${err.message}`, 'err');
@@ -1647,7 +1847,7 @@ registerModule({
           rej.addEventListener('click', e => {
             e.stopPropagation();
             try {
-              draft.verdicts[m.path] = 'rejected';   // draft only — no spread render
+              setVerdict(m.path, 'rejected');   // persists; no spread render
               trace(`sift reject ${m.name}`);
               renderSiftBody();
             }
@@ -1659,11 +1859,9 @@ registerModule({
           try {
             // draft mutation ONLY — renderSpread would wipe this overlay.
             if (v === 'kept') {
-              delete draft.verdicts[m.path];
-              draft.picks = draft.picks.filter(p => p !== m.path);
+              setVerdict(m.path, null);
             } else if (!v) {
-              draft.verdicts[m.path] = 'kept';
-              draft.picks.push(m.path);
+              setVerdict(m.path, 'kept');
             }
             trace(`sift toggle ${m.name} → ${verdictOf(m) || 'unhandled'}`);
             renderSiftBody();
@@ -1699,11 +1897,9 @@ registerModule({
       // draft mutation ONLY — doPick/doReject re-render the spread, which
       // wipes this overlay; sift re-renders its own body instead.
       if (v === 'kept') {
-        delete draft.verdicts[m.path];
-        draft.picks = draft.picks.filter(p => p !== m.path);
+        setVerdict(m.path, null);
       } else if (!v) {
-        draft.verdicts[m.path] = 'kept';
-        draft.picks.push(m.path);
+        setVerdict(m.path, 'kept');
       }
       trace(`sift kbd toggle ${m.name} → ${verdictOf(m) || 'unhandled'}`);
       renderSiftBody();
@@ -1711,7 +1907,7 @@ registerModule({
     function siftRejectFocused() {
       const m = siftMembers()[siftFocus];
       if (!m || verdictOf(m)) return;
-      draft.verdicts[m.path] = 'rejected';   // draft only — see siftToggleFocused
+      setVerdict(m.path, 'rejected');   // persists; sift re-renders its own body
       trace(`sift kbd reject ${m.name}`);
       renderSiftBody();
     }
@@ -1840,6 +2036,7 @@ registerModule({
           chip.addEventListener('click', () => {
             draft.melded.forEach(p => delete draft.verdicts[p]);
             draft.melded = null;
+            persistDraft();   // one POST for the undo action
             renderSpread();
           });
           strip.appendChild(chip);
@@ -1878,6 +2075,7 @@ registerModule({
       const head = document.createElement('div');
       head.className = 'ss-header';
       const pk = picks().length, rj = rejectedMembers().length, uh = unhandled().length;
+      const marked = current.members.length - uh;
       const dots = current.members.map(m => {
         const v = verdictOf(m);
         return `<span class="ss-dot ${v ? DRAFT_CLASSES[v] : ''}" title="${m.name}${v ? ' · ' + v : ''}"></span>`;
@@ -1888,9 +2086,10 @@ registerModule({
         `<span class="verdict-tag kept">${pk} picked</span>` +
         `<span class="verdict-tag rejected">${rj} rejected</span>` +
         `<span>${uh} unhandled</span>` +
+        `<span class="ss-progress" data-id="ss-progress">${marked} / ${current.members.length} marked</span>` +
         `<span class="ss-dots">${dots}</span>` +
         `<span class="ss-kbd-pos" id="ss-kbd-pos">⌨ ${current.members.indexOf(champ) + 1}/${current.members.length}</span>` +
-        `<span class="ss-badge draft">DRAFT — nothing saved until Commit</span>`;
+        `<span class="ss-badge saved" id="ss-save-badge">${saveStateText()}</span>`;
       head.appendChild(kbdLegendBtn([
         ['←/→', 'cycle champion through challengers'],
         ['A', 'pick the champion'],
@@ -2145,6 +2344,10 @@ registerModule({
         current = f;
         committed = false;
         commitSummary = null;
+        // fresh family, fresh save display (the queue itself is untouched —
+        // an in-flight POST from the previous family still completes).
+        saveState = 'idle'; saveStamp = '';
+        updateSaveBadge();
         // TWIN-CLEARING ORDER (2026-10-08m): applied once here, so spread,
         // survey, zoom and kbCycle all traverse nearest-hash-neighbors
         // first — twins get judged back-to-back.
@@ -2166,7 +2369,8 @@ registerModule({
         championIdx = 0;
         if (f.reopened && f.prior_verdicts) {
           // Re-opened for review (Task 4): the last committed verdicts seed a
-          // fresh UNCOMMITTED draft; nothing is written until Commit.
+          // fresh draft seeded from the prior verdicts; new marks persist
+          // per-mark as they are made.
           for (const [p, v] of Object.entries(f.prior_verdicts)) {
             if (v && !draft.verdicts[p]) draft.verdicts[p] = v;
             if (v === 'kept' && !draft.picks.includes(p)) draft.picks.push(p);
@@ -2197,7 +2401,14 @@ registerModule({
       el.commit.style.borderColor = '';
       try {
         if (committed) renderCommitted(commitSummary);
-        else { renderSpread(); openZoom(0, 'spread'); }
+        else {
+          renderSpread();
+          // Bug 6 resume: land on the first unmarked member. The draft
+          // was seeded from the family's latest ledger entry above, so
+          // this is the resume point across sessions — no localStorage.
+          const firstOpen = current.members.findIndex(m => !draft.verdicts[m.path]);
+          openZoom(firstOpen < 0 ? 0 : firstOpen, 'spread');
+        }
       } catch (renderErr) {
           // red error panel INSIDE the detail — never a silent blank view
           console.error('dupe renderSpread failed', renderErr);

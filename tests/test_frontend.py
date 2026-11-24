@@ -666,6 +666,78 @@ def test_puppet_v15_dupe_folder_filter_wiring():
     assert 'ellieedit:dupe-folder-review' in dupe
 
 
+def test_dupe_per_mark_persistence_wiring():
+    """Dupe work order Bug 4 (2026-11-24): every mark POSTs the cumulative
+    draft map to the verdict endpoint immediately (one POST per mark — the
+    ledger's latest-wins is whole-entry replacement, so a bare
+    single-member POST would clobber earlier marks); writes queue and
+    retry, and flush on visibilitychange/beforeunload only when a write
+    is outstanding. The draft is still seeded from the ledger on entry."""
+    dupe = (HERE.parent / "frontend" / "js" / "modules" / "dupe.js").read_text()
+    # choke point + immediate persist
+    assert "function setVerdict(path, verdict)" in dupe
+    assert "function persistDraft()" in dupe
+    assert "api(`/families/${fid}/verdict`" in dupe
+    assert "JSON.stringify(toCommitPayload())" in dupe
+    # mark sites route through it (spread, zoom, sift)
+    assert "setVerdict(m.path, 'kept')" in dupe
+    assert "setVerdict(m.path, 'rejected')" in dupe
+    assert "setVerdict(m.path, null)" in dupe
+    assert "persistDraft();   // one POST for the meld action" in dupe
+    assert "persistDraft();   // one POST for the bulk action" in dupe
+    # queue + retry + flush
+    assert "saveQueue = saveQueue.then(() => attempt(1))" in dupe
+    assert "visibilitychange" in dupe and "flushSaves()" in dupe
+    assert "beforeunload" in dupe
+    assert "navigator.sendBeacon" in dupe and "keepalive: true" in dupe
+    assert "if (!savePending && !saveFailed) return;" in dupe
+    # visible durability state, not silent
+    assert "id=\"ss-save-badge\"" in dupe and "saveStateText()" in dupe
+    # draft seeded from the ledger on entry (pre-existing mechanism, kept)
+    assert "for (const [p, v] of Object.entries(f.verdicts || {}))" in dupe
+    # the old "nothing persists" claim is gone
+    assert "NOTHING persists before Commit" not in dupe
+    assert "nothing saved until Commit" not in dupe
+    # Commit stays: confirm + advance + send-pending
+    assert "Commit & next family" in dupe
+    assert "commitFamily()" in dupe and "send-pending" in dupe
+
+
+def test_dupe_zoom_contained_pinch_and_reset():
+    """Dupe work order Bug 5 (2026-11-24): the zoom overlay takes every
+    touch gesture itself (no browser page pinch-zoom), the stage image
+    gets a clamped contained pinch (1–3×, pan clamped to the stage), and
+    a Reset view button + R key restore the fit view without leaving the
+    family. The shared zoom-viewer.js is untouched."""
+    dupe = (HERE.parent / "frontend" / "js" / "modules" / "dupe.js").read_text()
+    assert "#ss-zoom { touch-action:none; }" in dupe
+    assert "viewScale = Math.max(1, Math.min(3, viewScale))" in dupe
+    assert "img.style.transform = t;" in dupe
+    assert "pinImg.style.transform = t;" in dupe
+    assert "id = 'ss-zoom-reset'" in dupe
+    assert "⟲ Reset view" in dupe
+    assert "zoom.querySelector('#ss-zoom-reset')?.click()" in dupe
+    assert "['R', 'reset the image view']" in dupe
+    # a pinch never cycles/dismisses/flips
+    assert "if (wasPinch) return;   // a pinch never cycles/dismisses/flips" in dupe
+    viewer = (HERE.parent / "frontend" / "js" / "modules" / "zoom-viewer.js").read_text()
+    assert "ss-zoom-reset" not in viewer
+
+
+def test_dupe_progress_and_resume_on_entry():
+    """Dupe work order Bug 6 (2026-11-24): the family detail shows a
+    marked/total progress indicator, and entering a family lands on the
+    first unmarked member (ledger-seeded draft — no localStorage).
+    Pagination is deliberately skipped in this batch."""
+    dupe = (HERE.parent / "frontend" / "js" / "modules" / "dupe.js").read_text()
+    assert 'data-id="ss-progress"' in dupe
+    assert "${marked} / ${current.members.length} marked" in dupe
+    assert "${marked} / ${list.length} marked" in dupe
+    assert "const firstOpen = current.members.findIndex(m => !draft.verdicts[m.path]);" in dupe
+    assert "openZoom(firstOpen < 0 ? 0 : firstOpen, 'spread')" in dupe
+    assert "this is the resume point across sessions — no localStorage." in dupe
+
+
 def test_js_key_guards():
     """Shared shortcut-guard helper (v1.5 workorder) — node test, repo style."""
     r = subprocess.run(
