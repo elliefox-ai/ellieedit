@@ -1720,6 +1720,30 @@ def test_stage4_mask_and_provenance_pins():
     assert "recipe: 'masked-inpaint'" in studio
 
 
+def test_studio_reapply_last_mask_pins():
+    """Studio 'reuse last mask' (2026-11-27), parity with Update's
+    reapplyLastMask: one in-memory entry (global, not per source), kept when
+    a mask run starts and before the painted mask is dropped, re-applied
+    only at the same pixel size, and undoable like a fresh paint."""
+    base = Path(__file__).parent.parent / "frontend" / "js" / "modules"
+    studio = (base / "studio.js").read_text()
+    pure = (base / "studio-mask.js").read_text()
+    assert 'data-id="mask-last"' in studio
+    assert "import { captureLast, lastMaskNote, planReapply } from './studio-mask.js'" in studio
+    # captured at every site that drops the painted mask + when a run starts
+    assert studio.count("captureLastMask(); maskCanvas = null; maskPainted = false; maskUndoStack = [];") == 4
+    assert "captureLastMask(maskUrl);" in studio
+    assert "mask_b64: maskUrl" in studio
+    # re-apply pushes the replaced mask onto the undo stack first, and
+    # ignores a decode that finished after the working image changed
+    assert "if (mc !== maskCanvas) return;" in studio
+    assert "pushMaskUndo();\n      const ctx = mc.getContext('2d');" in studio
+    # same rule as Update: size must match, nothing applied on a mismatch
+    assert "last.width !== cur.width || last.height !== cur.height" in pure
+    update = (base / "update.js").read_text()
+    assert "this.lastMask.width !== this.maskCanvas.width" in update   # the reference it mirrors
+
+
 def test_stage4_lora_row_drag_and_inspector_pins():
     """LoRA rework (2026-11-16): names show the filename's beginning
     (directory span dropped from the row); weight is hold-and-drag on

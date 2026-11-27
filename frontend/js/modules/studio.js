@@ -17,6 +17,7 @@
 import { registerModule, registerReceiver, toast } from '../shell.js';
 import { studioState, galleryFileUrl } from './studio-state.js';
 import { createCandidates, pathFromViewUrl } from './studio-candidates.js';
+import { captureLast, lastMaskNote, planReapply } from './studio-mask.js';
 import { askTag, loadTagMemory, recordTag } from '../components/tag-picker.js';
 import {
   createStack, current, source, compareEntry, canRevert,
@@ -462,6 +463,9 @@ function panelHTML() {
                 <button data-id="mask-undo" disabled>↩ Undo</button>
                 <button data-id="mask-hide" aria-pressed="false">👁 Hide mask</button>
               </div>
+              <div class="st-row2">
+                <button data-id="mask-last" disabled title="No previous mask yet">↺ Reuse last mask</button>
+              </div>
               <span class="st-hintline">White = regenerate; everything else stays pixel-exact.</span>
             </div>
             <label>Prompt</label>
@@ -560,7 +564,7 @@ export function mountStudio(panel, jobbar) {
     'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui', 'lorapop',
     'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all', 'saveall',
     'mmodel', 'mprompt', 'mdenoise', 'mdenoise-val', 'mseed', 'mrandom',
-    'mask', 'mask-paint', 'mask-erase', 'brush', 'mask-clear', 'mask-undo', 'mask-hide',
+    'mask', 'mask-paint', 'mask-erase', 'brush', 'mask-clear', 'mask-undo', 'mask-hide', 'mask-last',
     'madvance', 'mstatus',
     'provtable', 'parentchain', 'runbtn', 'edgetab', 'genfab', 'fabring', 'fabinner',
     'bottomhandle', 'candoverlay', 'ovcands', 'loraoverlay', 'loraovbody', 'loraclose',
@@ -582,6 +586,9 @@ export function mountStudio(panel, jobbar) {
   let previewUrl = null;       // candidate preview URL shown on the canvas
   let previewed = null;        // candidate currently viewed (⬇ promotes it)
   let maskCanvas = null, maskMode = 'paint', maskPainted = false, maskUndoStack = [], maskWhiteCount = 0;
+  // Last used mask (2026-11-27, parity with Update's lastMask): ONE in-memory
+  // entry {dataUrl, width, height} — global, not per source, gone on reload.
+  let lastMask = null;
   // Hide-mask toggle state: session-persistent — never reset on verb
   // switch or source change (a fresh mask is all black, i.e. invisible
   // anyway, so keeping the state is harmless).
@@ -857,7 +864,7 @@ export function mountStudio(panel, jobbar) {
       stack = seeded || createStack(outEntry);
       compareOn = false; cmpPct = 100;
       zoomScale = 1; zoomTx = 0; zoomTy = 0;
-      maskCanvas = null; maskPainted = false; maskUndoStack = [];
+      captureLastMask(); maskCanvas = null; maskPainted = false; maskUndoStack = [];
       clearPreview();
       showCurrent();
       revokeStackUrls(prevStack);
@@ -877,7 +884,7 @@ export function mountStudio(panel, jobbar) {
       // otherwise the old image and save buttons linger.
       const prevStack = stack;
       stack = null; previewed = null; previewUrl = null;
-      maskCanvas = null; maskPainted = false; maskUndoStack = [];
+      captureLastMask(); maskCanvas = null; maskPainted = false; maskUndoStack = [];
       showCurrent();
       revokeStackUrls(prevStack);
       return;
@@ -1106,6 +1113,46 @@ export function mountStudio(panel, jobbar) {
     img.src = url;
   });
 
+  // Keep the current mask as the "last used" one. Called when a mask run
+  // starts (that mask was used) and before the painted mask is dropped
+  // (new working image, cleared canvas, history move). A blank mask never
+  // overwrites a real one. The mask is NOT auto-applied to the next image.
+  function captureLastMask(dataUrl) {
+    if (!maskCanvas) return;
+    const kept = captureLast(maskWhiteCount, maskCanvas.width, maskCanvas.height,
+      dataUrl || (maskWhiteCount > 0 ? maskCanvas.toDataURL('image/png') : ''));
+    if (!kept) return;
+    lastMask = kept;
+    syncLastMaskBtn();
+  }
+  function syncLastMaskBtn() {
+    el['mask-last'].disabled = !lastMask;
+    el['mask-last'].title = lastMaskNote(lastMask);
+  }
+  // Re-apply onto the CURRENT mask canvas, same size only (Update's rule).
+  // Undoable like a fresh paint: the mask it replaces goes on the undo
+  // stack first. Un-hides the mask so the restored shape is visible.
+  el['mask-last'].addEventListener('click', () => {
+    const plan = planReapply(lastMask,
+      maskCanvas ? { width: maskCanvas.width, height: maskCanvas.height } : null);
+    if (!plan.ok) { say(plan.msg, true); return; }
+    const mc = maskCanvas, src = lastMask.dataUrl;
+    const img = new Image();
+    img.onload = () => {
+      if (mc !== maskCanvas) return;          // working image changed while decoding
+      pushMaskUndo();
+      const ctx = mc.getContext('2d');
+      ctx.clearRect(0, 0, mc.width, mc.height);
+      ctx.drawImage(img, 0, 0);
+      maskWhiteCount = scanWhiteCount();
+      maskPainted = maskHasWhite();
+      if (maskHidden) { maskHidden = false; syncMaskHide(); } else drawMaskView();
+      say(plan.msg);
+    };
+    img.src = src;
+  });
+  syncLastMaskBtn();
+
   // ── rail verb switching: hidden + aria only; never a fetch, never a
   // store touch (chunk-A pin contract) ──
   function showVerb(v) {
@@ -1332,7 +1379,7 @@ export function mountStudio(panel, jobbar) {
     // not in new; the canvas has already swapped to the new entry, so
     // nothing displayed is ever revoked.
     if (prevStack) revokeStackUrls({ entries: prevStack.entries.filter(en => !stack.entries.includes(en)) });
-    maskCanvas = null; maskPainted = false; maskUndoStack = [];
+    captureLastMask(); maskCanvas = null; maskPainted = false; maskUndoStack = [];
     studioState().set(c.path, 'foxden-output', { name: entry.name });
     if (verb === 'mask') initMaskForSource();
     say(`working image: ${entry.name}`);
@@ -2401,8 +2448,10 @@ export function mountStudio(panel, jobbar) {
     busy = true;
     setFabProgress(0.05, '…');
     try {
+      const maskUrl = maskCanvas.toDataURL('image/png');
+      captureLastMask(maskUrl);               // this mask is now the "last used" one
       const body = { path: srcEntry.path, prompt: el.mprompt.value,
-        mask_b64: maskCanvas.toDataURL('image/png'),
+        mask_b64: maskUrl,
         denoise: parseFloat(el.mdenoise.value) || 0.45,
         seed, random: useRandom };
       const r = await fetch('/api/update/inpaint-async', { method: 'POST',
@@ -2526,7 +2575,7 @@ export function mountStudio(panel, jobbar) {
   // the old mask is for the wrong image — reset it, mirroring
   // promoteCandidate (which does the same on advance).
   function resetMaskForSourceChange() {
-    maskCanvas = null; maskPainted = false; maskUndoStack = [];
+    captureLastMask(); maskCanvas = null; maskPainted = false; maskUndoStack = [];
     if (verb === 'mask') initMaskForSource();
   }
   // Leaving a preview behind when the history moves the view: saveAs
