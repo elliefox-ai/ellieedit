@@ -1242,6 +1242,12 @@ export function mountStudio(panel, jobbar) {
       // re-reads the entry URLs.
       renderCandidates();
       if (!previewed) showCurrent();
+      // Ellie's review (PR #38): an open history pop-up or provenance
+      // panel holds row images pointing at the (now revoked) blob —
+      // re-render them so they pick up the fresh entry URL. Both
+      // calls are safe when their panels are closed.
+      if (el.historyoverlay.classList.contains('open')) renderHistory();
+      refreshProvenanceIfOpen();
     } catch (err) {
       say(`refresh after save-over failed: ${err.message} — the file was saved; reload the tab to see the new image`, true);
     }

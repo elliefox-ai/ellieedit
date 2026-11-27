@@ -1971,3 +1971,26 @@ def test_stage4_save_over_targeted_refresh_pins():
     # The refresh blob URL is dropped when the viewer moves on / closes,
     # so it does not leak
     assert "if (this.el.viewerImg.src.startsWith('blob:')) URL.revokeObjectURL(this.el.viewerImg.src);" in gallery
+    # 3 — Ellie's PR #38 review fixes (2026-11-27): refreshOverwritten
+    # also re-renders an open history pop-up and the provenance panel,
+    # whose row images would otherwise point at the revoked blob and
+    # show stale pixels until the next re-render. Pinned inside
+    # refreshOverwritten itself, not just anywhere in the file.
+    fn = studio[studio.index("async function refreshOverwritten(orig) {"):]
+    fn = fn[:fn.index("\n  wireSaveBars();")]
+    assert "if (el.historyoverlay.classList.contains('open')) renderHistory();" in fn
+    assert "refreshProvenanceIfOpen();" in fn
+    # 4 — Viewer ordering: the swap happens BEFORE the thumbnail fetch,
+    # and a thumbnail failure only reports — it never undoes the viewer
+    # update (a file-fetch failure still aborts with 'refresh failed')
+    swap = gallery.index("this.el.viewerImg.src = URL.createObjectURL(blob);")
+    thumb = gallery.index("fetch(this.thumbUrl(item), { cache: 'reload' })")
+    assert swap < thumb
+    assert "thumbnail refresh failed:" in gallery
+    # 5 — Dimension line (review polish): refreshed from the fresh image
+    # once it loads — naturalWidth/Height plus the Last-Modified date —
+    # guarded to the still-open item
+    assert "this.el.viewerImg.naturalWidth" in gallery
+    assert "this.el.viewerImg.naturalHeight" in gallery
+    assert "r.headers.get('Last-Modified')" in gallery
+    assert "item.mtime = Math.floor(t / 1000)" in gallery

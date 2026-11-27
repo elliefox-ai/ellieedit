@@ -1401,26 +1401,46 @@ export class Gallery {
     // cache:'reload' — fresh bytes from the server, stored back into
     // the HTTP cache — and swap the viewer to a blob of them, so an
     // image overwritten in place (Save Over) shows its new bytes
-    // without a reload. The thumbnail is re-fetched the same way so
-    // the grid behind the viewer is fresh too. Only the img src
-    // changes: the zoom transform lives on the same <img> (the
-    // zoom-viewer module owns it), so zoom/pan state is preserved —
-    // reset() is NOT called (that is openViewer's job for a new
-    // image). Either fetch failing leaves the current image in place.
+    // without a reload. Only the img src changes: the zoom transform
+    // lives on the same <img> (the zoom-viewer module owns it), so
+    // zoom/pan state is preserved — reset() is NOT called (that is
+    // openViewer's job for a new image). The viewer swap happens
+    // FIRST: the thumbnail is refreshed afterwards in its own
+    // try/catch, so a thumbnail failure never undoes the viewer
+    // update. Either fetch failing leaves the current image in place.
     act('viewer-refresh').addEventListener('click', async () => {
       const item = this.items[this.viewIdx];
       if (!item) return;
+      let r;
       try {
-        const r = await fetch(this.fileUrl(item), { cache: 'reload' });
+        r = await fetch(this.fileUrl(item), { cache: 'reload' });
         if (!r.ok) throw new Error(`image refresh failed: ${r.status}`);
+      } catch (err) { toast(`refresh failed: ${err.message}`, true); return; }
+      const blob = await r.blob();
+      const old = this.el.viewerImg.src;
+      this.el.viewerImg.src = URL.createObjectURL(blob);
+      if (old.startsWith('blob:')) URL.revokeObjectURL(old);
+      toast('Image refreshed');
+      // Dimension line (review polish): the name line shows the item's
+      // stored W×H and date — refresh them from the fresh image once it
+      // loads, so an overwrite that changed dimensions doesn't leave a
+      // stale line. Guarded to the still-open item.
+      this.el.viewerImg.addEventListener('load', () => {
+        if (this.items[this.viewIdx] !== item) return;
+        const w = this.el.viewerImg.naturalWidth, h = this.el.viewerImg.naturalHeight;
+        if (!w || !h) return;
+        item.width = w; item.height = h;
+        const lm = r.headers.get('Last-Modified');
+        if (lm) { const t = Date.parse(lm); if (Number.isFinite(t)) item.mtime = Math.floor(t / 1000); }
+        this.el.viewerName.textContent = `${item.name} · ${item.width}×${item.height} · ${new Date(item.mtime * 1000).toLocaleString()}` +
+          (item.bank && item.bank !== 'primary' ? ` · 🏦 ${item.bank_label || item.bank}` : '');
+      }, { once: true });
+      // Thumbnail refresh, on its own: the grid behind the viewer goes
+      // fresh too, but a failure here only reports.
+      try {
         const tr = await fetch(this.thumbUrl(item), { cache: 'reload' });
-        if (!tr.ok) throw new Error(`thumbnail refresh failed: ${tr.status}`);
-        const blob = await r.blob();
-        const old = this.el.viewerImg.src;
-        this.el.viewerImg.src = URL.createObjectURL(blob);
-        if (old.startsWith('blob:')) URL.revokeObjectURL(old);
-        toast('Image refreshed');
-      } catch (err) { toast(`refresh failed: ${err.message}`, true); }
+        if (!tr.ok) toast(`thumbnail refresh failed: ${tr.status}`, true);
+      } catch (err) { toast(`thumbnail refresh failed: ${err.message}`, true); }
     });
     // Stage 1 working-image store (design doc §4): loads the lightboxed
     // image into the store — Update (and later Studio) picks it up. Never
