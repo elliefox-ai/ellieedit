@@ -19,6 +19,7 @@ import { crumbsFor, joinDir, isBrowsableDir } from './gallery-path.js';
 import { bindViewerZoom } from './zoom-viewer.js';
 import { diffManifest, planManifestChange, pickSurvivor, scrollDeltaFor } from './gallery-scroll.js';
 import { galleryDetails } from './viewer-details.js';
+import { copyImageToClipboard } from './image-clipboard.js';
 
 function panelHTML() {
   return `
@@ -215,6 +216,7 @@ function panelHTML() {
     <div class="bar">
       <span class="fname" data-id="viewer-name"></span>
       <button class="ee-btn primary" data-act="viewer-promote" title="Promote to Library (P)">⬆ Promote</button>
+      <button class="ee-btn" data-act="viewer-copy" title="Copy this image to the clipboard (downloads if clipboard is unavailable)">⧉ Copy</button>
       <button class="ee-btn" data-act="set-working" title="Set as the Studio working image — stays loaded across tabs and reloads">📌 Working</button>
       <button class="ee-btn" data-act="to-update" title="Set as the Studio working image and open Studio (Refine view)">🎨 Studio</button>
       <button class="ee-btn danger" data-act="viewer-delete" title="Mark for deletion (Delete key) — nothing is deleted until you confirm in the Deletion view">🗑 Delete</button>
@@ -1375,6 +1377,16 @@ export class Gallery {
     act('prev').addEventListener('click', () => this.nav(-1));
     act('next').addEventListener('click', () => this.nav(1));
     act('viewer-promote').addEventListener('click', () => this.promoteFromViewer());
+    // Copy the lightboxed image (2026-11-27): clipboard when available,
+    // download when not — the toast says which path was taken.
+    act('viewer-copy').addEventListener('click', async () => {
+      const item = this.items[this.viewIdx];
+      if (!item) return;
+      try {
+        const how = await copyImageToClipboard(this.fileUrl(item), item.name);
+        toast(how === 'clipboard' ? 'Copied to clipboard' : 'Clipboard unavailable — downloaded instead');
+      } catch (err) { toast(`copy failed: ${err.message}`, true); }
+    });
     // Stage 1 working-image store (design doc §4): loads the lightboxed
     // image into the store — Update (and later Studio) picks it up. Never
     // touches Ladder state (decision #4).

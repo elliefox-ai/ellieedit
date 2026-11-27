@@ -1834,3 +1834,70 @@ def test_stage3_send_targets_retirement_and_survivors():
     assert "ellieedit:studio-set-working" in st
     assert "ellieedit:studio-set-working" in studio
     assert "registerReceiver('studio'" in studio
+
+
+def test_stage4_history_clipboard_pins():
+    """Generation history pop-up + clipboard round-trip (2026-11-27,
+    Alexander's word: 'try the implementation'). History is a UI over
+    the existing stack: View jumps, Make base re-bases, Back steps back
+    one entry AND re-bases in one move (revert alone moves only the
+    view). Parent links make save-family intermediates an ancestry walk,
+    not the flat slice. The Save-over confirm names both files. The
+    clipboard pair is copy (Gallery viewer + Studio canvas) and paste
+    (Studio, button + Ctrl/Cmd+V); one shared import function lives in
+    image-clipboard.js. Clipboard behavior itself is pins only — no
+    browser in this environment."""
+    HERE = Path(__file__).parent
+    studio = (HERE.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    clip = (HERE.parent / "frontend" / "js" / "modules" / "image-clipboard.js").read_text()
+    gallery = (HERE.parent / "frontend" / "js" / "modules" / "gallery.js").read_text()
+    stack = (HERE.parent / "frontend" / "js" / "modules" / "update-stack.js").read_text()
+    # History pop-up: header button + bottom-sheet overlay (LoRA pattern)
+    assert 'data-id="history"' in studio and "🕘 History" in studio
+    assert 'data-id="historyoverlay"' in studio
+    assert ".st-historyoverlay" in studio and ".st-historyoverlay.open" in studio
+    assert 'data-id="histback"' in studio and "↩ Back" in studio
+    assert 'data-id="histclose"' in studio
+    assert "function renderHistory" in studio
+    assert "lineage(stack)" in studio and "function renderHistoryLine" in studio
+    assert 'data-id="historyline"' in studio   # Provenance record of the same rows
+    # Back moves BOTH pointers: view steps back and the base follows
+    assert "stepBack(stack)" in studio
+    assert "canRevert(stack)" in studio
+    assert "function stepBack" in stack and "function ancestry" in stack and "function lineage" in stack
+    # Save-family intermediates are the ancestry walk, not the flat slice
+    assert "ancestry(s, s.idx)" in studio
+    assert "s.entries.slice(1, s.idx)" not in studio
+    # Two-named Save-over confirm: the render AND the file overwritten
+    assert "Overwrite ${orig.name} with ${entry.name}?" in studio
+    assert "Overwrite the original source in place?" not in studio
+    # Tap still previews only (Alexander, 2026-11-27) — history changes nothing there
+    assert "Viewing ONLY" in studio
+    assert "previewed = c;" in studio
+    # ONE import function, in image-clipboard.js: defined once, used by
+    # the file picker and both paste paths; the upload endpoint lives
+    # only there (studio no longer uploads directly)
+    assert "export async function importImageAsWorking" in clip
+    assert "/api/gallery/upload" in clip
+    assert "/api/gallery/upload" not in studio
+    assert "import { importImageAsWorking, copyImageToClipboard } from './image-clipboard.js';" in studio
+    assert "importImageAsWorking(f, { name: f.name, origin: 'gallery-upload' })" in studio
+    assert "importImageAsWorking(files[0]" in studio
+    assert "importImageAsWorking(blob" in studio
+    # Paste: button reads the clipboard, Ctrl/Cmd+V uses the paste event
+    # (no clipboard-read permission needed); text fields keep their paste;
+    # only fires while Studio is the active tab
+    assert "navigator.clipboard.read" in studio
+    assert "document.addEventListener('paste'" in studio
+    assert "panel.classList.contains('active')" in studio
+    assert "tagName === 'INPUT'" in studio and "tagName === 'TEXTAREA'" in studio
+    # Copy: Clipboard API with a download fallback that says which path
+    # was taken; Studio canvas + Gallery viewer
+    assert "export async function copyImageToClipboard" in clip
+    assert "ClipboardItem" in clip and "a.download" in clip
+    assert "copyImageToClipboard(galleryFileUrl(st.path)" in studio
+    assert "clipboard unavailable — downloaded the file instead" in studio
+    assert 'data-act="viewer-copy"' in gallery
+    assert "act('viewer-copy')" in gallery
+    assert "copyImageToClipboard(this.fileUrl(item)" in gallery
+    assert "Clipboard unavailable — downloaded instead" in gallery

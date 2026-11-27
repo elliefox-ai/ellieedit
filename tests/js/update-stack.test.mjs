@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {
   createStack, current, source, isOriginal, canRevert, compareEntry,
   pushRender, swap, setViewedAsBase, selectEntry, revert, revertToOriginal, saveable,
+  stepBack, ancestry, lineage, parentOf,
 } from '../../frontend/js/modules/update-stack.js';
 
 const orig = { url: 'blob:orig', name: 'original.png', path: 'folder/original.png' };
@@ -145,4 +146,80 @@ test('purity: operations never mutate the input state', () => {
   assert.equal(s4.idx, 0);
   assert.notEqual(s1, s0);
   assert.notEqual(s2, s1);
+});
+
+test('pushRender records the base as the render parent, entry untouched', () => {
+  let s = createStack(orig);
+  s = pushRender(s, r1);            // base is the original (0)
+  assert.equal(parentOf(s, 1), 0);
+  s = swap(s);                      // base moves to r1
+  s = pushRender(s, r2);            // r2 was generated from r1
+  assert.equal(parentOf(s, 2), 1);
+  assert.equal(parentOf(s, 0), null);
+  assert.ok(!('parent' in r1) && !('parent' in r2)); // parents live beside the entries, never on them
+  assert.deepEqual(s.parents, [null, 0, 1]);
+});
+
+test('explicit parent on the entry wins over the base', () => {
+  let s = createStack(orig);
+  s = pushRender(s, r1);
+  s = swap(s);
+  s = pushRender(s, { ...r2, parent: 0 }); // caller knows better
+  assert.equal(parentOf(s, 2), 0);
+});
+
+test('stepBack moves the view AND the base', () => {
+  let s = createStack(orig);
+  s = pushRender(s, r1);
+  s = swap(s);
+  s = pushRender(s, r2);
+  s = swap(s);
+  assert.equal(current(s), r2);
+  assert.equal(source(s), r2);
+  s = stepBack(s);                  // revert alone would leave source on r2
+  assert.equal(current(s), r1);
+  assert.equal(source(s), r1);
+  s = stepBack(s);
+  assert.equal(current(s), orig);
+  assert.equal(source(s), orig);
+  s = stepBack(s);                  // floor: no-op at the original
+  assert.equal(current(s), orig);
+  assert.equal(source(s), orig);
+});
+
+test('ancestry walks parents, excludes a branch sibling', () => {
+  // A -> B -> C, then D branched from B (base never moved past B).
+  let s = createStack(orig);
+  s = pushRender(s, r1);            // B, parent 0
+  s = swap(s);                      // base = B
+  s = pushRender(s, r2);            // C, parent 1
+  const r3 = { url: 'data:...3', name: 'render seed=3', path: 'ellieedit_tmp/update_00003_.png' };
+  s = pushRender(s, r3);            // D, parent 1 — branched from B, not from C
+  assert.deepEqual(ancestry(s, 3), [r1]);       // D's intermediates: B only
+  assert.deepEqual(ancestry(s, 2), [r1]);       // C's intermediates: B only
+  assert.deepEqual(ancestry(s, 1), []);         // B's intermediates: none
+  assert.deepEqual(ancestry(s), [r1]);          // default idx = viewed (D)
+  // The old flat slice(1, idx) would have listed C as an intermediate of D.
+  assert.deepEqual(s.entries.slice(1, s.idx), [r1, r2]);
+});
+
+test('lineage rows carry parent + current/base markers', () => {
+  let s = createStack(orig);
+  s = pushRender(s, r1);
+  s = swap(s);
+  s = pushRender(s, r2);
+  const rows = lineage(s);
+  assert.deepEqual(rows.map(r => r.index), [0, 1, 2]);
+  assert.deepEqual(rows.map(r => r.parent), [null, 0, 1]);
+  assert.deepEqual(rows.map(r => r.isCurrent), [false, false, true]);
+  assert.deepEqual(rows.map(r => r.isBase), [false, true, false]);
+  assert.equal(rows[2].entry, r2);
+});
+
+test('parentOf falls back to linear on pre-parent stacks', () => {
+  const s = { entries: [orig, r1, r2], idx: 2, sourceIdx: 0 }; // no parents array
+  assert.equal(parentOf(s, 2), 1);
+  assert.equal(parentOf(s, 1), 0);
+  assert.equal(parentOf(s, 0), null);
+  assert.deepEqual(ancestry(s), [r1]);
 });
