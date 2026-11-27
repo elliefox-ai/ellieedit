@@ -11,6 +11,7 @@
 // P-promote here — library items are already promoted.
 import { registerModule } from '../shell.js';
 import { createSendMenu } from '../components/send-menu.js';
+import { askTag, recordTags } from '../components/tag-picker.js';
 import { buildListParams, countLine, sortParam } from './library-core.js';
 import { libraryDetails } from './viewer-details.js';
 import { bindViewerZoom } from './zoom-viewer.js';
@@ -1227,10 +1228,9 @@ class LibraryView {
   async retagFromViewer() {
     const item = this.items[this.viewIdx];
     if (!item) return;
-    const input = prompt('Tags (comma-separated):', (item.tags || []).join(','));
-    if (input === null) return;
-    const tags = input.split(',').map(s => s.trim()).filter(Boolean);
-    if (!tags.length) return;
+    const tags = await askTag({ title: `Retag ${item.name} — comma-separated:`,
+      def: item.tags || [], okLabel: 'Retag', mode: 'list' });
+    if (tags === null || !tags.length) return;
     try {
       const r = await fetch('/api/library/retag', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1238,6 +1238,7 @@ class LibraryView {
       });
       if (!r.ok) throw new Error(r.status);
       item.tags = tags;
+      recordTags(tags);
       // Refresh the grid cell's chips + the viewer title, no full reload.
       const cell = [...this.el.grid.children].find(c => c.dataset.path === item.path);
       if (cell) {

@@ -13,6 +13,7 @@ import { registerModule, toast } from '../shell.js';
 import { isTypingTarget } from '../key-guards.js';
 import { planFaceCycleHandoff } from '../handoff.js';
 import { createSendMenu } from '../components/send-menu.js';
+import { askTag, loadTagMemory, recordTag, tagChips } from '../components/tag-picker.js';
 import { studioState } from './studio-state.js';
 import { planMarkBatch } from './marking-batch.js';
 import { crumbsFor, joinDir, isBrowsableDir } from './gallery-path.js';
@@ -827,81 +828,14 @@ export class Gallery {
   // Tag memory (v1.5.1): the dialog no longer starts blank. It is prefilled
   // with the most recent tag, and offers chips for the recent tags plus the
   // most commonly used ones (localStorage, per browser).
-  loadTagMemory() {
-    try {
-      const m = JSON.parse(localStorage.getItem('ellieedit.promote.tags') || '{}');
-      return { recent: Array.isArray(m.recent) ? m.recent : [],
-               counts: (m.counts && typeof m.counts === 'object') ? m.counts : {} };
-    } catch { return { recent: [], counts: {} }; }
-  }
-
-  recordTag(tag) {
-    if (!tag) return;
-    const m = this.loadTagMemory();
-    m.recent = [tag, ...m.recent.filter(t => t !== tag)].slice(0, 8);
-    m.counts[tag] = (m.counts[tag] || 0) + 1;
-    try { localStorage.setItem('ellieedit.promote.tags', JSON.stringify(m)); } catch { /* private mode */ }
-  }
-
-  tagChips(mem) {
-    const seen = new Set();
-    const out = [];
-    for (const t of mem.recent.slice(0, 5)) {
-      if (!seen.has(t)) { seen.add(t); out.push(t); }
-    }
-    for (const t of Object.entries(mem.counts).sort((a, b) => b[1] - a[1]).map(e => e[0])) {
-      if (out.length >= 8) break;
-      if (!seen.has(t)) { seen.add(t); out.push(t); }
-    }
-    return out;
-  }
-
-  // Small inline dialog (replaces window.prompt): input + recent/common
-  // chips. Resolves to the tag string, or null on cancel.
+  // Tag memory + dialog live in components/tag-picker.js (shared with
+  // Library retag, Studio save, Update promote, Filters save). These thin
+  // delegates keep the call sites below unchanged.
+  loadTagMemory() { return loadTagMemory(); }
+  recordTag(tag) { recordTag(tag); }
+  tagChips(mem) { return tagChips(mem); }
   askTag(def, mem) {
-    return new Promise(resolve => {
-      const ov = document.createElement('div');
-      ov.style.cssText = 'position:fixed;inset:0;background:rgba(8,8,16,0.8);z-index:300;' +
-        'display:flex;align-items:center;justify-content:center;';
-      const box = document.createElement('div');
-      box.style.cssText = 'background:#1d1d33;border:1px solid #4a4a6c;border-radius:10px;' +
-        'padding:18px;max-width:420px;width:90vw;display:flex;flex-direction:column;gap:10px;';
-      const lab = document.createElement('div');
-      lab.textContent = 'Promote to Library — tag/project:';
-      lab.style.cssText = 'font-size:13px;color:#b0b0d0;';
-      const input = document.createElement('input');
-      input.value = def || '';
-      input.style.cssText = 'background:#22223a;color:#e8e8f4;border:1px solid #4a4a6c;' +
-        'border-radius:6px;padding:8px;font-size:14px;width:100%;box-sizing:border-box;';
-      const chips = document.createElement('div');
-      chips.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
-      for (const t of this.tagChips(mem)) {
-        const c = document.createElement('button');
-        c.type = 'button'; c.className = 'ee-btn'; c.textContent = t;
-        c.style.cssText = 'font-size:12px;padding:4px 10px;';
-        c.addEventListener('click', () => { input.value = t; input.focus(); });
-        chips.appendChild(c);
-      }
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
-      const ok = document.createElement('button');
-      ok.className = 'ee-btn primary'; ok.textContent = 'Promote';
-      const cancel = document.createElement('button');
-      cancel.className = 'ee-btn'; cancel.textContent = 'Cancel';
-      row.append(ok, cancel);
-      box.append(lab, input, chips, row);
-      ov.appendChild(box);
-      document.body.appendChild(ov);
-      const done = v => { ov.remove(); resolve(v); };
-      ok.addEventListener('click', () => done(input.value.trim().toLowerCase()));
-      cancel.addEventListener('click', () => done(null));
-      ov.addEventListener('click', e => { if (e.target === ov) done(null); });
-      input.addEventListener('keydown', e => {
-        if (e.key === 'Enter') done(input.value.trim().toLowerCase());
-        else if (e.key === 'Escape') done(null);
-      });
-      input.focus(); input.select();
-    });
+    return askTag({ title: 'Promote to Library — tag/project:', def, mem, okLabel: 'Promote' });
   }
 
   async promoteCell(item, cell, tagOverride) {

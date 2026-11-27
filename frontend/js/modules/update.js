@@ -5,6 +5,7 @@
 // Library via the save-family machinery. No delete here by design.
 import { registerModule } from '../shell.js';
 import { createSendMenu } from '../components/send-menu.js';
+import { attachTagChips, recordTag } from '../components/tag-picker.js';
 import {
   createStack, current, source, isOriginal, canRevert, compareEntry,
   pushRender, setViewedAsBase, selectEntry, revert, revertToOriginal, saveable,
@@ -636,6 +637,12 @@ class UpdateView {
   toggleSaveDialog(show) {
     if (!this.el.saveDialog) return;
     this.el.saveDialog.style.display = show ? 'flex' : 'none';
+    if (show && this.el.saveTag) {
+      // Recent/most-used tag chips under the promote-tag input (shared
+      // component); rebuilt on each open so a just-saved tag shows up.
+      if (!this.tagChips) this.tagChips = attachTagChips(this.el.saveTag);
+      else this.tagChips.refresh();
+    }
     if (show && this.stack) {
       const orig = this.stack.entries[0];
       if (this.el.saveNote) {
@@ -702,6 +709,7 @@ class UpdateView {
       });
       if (!r.ok) throw new Error((await r.json()).detail || r.status);
       const data = await r.json();
+      recordTag(tag);
       this.toggleSaveDialog(false);
       this.el.status.textContent =
         `saved — final ${data.final} · original ${data.original} (family ${data.family_id})`;

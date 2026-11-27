@@ -17,6 +17,7 @@
 import { registerModule, registerReceiver, toast } from '../shell.js';
 import { studioState, galleryFileUrl } from './studio-state.js';
 import { createCandidates, pathFromViewUrl } from './studio-candidates.js';
+import { askTag, loadTagMemory, recordTag } from '../components/tag-picker.js';
 import {
   createStack, current, source, compareEntry, canRevert,
   pushRender, selectEntry, revert, revertToOriginal, setViewedAsBase, saveable,
@@ -1187,7 +1188,10 @@ export function mountStudio(panel, jobbar) {
         showToast('Saved as new file');
         say(`saved as new file — ${d.new_path}`);
       } else {
-        const tag = cleanName(prompt('Library tag:', 'zengosoft')) || 'zengosoft';
+        const picked = await askTag({ title: 'Save to Library — tag/project:',
+          def: loadTagMemory().recent[0] || 'zengosoft', okLabel: 'Save' });
+        if (picked === null) return;   // cancel aborts (the old prompt() saved anyway)
+        const tag = cleanName(picked) || 'zengosoft';
         const r = await fetch('/api/update/save-family', { method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1201,6 +1205,7 @@ export function mountStudio(panel, jobbar) {
           }) });
         if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).detail || r.status));
         const d = await r.json();
+        recordTag(tag);
         showToast('Saved to Library');
         say(`saved — final ${d.final} · original ${d.original} (family ${d.family_id})`);
       }

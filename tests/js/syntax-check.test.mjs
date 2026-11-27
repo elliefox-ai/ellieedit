@@ -11,7 +11,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'frontend
 const files = ['index.html', 'js/shell.js', 'sw.js', 'js/send-to.js', 'js/key-guards.js', 'js/components/send-menu.js',
   ...['gallery', 'facecycle', 'review', 'dupe', 'foxden', 'foxden-recent',
       'foxden-inputs', 'foxden-recipe',
-      'puppet', 'puppet-core', 'filters', 'filters-tunes'].map(m => `js/modules/${m}.js`)];
+      'puppet', 'puppet-core', 'filters', 'filters-tunes', 'library', 'update', 'studio'].map(m => `js/modules/${m}.js`),
+  'js/components/tag-memory.js', 'js/components/tag-picker.js'];
 
 for (const rel of files) {
   if (rel.endsWith('.html')) {

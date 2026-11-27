@@ -23,6 +23,7 @@
 // PUT /api/filters/last).
 
 import { registerModule, registerReceiver } from '../shell.js';
+import { attachTagChips, recordTag } from '../components/tag-picker.js';
 import { studioState } from './studio-state.js';
 import { tuneImageData, tunesAreIdentity } from './filters-tunes.js';
 import { bindPanZoom } from './pan-zoom.js';
@@ -207,6 +208,7 @@ class Filters {
     act('commit').addEventListener('click', () => this.commitFullRes());
     act('reset').addEventListener('click', () => this.resetDefaults());
     act('save').addEventListener('click', () => this.saveToLibrary());
+    this.tagChips = attachTagChips(q('tag'));   // recent/common tag chips
     act('view-filtered').addEventListener('click', () => { this.viewing = 'filtered'; this.renderCanvas(); });
     act('view-original').addEventListener('click', () => { this.viewing = 'original'; this.renderCanvas(); });
     act('set-working').addEventListener('click', () => this.promoteWorking());
@@ -569,6 +571,8 @@ class Filters {
           tag: this.el.q('tag').value || null, recipe: 'filters-colorhold' }) });
       if (!r.ok) throw new Error(`save failed: ${r.status} ${(await r.text()).slice(0, 200)}`);
       const data = await r.json();
+      const usedTag = this.el.q('tag').value.trim();
+      if (usedTag) { recordTag(usedTag); this.tagChips.refresh(); }
       this.setStatus(`Saved to Library: ${data.final}`);
     } catch (e) {
       this.setStatus(e.message, true);
