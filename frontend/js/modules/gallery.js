@@ -223,6 +223,7 @@ function panelHTML() {
       <button class="ee-btn" data-act="viewer-zoom-out" title="Zoom out">−</button>
       <button class="ee-btn" data-act="viewer-zoom-in" title="Zoom in">＋</button>
       <button class="ee-btn" data-act="viewer-zoom-fit" title="Reset zoom to fit">Fit</button>
+      <button class="ee-btn" data-act="viewer-refresh" title="Re-fetch this image fresh from the server — use after an overwrite, or when the cached image looks stale">↻ Refresh</button>
       <button class="ee-btn" data-act="close">✕</button>
     </div>
     <div class="details" data-id="viewer-details"></div>
@@ -1351,6 +1352,9 @@ export class Gallery {
       // navigation still works — no error dialog.
       if (this.el.viewer.style.display === 'flex') this.el.viewerNote.style.display = 'block';
     };
+    // A manual refresh swaps the viewer to a blob URL; drop it when the
+    // viewer moves on so it does not leak.
+    if (this.el.viewerImg.src.startsWith('blob:')) URL.revokeObjectURL(this.el.viewerImg.src);
     this.el.viewerImg.src = this.fileUrl(it);
     this.el.viewerName.textContent = `${it.name} · ${it.width}×${it.height} · ${new Date(it.mtime * 1000).toLocaleString()}` +
       (it.bank && it.bank !== 'primary' ? ` · 🏦 ${it.bank_label || it.bank}` : '');
@@ -1364,7 +1368,13 @@ export class Gallery {
     this.el.viewer.style.display = 'flex';
   }
 
-  closeViewer() { if (this.sendMenu) this.sendMenu.close(); this.disarmViewerDelete(); this.el.viewer.style.display = 'none'; this.el.viewerImg.src = ''; }
+  closeViewer() {
+    if (this.sendMenu) this.sendMenu.close();
+    this.disarmViewerDelete();
+    this.el.viewer.style.display = 'none';
+    if (this.el.viewerImg.src.startsWith('blob:')) URL.revokeObjectURL(this.el.viewerImg.src);
+    this.el.viewerImg.src = '';
+  }
 
   nav(dir) {
     if (!this.items.length) return;
@@ -1386,6 +1396,51 @@ export class Gallery {
         const how = await copyImageToClipboard(this.fileUrl(item), item.name);
         toast(how === 'clipboard' ? 'Copied to clipboard' : 'Clipboard unavailable — downloaded instead');
       } catch (err) { toast(`copy failed: ${err.message}`, true); }
+    });
+    // Manual refresh (2026-11-27): re-fetch the lightboxed image with
+    // cache:'reload' — fresh bytes from the server, stored back into
+    // the HTTP cache — and swap the viewer to a blob of them, so an
+    // image overwritten in place (Save Over) shows its new bytes
+    // without a reload. Only the img src changes: the zoom transform
+    // lives on the same <img> (the zoom-viewer module owns it), so
+    // zoom/pan state is preserved — reset() is NOT called (that is
+    // openViewer's job for a new image). The viewer swap happens
+    // FIRST: the thumbnail is refreshed afterwards in its own
+    // try/catch, so a thumbnail failure never undoes the viewer
+    // update. Either fetch failing leaves the current image in place.
+    act('viewer-refresh').addEventListener('click', async () => {
+      const item = this.items[this.viewIdx];
+      if (!item) return;
+      let r;
+      try {
+        r = await fetch(this.fileUrl(item), { cache: 'reload' });
+        if (!r.ok) throw new Error(`image refresh failed: ${r.status}`);
+      } catch (err) { toast(`refresh failed: ${err.message}`, true); return; }
+      const blob = await r.blob();
+      const old = this.el.viewerImg.src;
+      this.el.viewerImg.src = URL.createObjectURL(blob);
+      if (old.startsWith('blob:')) URL.revokeObjectURL(old);
+      toast('Image refreshed');
+      // Dimension line (review polish): the name line shows the item's
+      // stored W×H and date — refresh them from the fresh image once it
+      // loads, so an overwrite that changed dimensions doesn't leave a
+      // stale line. Guarded to the still-open item.
+      this.el.viewerImg.addEventListener('load', () => {
+        if (this.items[this.viewIdx] !== item) return;
+        const w = this.el.viewerImg.naturalWidth, h = this.el.viewerImg.naturalHeight;
+        if (!w || !h) return;
+        item.width = w; item.height = h;
+        const lm = r.headers.get('Last-Modified');
+        if (lm) { const t = Date.parse(lm); if (Number.isFinite(t)) item.mtime = Math.floor(t / 1000); }
+        this.el.viewerName.textContent = `${item.name} · ${item.width}×${item.height} · ${new Date(item.mtime * 1000).toLocaleString()}` +
+          (item.bank && item.bank !== 'primary' ? ` · 🏦 ${item.bank_label || item.bank}` : '');
+      }, { once: true });
+      // Thumbnail refresh, on its own: the grid behind the viewer goes
+      // fresh too, but a failure here only reports.
+      try {
+        const tr = await fetch(this.thumbUrl(item), { cache: 'reload' });
+        if (!tr.ok) toast(`thumbnail refresh failed: ${tr.status}`, true);
+      } catch (err) { toast(`thumbnail refresh failed: ${err.message}`, true); }
     });
     // Stage 1 working-image store (design doc §4): loads the lightboxed
     // image into the store — Update (and later Studio) picks it up. Never
