@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {
   createStack, current, source, isOriginal, canRevert, compareEntry,
   pushRender, swap, setViewedAsBase, selectEntry, revert, revertToOriginal, saveable,
-  stepBack, ancestry, lineage, parentOf,
+  stepBack, ancestry, lineage, parentOf, MAX_STACK_ENTRIES,
 } from '../../frontend/js/modules/update-stack.js';
 
 const orig = { url: 'blob:orig', name: 'original.png', path: 'folder/original.png' };
@@ -222,4 +222,89 @@ test('parentOf falls back to linear on pre-parent stacks', () => {
   assert.equal(parentOf(s, 1), 0);
   assert.equal(parentOf(s, 0), null);
   assert.deepEqual(ancestry(s), [r1]);
+});
+
+const render = i => ({ url: `data:...${i}`, name: `render seed=${i}`, path: `ellieedit_tmp/update_${String(i).padStart(5, '0')}_.png` });
+// A linear chain of n renders (each generated from the last, as
+// promoteCandidate does): push + re-base after every render.
+function chain(n) {
+  let s = createStack(orig);
+  for (let i = 1; i <= n; i++) {
+    s = pushRender(s, render(i));
+    s = swap(s);
+  }
+  return s;
+}
+
+test('ring cap is 50 and the original is never dropped', () => {
+  assert.equal(MAX_STACK_ENTRIES, 50);
+  const s = chain(120); // 121 entries → 71 trimmed, one per push past 50
+  assert.equal(s.entries.length, 50);
+  assert.equal(s.entries[0], orig);
+  assert.equal(s.entries[1].name, 'render seed=72'); // r1..r71 dropped
+  assert.equal(s.entries[49].name, 'render seed=120');
+  assert.equal(s.idx, 49);
+  assert.equal(s.sourceIdx, 49);
+  assert.equal(current(s).name, 'render seed=120');
+  assert.equal(source(s).name, 'render seed=120');
+});
+
+test('ring trims the oldest non-original render and remaps indices + parents', () => {
+  // 50 pushes onto the original = 51 entries → exactly one trim (r1).
+  const s = chain(50);
+  assert.equal(s.entries.length, 50);
+  assert.equal(s.entries[0], orig);
+  assert.equal(s.entries[1].name, 'render seed=2'); // r1 dropped
+  assert.equal(s.entries[49].name, 'render seed=50');
+  assert.equal(s.idx, 49);
+  assert.equal(s.sourceIdx, 49);
+  assert.equal(current(s).name, 'render seed=50');
+  assert.equal(source(s).name, 'render seed=50');
+  // Parents remapped by the same shift: r2's parent was r1 (dropped) so
+  // it falls back to the original; r3's parent r2 is now index 1.
+  assert.deepEqual(s.parents, [null, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48]);
+  assert.equal(parentOf(s, 1), 0);
+  // Ancestry still correct after the trim: the dropped render is gone,
+  // so it is not an intermediate of the newest entry.
+  assert.deepEqual(ancestry(s).map(e => e.name), Array.from({ length: 48 }, (_, i) => `render seed=${i + 2}`));
+});
+
+test('ring remaps a non-latest base and view when trimming', () => {
+  let s = chain(49); // 50 entries, no trim yet; idx 49, base 49
+  s = selectEntry(s, 2);
+  s = setViewedAsBase(s); // view + base on r2 (old index 2)
+  s = pushRender(s, render(50)); // 51 entries → r1 trimmed
+  assert.equal(s.entries.length, 50);
+  assert.equal(s.entries[0], orig);
+  assert.equal(s.entries[1].name, 'render seed=2'); // r1 dropped
+  assert.equal(s.idx, 49); // the new render is viewed
+  assert.equal(s.sourceIdx, 1); // the base (r2) shifted with the trim
+  assert.equal(current(s).name, 'render seed=50');
+  assert.equal(source(s).name, 'render seed=2');
+});
+
+test('ring: a kept entry whose parent was dropped falls back to the original', () => {
+  let s = chain(49); // 50 entries, no trim yet
+  // New render with an explicit parent of r1 (old index 1); the push
+  // trims r1, so the parent falls back to the original.
+  s = pushRender(s, { ...render(50), parent: 1 });
+  assert.equal(s.entries.length, 50);
+  assert.equal(parentOf(s, 49), 0);
+  assert.deepEqual(ancestry(s), []); // parent is the original — no intermediates
+  // The same fallback applies to a pre-existing kept entry, not just the
+  // new one: r2's parent was r1, dropped by the same trim.
+  assert.equal(parentOf(s, 1), 0);
+});
+
+test('ring: no trim below the cap, and trim drops several at once if forced', () => {
+  const s49 = chain(49);
+  assert.equal(s49.entries.length, 50); // exactly at the cap — nothing dropped
+  assert.equal(s49.entries[1].name, 'render seed=1');
+  const s55 = chain(55); // 56 entries → 6 trimmed, one per push past 50
+  assert.equal(s55.entries.length, 50);
+  assert.equal(s55.entries[0], orig);
+  assert.equal(s55.entries[1].name, 'render seed=7'); // r1..r6 dropped
+  assert.equal(s55.entries[49].name, 'render seed=55');
+  assert.equal(parentOf(s55, 1), 0); // r7's parent r6 was dropped
+  assert.equal(parentOf(s55, 2), 1); // r8's parent r7 kept, shifted
 });

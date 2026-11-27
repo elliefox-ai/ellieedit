@@ -528,6 +528,7 @@ function panelHTML() {
         <button class="ee-btn" data-id="histclose">✕ Close</button>
       </div>
       <span class="st-hintline">The stack, oldest first — every render stays reachable. View jumps to an entry; Make base makes it the next run's source; Back steps to the previous entry and re-bases to it in one move.</span>
+      <span class="st-hintline">Viewing restores pixels only — the seed, prompt and LoRA settings stay as they are, so generating from an old entry uses today's settings.</span>
       <div data-id="histbody"></div>
     </div>
     <div class="st-toast" data-id="toast"><span class="tick">✓</span><span data-id="toasttext"></span></div>
@@ -1213,13 +1214,18 @@ export function mountStudio(panel, jobbar) {
       filePick.style.display = 'none';
       filePick.addEventListener('change', async () => {
         const f = filePick.files && filePick.files[0];
+        // Clear up front: every exit (busy, error) leaves the picker
+        // re-pickable, including picking the same file again.
+        filePick.value = '';
         if (!f) return;
+        // Same busy guard as the paste paths (2026-11-27): a mid-run file
+        // pick replaces the stack under the completion handler.
+        if (busy) return;
         say('uploading source…');
         try {
           const p = await importImageAsWorking(f, { name: f.name, origin: 'gallery-upload' });
           say(`working image: ${p}`);
         } catch (err) { say(`upload failed: ${err.message}`, true); }
-        filePick.value = '';
       });
       panel.appendChild(filePick);
     }
@@ -1239,15 +1245,23 @@ export function mountStudio(panel, jobbar) {
     if (!c || !c.path) { say('nothing to use as source', true); return; }
     const entry = { url: c.url, name: c.path.split('/').pop(), path: c.path,
       recipe: c.recipe || null, masked: !!c.masked };
+    let prevStack = null;
     if (!stack) stack = createStack(entry);
     else if (stack.entries.some(en => en.path === c.path)) {
       stack = selectEntry(stack, stack.entries.findIndex(en => en.path === c.path));
     } else {
+      prevStack = stack;
       stack = pushRender(stack, entry);
     }
     stack = setViewedAsBase(stack);
     compareOn = false; cmpPct = 100;
     showCurrent();
+    // Ring cap (2026-11-27): pushRender trims the oldest renders past
+    // 50 entries — revoke their blob URLs so they don't leak for the
+    // session. Entries are shared by reference, so dropped = in prev,
+    // not in new; the canvas has already swapped to the new entry, so
+    // nothing displayed is ever revoked.
+    if (prevStack) revokeStackUrls({ entries: prevStack.entries.filter(en => !stack.entries.includes(en)) });
     maskCanvas = null; maskPainted = false; maskUndoStack = [];
     studioState().set(c.path, 'foxden-output', { name: entry.name });
     if (verb === 'mask') initMaskForSource();
@@ -2521,6 +2535,11 @@ export function mountStudio(panel, jobbar) {
   // intercepted. The pasted image becomes the working image (not a
   // silent candidate) — that is what "paste it back as an update" means.
   async function pasteFromClipboard() {
+    // Guard paste while a render is busy (2026-11-27): a mid-run repaste
+    // replaces the stack, and the completion handler then lands its
+    // preview on the wrong stack — ⬇ would push the old source's render
+    // onto the pasted image's stack.
+    if (busy) return;
     if (!navigator.clipboard || typeof navigator.clipboard.read !== 'function') {
       say('clipboard read is unavailable here — paste with Ctrl/Cmd+V instead', true);
       return;
@@ -2544,6 +2563,9 @@ export function mountStudio(panel, jobbar) {
   el.paste.addEventListener('click', pasteFromClipboard);
   document.addEventListener('paste', async e => {
     if (!panel.classList.contains('active')) return;
+    // Same busy guard as the Paste button (2026-11-27) — a mid-run
+    // repaste replaces the stack under the completion handler.
+    if (busy) return;
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     const dt = e.clipboardData;

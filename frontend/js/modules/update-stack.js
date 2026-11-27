@@ -31,6 +31,14 @@
 //                       are NOT intermediates — the flat slice was wrong)
 //   lineage           — display rows for the History pop-up / Provenance
 // All functions are pure: they return a NEW state, never mutate.
+//
+// Ring cap (2026-11-27): a session's stack holds at most
+// MAX_STACK_ENTRIES entries — blob URLs accumulate otherwise. pushRender
+// drops the oldest non-original renders when a push would exceed it;
+// entries[0] (the original) is never dropped, and a kept entry whose
+// parent was dropped falls back to the original (index 0).
+
+export const MAX_STACK_ENTRIES = 50;
 
 export function createStack(originalEntry) {
   if (!originalEntry) throw new Error('original entry required');
@@ -56,7 +64,25 @@ export function pushRender(s, renderEntry) {
   // mutated or copied — its identity is pinned by tests.
   const parent = renderEntry.parent != null ? renderEntry.parent : s.sourceIdx;
   const parents = Array.isArray(s.parents) ? s.parents : s.entries.map((_, i) => (i === 0 ? null : i - 1));
-  return { ...s, entries: [...s.entries, renderEntry], parents: [...parents, parent], idx: s.entries.length };
+  const entries = [...s.entries, renderEntry];
+  const allParents = [...parents, parent];
+  const over = entries.length - MAX_STACK_ENTRIES;
+  if (over <= 0) {
+    return { ...s, entries, parents: allParents, idx: s.entries.length };
+  }
+  // Ring cap: drop the `over` oldest non-original renders (indices
+  // 1..over). entries[0] is never dropped. Every kept index shifts by
+  // `over`; a kept entry whose parent was dropped falls back to the
+  // original (index 0). The caller revokes the dropped entries' blob
+  // URLs — this module stays pure and DOM-free.
+  const remap = i => (i == null ? null : i === 0 ? 0 : i <= over ? 0 : i - over);
+  return {
+    ...s,
+    entries: [entries[0], ...entries.slice(1 + over)],
+    parents: [null, ...allParents.slice(1 + over).map(remap)],
+    idx: entries.length - 1 - over,
+    sourceIdx: remap(s.sourceIdx),
+  };
 }
 
 // Parent index of entry i (null for the original). Pre-parent stacks

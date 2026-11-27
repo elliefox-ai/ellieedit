@@ -1901,3 +1901,23 @@ def test_stage4_history_clipboard_pins():
     assert "act('viewer-copy')" in gallery
     assert "copyImageToClipboard(this.fileUrl(item)" in gallery
     assert "Clipboard unavailable — downloaded instead" in gallery
+    # Ellie review refinements (2026-11-27): busy-guarded paste, pixels-only
+    # history, 50-entry ring. DOM behavior itself is pins only — no browser
+    # in this environment.
+    # Fix 1: both paste paths return early while a render is busy — a
+    # mid-run repaste would replace the stack under the completion handler.
+    assert "Guard paste while a render is busy" in studio
+    assert "Same busy guard as the Paste button" in studio
+    assert studio.count("if (busy) return;") >= 5  # generate, fab, both paste paths, file picker
+    # File-picker guard (2026-11-27): same busy guard as the paste paths —
+    # a mid-run pick replaces the stack under the completion handler.
+    assert "Same busy guard as the paste paths" in studio
+    # Fix 2: the History overlay says plainly that viewing restores pixels
+    # only — seed, prompt and LoRA stay as they are.
+    assert "Viewing restores pixels only" in studio
+    assert "generating from an old entry uses today's settings" in studio
+    # Fix 3: 50-entry ring in pushRender (single append point); the caller
+    # revokes the trimmed entries' blob URLs after the canvas has swapped.
+    assert "export const MAX_STACK_ENTRIES = 50;" in stack
+    assert "MAX_STACK_ENTRIES" in stack
+    assert "revokeStackUrls({ entries: prevStack.entries.filter(en => !stack.entries.includes(en)) })" in studio
