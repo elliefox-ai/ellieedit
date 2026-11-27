@@ -647,10 +647,13 @@ def test_puppet_v15_gallery_banks_and_ux_wiring():
                    'ellieedit:dupe-folder-review',
                    'data-act="to-puppet-multi"', 'launchPuppetMulti',
                    'lastSelKey', 'setCellSelected',
-                   'askTag', 'tagChips', 'ellieedit.promote.tags',
+                   'askTag', 'tagChips', 'components/tag-picker.js',
                    'promoteMulti', 'recordTag', 'keyOf', 'manifest_key'):
         assert needle in gal, needle
     # Backspace deletion is gone from the gallery viewer handler.
+    # Tag key moved to components/tag-memory.js (shared recent-tags picker);
+    # gallery now delegates via components/tag-picker.js.
+    assert 'ellieedit.promote.tags' in (mods.parent / 'components' / 'tag-memory.js').read_text()
     onkey = gal.split('this.onKey = e => {')[1].split('};')[0]
     assert "e.key === 'Delete'" in onkey
     assert 'Backspace' not in onkey
