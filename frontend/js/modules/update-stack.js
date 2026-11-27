@@ -4,6 +4,13 @@
 //   entries   : stack of {url, name, path?, recipe?, masked?} — index 0
 //                 is always the original; renders note their recipe
 //                 (preset file, or 'masked-inpaint') for save-family
+//   parents   : parallel array — parents[i] is the index of the entry
+//                 entry i was generated FROM (null for the original).
+//                 Stored beside the entries, not on them: entry objects
+//                 keep their identity (pinned by tests) and the module's
+//                 purity contract — pushRender never mutates its input.
+//                 A missing parents array (pre-parent stacks) falls back
+//                 to the linear assumption, parent = i - 1.
 //   idx       : the entry being VIEWED (save + compare act on this)
 //   sourceIdx : the entry the NEXT run renders FROM (Swap moves this)
 //
@@ -16,11 +23,26 @@
 //                       cycling is just viewed selection, no new mode)
 //   revert            — step the view back one stack entry
 //   revertToOriginal  — view jumps to the original (index 0)
+//   stepBack          — go back one entry AND re-base to it (revert alone
+//                       moves only the view; the next run would still
+//                       render from the newer entry)
+//   ancestry          — the viewed entry's ancestors (parent walk), for
+//                       save-family intermediates (a branch's siblings
+//                       are NOT intermediates — the flat slice was wrong)
+//   lineage           — display rows for the History pop-up / Provenance
 // All functions are pure: they return a NEW state, never mutate.
+//
+// Ring cap (2026-11-27): a session's stack holds at most
+// MAX_STACK_ENTRIES entries — blob URLs accumulate otherwise. pushRender
+// drops the oldest non-original renders when a push would exceed it;
+// entries[0] (the original) is never dropped, and a kept entry whose
+// parent was dropped falls back to the original (index 0).
+
+export const MAX_STACK_ENTRIES = 50;
 
 export function createStack(originalEntry) {
   if (!originalEntry) throw new Error('original entry required');
-  return { entries: [originalEntry], idx: 0, sourceIdx: 0 };
+  return { entries: [originalEntry], parents: [null], idx: 0, sourceIdx: 0 };
 }
 
 export function current(s) { return s.entries[s.idx]; }
@@ -36,7 +58,39 @@ export function compareEntry(s) {
 
 export function pushRender(s, renderEntry) {
   if (!renderEntry) throw new Error('render entry required');
-  return { ...s, entries: [...s.entries, renderEntry], idx: s.entries.length };
+  // The parent is the base the render was generated from — the sourceIdx
+  // at push time. An explicit parent on the entry wins (a caller that
+  // knows better); otherwise the base. The entry object itself is never
+  // mutated or copied — its identity is pinned by tests.
+  const parent = renderEntry.parent != null ? renderEntry.parent : s.sourceIdx;
+  const parents = Array.isArray(s.parents) ? s.parents : s.entries.map((_, i) => (i === 0 ? null : i - 1));
+  const entries = [...s.entries, renderEntry];
+  const allParents = [...parents, parent];
+  const over = entries.length - MAX_STACK_ENTRIES;
+  if (over <= 0) {
+    return { ...s, entries, parents: allParents, idx: s.entries.length };
+  }
+  // Ring cap: drop the `over` oldest non-original renders (indices
+  // 1..over). entries[0] is never dropped. Every kept index shifts by
+  // `over`; a kept entry whose parent was dropped falls back to the
+  // original (index 0). The caller revokes the dropped entries' blob
+  // URLs — this module stays pure and DOM-free.
+  const remap = i => (i == null ? null : i === 0 ? 0 : i <= over ? 0 : i - over);
+  return {
+    ...s,
+    entries: [entries[0], ...entries.slice(1 + over)],
+    parents: [null, ...allParents.slice(1 + over).map(remap)],
+    idx: entries.length - 1 - over,
+    sourceIdx: remap(s.sourceIdx),
+  };
+}
+
+// Parent index of entry i (null for the original). Pre-parent stacks
+// (no parents array) fall back to the linear assumption.
+export function parentOf(s, i) {
+  if (i <= 0) return null;
+  if (Array.isArray(s.parents) && i < s.parents.length) return s.parents[i];
+  return i - 1;
 }
 
 export function setViewedAsBase(s) {
@@ -61,6 +115,44 @@ export function revert(s) {
 
 export function revertToOriginal(s) {
   return { ...s, idx: 0 };
+}
+
+// Back: step the view back one entry AND re-base to it, in one action.
+// revert alone moves only the view — the next run would still render
+// from the newer entry, so a go-back that stopped there would view B
+// but save/run from C. No-op at the original (revert floors there, and
+// the base is already 0).
+export function stepBack(s) {
+  return setViewedAsBase(revert(s));
+}
+
+// Ancestors of the entry at idx (default: the viewed entry), oldest
+// first, excluding the entry itself and the original. Walks parent
+// links, so a branch's siblings are NOT ancestors — the old flat
+// slice(1, idx) wrongly listed them as intermediates. Guarded against
+// a malformed parent cycle.
+export function ancestry(s, idx = s.idx) {
+  const out = [];
+  const seen = new Set([idx]);
+  let i = parentOf(s, idx);
+  while (i != null && i > 0 && !seen.has(i)) {
+    seen.add(i);
+    out.push(s.entries[i]);
+    i = parentOf(s, i);
+  }
+  return out.reverse();
+}
+
+// Display rows for the History pop-up / Provenance lineage: one row
+// per entry, oldest first, with its parent and current/base markers.
+export function lineage(s) {
+  return s.entries.map((entry, i) => ({
+    index: i,
+    entry,
+    parent: parentOf(s, i),
+    isCurrent: i === s.idx,
+    isBase: i === s.sourceIdx,
+  }));
 }
 
 // Saveable: any entry that carries a server-side path. Renders carry their

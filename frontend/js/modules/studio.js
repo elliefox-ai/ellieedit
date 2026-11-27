@@ -20,7 +20,9 @@ import { createCandidates, pathFromViewUrl } from './studio-candidates.js';
 import {
   createStack, current, source, compareEntry, canRevert,
   pushRender, selectEntry, revert, revertToOriginal, setViewedAsBase, saveable,
+  stepBack, ancestry, lineage,
 } from './update-stack.js';
+import { importImageAsWorking, copyImageToClipboard } from './image-clipboard.js';
 import { normalizeState, presetState, debounce, cleanName, nextSeed, sizeFor, rebuildSelectPreserving } from './foxden-state.js';
 import { createPins } from './foxden-loras.js';
 import { dist, pinchScale, clampPan, wheelScale } from './zoom-viewer.js';
@@ -268,6 +270,22 @@ function panelHTML() {
       border-top: 1px solid #4a4a6c; padding: 14px 20px 18px; transform: translateY(105%); transition: transform .25s ease;
       max-height: 75vh; overflow-y: auto; }
     .st-loraoverlay.open { transform: translateY(0); }
+    /* Generation history overlay (2026-11-27): the same bottom-sheet
+       pattern as the LoRA inspector — the stack as a list, oldest
+       first, with per-row View / Make base and one ↩ Back step. */
+    .st-historyoverlay { position: fixed; left: 0; right: 0; bottom: 0; z-index: 95; background: rgba(18,18,31,.97);
+      border-top: 1px solid #4a4a6c; padding: 14px 20px 18px; transform: translateY(105%); transition: transform .25s ease;
+      max-height: 75vh; overflow-y: auto; }
+    .st-historyoverlay.open { transform: translateY(0); }
+    .st-histrow { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid #1c1c30; }
+    .st-histrow:last-child { border-bottom: 0; }
+    .st-histrow.cur { background: #1d1d33; border-radius: 6px; }
+    .st-histrow img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; flex: 0 0 auto; }
+    .st-histrow .meta { flex: 1; min-width: 0; }
+    .st-histrow .nm { font-size: 13px; color: #d8d8ee; overflow-wrap: anywhere; }
+    .st-histrow .sub { font-size: 11px; color: #6c6c8e; }
+    .st-histrow .mark { font-size: 11px; color: #b39ae0; letter-spacing: .08em; }
+    .st-histrow button { min-height: 44px; min-width: 44px; }
     .st-lovsec { font-size: 11px; letter-spacing: .1em; color: #8a8aaa; margin: 14px 0 2px; }
     .st-lovrow { padding: 10px 0; border-bottom: 1px solid #1c1c30; }
     .st-lovrow:last-child { border-bottom: 0; }
@@ -316,6 +334,9 @@ function panelHTML() {
         <button data-c="before">Before</button>
         <button data-c="split">Split</button>
       </div>
+      <button data-id="history" title="Generation history — view, re-base, or step back through the stack">🕘 History</button>
+      <button data-id="paste" title="Paste an image from the clipboard as the working image">📋 Paste</button>
+      <button data-id="copy" title="Copy the working image to the clipboard (downloads if clipboard is unavailable)">⧉ Copy</button>
       <button class="st-clear" data-id="clear" title="Clear working image" hidden>✕ clear</button>
       <button data-id="fit" title="Reset zoom to fit" hidden>⤢ Fit</button>
       <button data-id="imm" title="Hide chrome; image fills screen">⛶ Fullscreen</button>
@@ -452,6 +473,8 @@ function panelHTML() {
             <div data-id="provtable"><span class="st-hintline">no working image</span></div>
             <label style="margin-top:14px">Parent chain</label>
             <div class="st-parentchain" data-id="parentchain"><span class="st-hintline">no working image</span></div>
+            <label style="margin-top:14px">Session history</label>
+            <div class="st-parentchain" data-id="historyline"><span class="st-hintline">no working image</span></div>
           </div>
         </div>
 
@@ -498,6 +521,16 @@ function panelHTML() {
       <span class="st-hintline">Full names, full paths, big sliders — for complicated setups. These are the same pins as in the tray.</span>
       <div data-id="loraovbody"></div>
     </div>
+    <div class="st-historyoverlay" data-id="historyoverlay">
+      <div class="st-striphead">
+        <h2>Generation history</h2>
+        <button class="ee-btn" data-id="histback" title="Step back one entry and make it the base">↩ Back</button>
+        <button class="ee-btn" data-id="histclose">✕ Close</button>
+      </div>
+      <span class="st-hintline">The stack, oldest first — every render stays reachable. View jumps to an entry; Make base makes it the next run's source; Back steps to the previous entry and re-bases to it in one move.</span>
+      <span class="st-hintline">Viewing restores pixels only — the seed, prompt and LoRA settings stay as they are, so generating from an old entry uses today's settings.</span>
+      <div data-id="histbody"></div>
+    </div>
     <div class="st-toast" data-id="toast"><span class="tick">✓</span><span data-id="toasttext"></span></div>
   </div>`;
 }
@@ -507,6 +540,7 @@ export function mountStudio(panel, jobbar) {
   const root = panel.querySelector('.st-root');
   const $ = id => panel.querySelector(`[data-id="${id}"]`);
   const el = Object.fromEntries(['chip', 'chip-name', 'chip-chain', 'clear', 'fit', 'imm',
+    'history', 'paste', 'copy', 'historyoverlay', 'histbody', 'histback', 'histclose', 'historyline',
     'canvasarea', 'frame', 'img-a', 'wrap-b', 'img-b', 'maskview', 'cmpbar', 'cmpdiv',
     'strip', 'cands', 'wf', 'segrow', 'seg-model', 'seg-model-lab', 'seg-edit', 'prompt', 'aspects', 'size', 'sizeval', 'seed', 'lock', 'dice',
     'denoise', 'dval', 'pips', 'batchval', 'lcount', 'loraui', 'lorapop',
@@ -1121,7 +1155,10 @@ export function mountStudio(panel, jobbar) {
     if (!orig.path) { say('original source has no server path', true); return; }
     try {
       if (kind === 'over') {
-        if (!confirm(`Overwrite the original source in place?\n${orig.name}\nNo new file will be created.`)) return;
+        // Two-named confirm (2026-11-27): the old text named only the
+        // file being overwritten — while viewing an older entry (e.g.
+        // Before) it was easy to save over the wrong one. Name both.
+        if (!confirm(`Overwrite ${orig.name} with ${entry.name}?\nNo new file will be created.`)) return;
         const r = await fetch('/api/update/save-back', { method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ render_path: entry.path, source_path: orig.path }) });
@@ -1147,7 +1184,11 @@ export function mountStudio(panel, jobbar) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             render_path: entry.path, original_path: orig.path, tag,
-            intermediates: s.entries.slice(1, s.idx).map(e2 => e2.path).filter(Boolean),
+            // Intermediates are the viewed entry's ANCESTRY (parent
+            // walk), not the flat slice(1, idx): a render branched from
+            // B lists B only — the old slice wrongly listed a sibling
+            // branch (e.g. C) as an intermediate of D.
+            intermediates: ancestry(s, s.idx).map(e2 => e2.path).filter(Boolean),
             recipe: entry.recipe || null, masked: !!entry.masked,
           }) });
         if (!r.ok) throw new Error(((await r.json().catch(() => ({}))).detail || r.status));
@@ -1162,6 +1203,9 @@ export function mountStudio(panel, jobbar) {
   wireSaveBars();
 
   // ── candidate strip: docked + fullscreen overlay share one renderer ──
+  // File picker → the shared import (image-clipboard.js): the upload→
+  // set flow lives in exactly one place — paste and Claude's candidate
+  // behavior call the same function.
   let filePick = null;
   function pickSource() {
     if (!filePick) {
@@ -1170,18 +1214,18 @@ export function mountStudio(panel, jobbar) {
       filePick.style.display = 'none';
       filePick.addEventListener('change', async () => {
         const f = filePick.files && filePick.files[0];
-        if (!f) return;
-        say('uploading source…');
-        const fd = new FormData();
-        fd.append('file', f, f.name);
-        try {
-          const r = await fetch('/api/gallery/upload', { method: 'POST', body: fd });
-          const d = await r.json();
-          if (!r.ok) throw new Error(d.detail || r.status);
-          studioState().set(d.path, 'gallery-upload', { name: d.path.split('/').pop() });
-          say(`working image: ${d.path}`);
-        } catch (err) { say(`upload failed: ${err.message}`, true); }
+        // Clear up front: every exit (busy, error) leaves the picker
+        // re-pickable, including picking the same file again.
         filePick.value = '';
+        if (!f) return;
+        // Same busy guard as the paste paths (2026-11-27): a mid-run file
+        // pick replaces the stack under the completion handler.
+        if (busy) return;
+        say('uploading source…');
+        try {
+          const p = await importImageAsWorking(f, { name: f.name, origin: 'gallery-upload' });
+          say(`working image: ${p}`);
+        } catch (err) { say(`upload failed: ${err.message}`, true); }
       });
       panel.appendChild(filePick);
     }
@@ -1201,15 +1245,23 @@ export function mountStudio(panel, jobbar) {
     if (!c || !c.path) { say('nothing to use as source', true); return; }
     const entry = { url: c.url, name: c.path.split('/').pop(), path: c.path,
       recipe: c.recipe || null, masked: !!c.masked };
+    let prevStack = null;
     if (!stack) stack = createStack(entry);
     else if (stack.entries.some(en => en.path === c.path)) {
       stack = selectEntry(stack, stack.entries.findIndex(en => en.path === c.path));
     } else {
+      prevStack = stack;
       stack = pushRender(stack, entry);
     }
     stack = setViewedAsBase(stack);
     compareOn = false; cmpPct = 100;
     showCurrent();
+    // Ring cap (2026-11-27): pushRender trims the oldest renders past
+    // 50 entries — revoke their blob URLs so they don't leak for the
+    // session. Entries are shared by reference, so dropped = in prev,
+    // not in new; the canvas has already swapped to the new entry, so
+    // nothing displayed is ever revoked.
+    if (prevStack) revokeStackUrls({ entries: prevStack.entries.filter(en => !stack.entries.includes(en)) });
     maskCanvas = null; maskPainted = false; maskUndoStack = [];
     studioState().set(c.path, 'foxden-output', { name: entry.name });
     if (verb === 'mask') initMaskForSource();
@@ -2294,6 +2346,7 @@ export function mountStudio(panel, jobbar) {
     if (!st.path) {
       el.provtable.innerHTML = '<span class="st-hintline">no working image</span>';
       el.parentchain.innerHTML = '<span class="st-hintline">no working image</span>';
+      el.historyline.innerHTML = '<span class="st-hintline">no working image</span>';
       return;
     }
     let rec = st.provenance;
@@ -2301,6 +2354,7 @@ export function mountStudio(panel, jobbar) {
     if (!rec) {
       el.provtable.innerHTML = '<span class="st-hintline">no provenance record (pre-provenance image)</span>';
       el.parentchain.innerHTML = '';
+      renderHistoryLine();   // the stack lineage exists without a server record
       return;
     }
     const rows = [
@@ -2336,13 +2390,118 @@ export function mountStudio(panel, jobbar) {
       return `${i > 0 ? '<span class="arrow">▼</span>' : ''}` +
         `<div class="node${isCur ? ' cur' : ''}"><div><b>${esc(nm)}</b>${isCur ? ' — current' : ''}<small>${esc(sub)}</small></div></div>`;
     }).join('');
+    renderHistoryLine();
+  }
+
+  // ── generation history (2026-11-27) ──
+  // The stack as an interactive list, oldest first. View jumps to an
+  // entry; Make base makes it the next run's source (the view follows —
+  // the base is always the viewed entry); Back steps to the previous
+  // entry and re-bases to it in one move. Before stays the compare
+  // preview (display-only). Provenance below is the read-only record
+  // of the same rows.
+  // The painted mask belongs to the run source: when the base changes,
+  // the old mask is for the wrong image — reset it, mirroring
+  // promoteCandidate (which does the same on advance).
+  function resetMaskForSourceChange() {
+    maskCanvas = null; maskPainted = false; maskUndoStack = [];
+    if (verb === 'mask') initMaskForSource();
+  }
+  // Leaving a preview behind when the history moves the view: saveAs
+  // prefers a previewed candidate, so a stale preview would make Save
+  // act on the candidate, not the viewed entry.
+  function dropPreview() {
+    previewed = null;
+    clearPreview();
+    renderCandidates();
+  }
+  function renderHistory() {
+    const body = el.histbody;
+    if (!stack) {
+      body.innerHTML = '<span class="st-hintline">no working image</span>';
+      el.histback.disabled = true;
+      return;
+    }
+    el.histback.disabled = !canRevert(stack);
+    body.innerHTML = '';
+    for (const row of lineage(stack)) {
+      const e = row.entry;
+      const d = document.createElement('div');
+      d.className = 'st-histrow' + (row.isCurrent ? ' cur' : '');
+      const im = document.createElement('img');
+      im.src = e.url; im.alt = e.name;
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const nm = document.createElement('div');
+      nm.className = 'nm'; nm.textContent = e.name;
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      const parentName = row.parent != null ? stack.entries[row.parent].name : null;
+      sub.textContent = `${e.recipe || 'original'}${parentName ? ` · from ${parentName}` : ''}`;
+      const marks = document.createElement('div');
+      marks.className = 'mark';
+      marks.textContent = [row.isCurrent ? 'CURRENT' : '', row.isBase ? 'BASE' : ''].filter(Boolean).join(' · ');
+      meta.append(nm, sub, marks);
+      const view = document.createElement('button');
+      view.textContent = 'View';
+      view.title = `View ${e.name}`;
+      view.addEventListener('click', () => {
+        stack = selectEntry(stack, row.index);
+        dropPreview();
+        showCurrent();
+        renderHistory();
+        refreshProvenanceIfOpen();
+        say(`viewing ${e.name}`);
+      });
+      const base = document.createElement('button');
+      base.textContent = 'Make base';
+      base.title = `Make ${e.name} the next run's source`;
+      base.disabled = row.isBase;
+      base.addEventListener('click', () => {
+        stack = setViewedAsBase(selectEntry(stack, row.index));
+        dropPreview();
+        showCurrent();
+        resetMaskForSourceChange();
+        renderHistory();
+        refreshProvenanceIfOpen();
+        say(`base: ${e.name}`);
+      });
+      d.append(im, meta, view, base);
+      body.appendChild(d);
+    }
+  }
+  function refreshProvenanceIfOpen() {
+    if (verb === 'provenance') renderProvenance();
+  }
+  function stepBackInHistory() {
+    if (!stack || !canRevert(stack)) return;
+    stack = stepBack(stack);
+    dropPreview();
+    showCurrent();
+    resetMaskForSourceChange();
+    renderHistory();
+    refreshProvenanceIfOpen();
+    say(`back to ${current(stack).name} — base follows`);
+  }
+  // Provenance record of the same rows (read-only): the History pop-up
+  // is the interactive version, this is the record.
+  function renderHistoryLine() {
+    if (!stack) {
+      el.historyline.innerHTML = '<span class="st-hintline">no working image</span>';
+      return;
+    }
+    el.historyline.innerHTML = lineage(stack).map(row => {
+      const e = row.entry;
+      const parentName = row.parent != null ? stack.entries[row.parent].name : null;
+      return `<div class="node${row.isCurrent ? ' cur' : ''}"><div><b>${esc(e.name)}</b>${row.isCurrent ? ' — current' : ''}${row.isBase ? ' · base' : ''}<small>${esc((e.recipe || 'original') + (parentName ? ` · from ${parentName}` : ''))}</small></div></div>`;
+    }).join('');
   }
 
   // ── fullscreen (immersive) mode ──
   function setImmersive(on) {
     root.classList.toggle('st-immersive', on);
     el.imm.textContent = on ? '⧉ Expanded' : '⛶ Fullscreen';
-    if (!on) { el.candoverlay.classList.remove('open'); el.loraoverlay.classList.remove('open'); el.promptdrawer.classList.remove('open'); }
+    if (!on) { el.candoverlay.classList.remove('open'); el.loraoverlay.classList.remove('open'); el.historyoverlay.classList.remove('open'); el.promptdrawer.classList.remove('open'); }
     else fitFrame();
   }
   el.imm.addEventListener('click', () => setImmersive(!root.classList.contains('st-immersive')));
@@ -2357,6 +2516,79 @@ export function mountStudio(panel, jobbar) {
   el.loraclose.addEventListener('click', () => el.loraoverlay.classList.remove('open'));
   el.loraoverlay.addEventListener('click', e => {
     if (e.target === el.loraoverlay) el.loraoverlay.classList.remove('open');
+  });
+  // Generation history overlay (2026-11-27): same bottom-sheet
+  // open/close as the LoRA inspector.
+  el.history.addEventListener('click', () => { renderHistory(); el.historyoverlay.classList.add('open'); });
+  el.histclose.addEventListener('click', () => el.historyoverlay.classList.remove('open'));
+  el.historyoverlay.addEventListener('click', e => {
+    if (e.target === el.historyoverlay) el.historyoverlay.classList.remove('open');
+  });
+  el.histback.addEventListener('click', stepBackInHistory);
+  // ── clipboard round-trip (2026-11-27) ──
+  // Paste: the button reads the clipboard (needs permission + a secure
+  // context, so it is usually unavailable over tailnet http); Ctrl/Cmd+V
+  // uses the paste event, which needs no clipboard-read permission.
+  // The listener is document-level — a paste with focus on the body
+  // never reaches the panel — but fires only while Studio is the active
+  // tab, and text fields keep their own paste: only an image item is
+  // intercepted. The pasted image becomes the working image (not a
+  // silent candidate) — that is what "paste it back as an update" means.
+  async function pasteFromClipboard() {
+    // Guard paste while a render is busy (2026-11-27): a mid-run repaste
+    // replaces the stack, and the completion handler then lands its
+    // preview on the wrong stack — ⬇ would push the old source's render
+    // onto the pasted image's stack.
+    if (busy) return;
+    if (!navigator.clipboard || typeof navigator.clipboard.read !== 'function') {
+      say('clipboard read is unavailable here — paste with Ctrl/Cmd+V instead', true);
+      return;
+    }
+    let items;
+    try { items = await navigator.clipboard.read(); }
+    catch (err) { say(`clipboard read failed (${err.message}) — paste with Ctrl/Cmd+V instead`, true); return; }
+    for (const item of items || []) {
+      const type = (item.types || []).find(t => t.indexOf('image/') === 0);
+      if (!type) continue;
+      try {
+        const blob = await item.getType(type);
+        const ext = (type.split('/')[1] || 'png').split('+')[0];
+        const p = await importImageAsWorking(blob, { name: `pasted-image.${ext}`, origin: 'paste' });
+        say(`working image: ${p}`);
+      } catch (err) { say(`paste failed: ${err.message}`, true); }
+      return;
+    }
+    say('no image on the clipboard', true);
+  }
+  el.paste.addEventListener('click', pasteFromClipboard);
+  document.addEventListener('paste', async e => {
+    if (!panel.classList.contains('active')) return;
+    // Same busy guard as the Paste button (2026-11-27) — a mid-run
+    // repaste replaces the stack under the completion handler.
+    if (busy) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    const dt = e.clipboardData;
+    if (!dt) return;
+    const files = [...dt.items].filter(it => it.kind === 'file' && it.type.indexOf('image/') === 0)
+      .map(it => it.getAsFile()).filter(Boolean);
+    if (!files.length) return; // not an image paste — leave it alone
+    e.preventDefault();
+    try {
+      const p = await importImageAsWorking(files[0], { name: files[0].name || 'pasted-image.png', origin: 'paste' });
+      say(`working image: ${p}`);
+    } catch (err) { say(`paste failed: ${err.message}`, true); }
+  });
+  // Copy the working image: clipboard when available, download when
+  // not — the message says which path was taken, never silent.
+  el.copy.addEventListener('click', async () => {
+    const st = studioState().get();
+    if (!st.path) { say('no working image to copy', true); return; }
+    try {
+      const how = await copyImageToClipboard(galleryFileUrl(st.path), st.name || 'image.png');
+      if (how === 'clipboard') say('copied to clipboard');
+      else say('clipboard unavailable — downloaded the file instead', true);
+    } catch (err) { say(`copy failed: ${err.message}`, true); }
   });
   el.genfab.addEventListener('click', () => {
     if (busy) return;
@@ -2446,7 +2678,7 @@ export function mountStudio(panel, jobbar) {
   studioState().restore();
   showVerb('generate');
   renderCandidates();
-  void revert; void revertToOriginal; void canRevert;   // stack API surface (kept for the version contract; selectEntry + setViewedAsBase are used by promoteCandidate)
+  void revert; void revertToOriginal;   // stack API surface (kept for the version contract; canRevert + stepBack are used by the History pop-up)
 
   return { showVerb, setBatch, saveAs, setImmersive };
 }

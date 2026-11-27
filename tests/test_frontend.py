@@ -1834,3 +1834,90 @@ def test_stage3_send_targets_retirement_and_survivors():
     assert "ellieedit:studio-set-working" in st
     assert "ellieedit:studio-set-working" in studio
     assert "registerReceiver('studio'" in studio
+
+
+def test_stage4_history_clipboard_pins():
+    """Generation history pop-up + clipboard round-trip (2026-11-27,
+    Alexander's word: 'try the implementation'). History is a UI over
+    the existing stack: View jumps, Make base re-bases, Back steps back
+    one entry AND re-bases in one move (revert alone moves only the
+    view). Parent links make save-family intermediates an ancestry walk,
+    not the flat slice. The Save-over confirm names both files. The
+    clipboard pair is copy (Gallery viewer + Studio canvas) and paste
+    (Studio, button + Ctrl/Cmd+V); one shared import function lives in
+    image-clipboard.js. Clipboard behavior itself is pins only — no
+    browser in this environment."""
+    HERE = Path(__file__).parent
+    studio = (HERE.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    clip = (HERE.parent / "frontend" / "js" / "modules" / "image-clipboard.js").read_text()
+    gallery = (HERE.parent / "frontend" / "js" / "modules" / "gallery.js").read_text()
+    stack = (HERE.parent / "frontend" / "js" / "modules" / "update-stack.js").read_text()
+    # History pop-up: header button + bottom-sheet overlay (LoRA pattern)
+    assert 'data-id="history"' in studio and "🕘 History" in studio
+    assert 'data-id="historyoverlay"' in studio
+    assert ".st-historyoverlay" in studio and ".st-historyoverlay.open" in studio
+    assert 'data-id="histback"' in studio and "↩ Back" in studio
+    assert 'data-id="histclose"' in studio
+    assert "function renderHistory" in studio
+    assert "lineage(stack)" in studio and "function renderHistoryLine" in studio
+    assert 'data-id="historyline"' in studio   # Provenance record of the same rows
+    # Back moves BOTH pointers: view steps back and the base follows
+    assert "stepBack(stack)" in studio
+    assert "canRevert(stack)" in studio
+    assert "function stepBack" in stack and "function ancestry" in stack and "function lineage" in stack
+    # Save-family intermediates are the ancestry walk, not the flat slice
+    assert "ancestry(s, s.idx)" in studio
+    assert "s.entries.slice(1, s.idx)" not in studio
+    # Two-named Save-over confirm: the render AND the file overwritten
+    assert "Overwrite ${orig.name} with ${entry.name}?" in studio
+    assert "Overwrite the original source in place?" not in studio
+    # Tap still previews only (Alexander, 2026-11-27) — history changes nothing there
+    assert "Viewing ONLY" in studio
+    assert "previewed = c;" in studio
+    # ONE import function, in image-clipboard.js: defined once, used by
+    # the file picker and both paste paths; the upload endpoint lives
+    # only there (studio no longer uploads directly)
+    assert "export async function importImageAsWorking" in clip
+    assert "/api/gallery/upload" in clip
+    assert "/api/gallery/upload" not in studio
+    assert "import { importImageAsWorking, copyImageToClipboard } from './image-clipboard.js';" in studio
+    assert "importImageAsWorking(f, { name: f.name, origin: 'gallery-upload' })" in studio
+    assert "importImageAsWorking(files[0]" in studio
+    assert "importImageAsWorking(blob" in studio
+    # Paste: button reads the clipboard, Ctrl/Cmd+V uses the paste event
+    # (no clipboard-read permission needed); text fields keep their paste;
+    # only fires while Studio is the active tab
+    assert "navigator.clipboard.read" in studio
+    assert "document.addEventListener('paste'" in studio
+    assert "panel.classList.contains('active')" in studio
+    assert "tagName === 'INPUT'" in studio and "tagName === 'TEXTAREA'" in studio
+    # Copy: Clipboard API with a download fallback that says which path
+    # was taken; Studio canvas + Gallery viewer
+    assert "export async function copyImageToClipboard" in clip
+    assert "ClipboardItem" in clip and "a.download" in clip
+    assert "copyImageToClipboard(galleryFileUrl(st.path)" in studio
+    assert "clipboard unavailable — downloaded the file instead" in studio
+    assert 'data-act="viewer-copy"' in gallery
+    assert "act('viewer-copy')" in gallery
+    assert "copyImageToClipboard(this.fileUrl(item)" in gallery
+    assert "Clipboard unavailable — downloaded instead" in gallery
+    # Ellie review refinements (2026-11-27): busy-guarded paste, pixels-only
+    # history, 50-entry ring. DOM behavior itself is pins only — no browser
+    # in this environment.
+    # Fix 1: both paste paths return early while a render is busy — a
+    # mid-run repaste would replace the stack under the completion handler.
+    assert "Guard paste while a render is busy" in studio
+    assert "Same busy guard as the Paste button" in studio
+    assert studio.count("if (busy) return;") >= 5  # generate, fab, both paste paths, file picker
+    # File-picker guard (2026-11-27): same busy guard as the paste paths —
+    # a mid-run pick replaces the stack under the completion handler.
+    assert "Same busy guard as the paste paths" in studio
+    # Fix 2: the History overlay says plainly that viewing restores pixels
+    # only — seed, prompt and LoRA stay as they are.
+    assert "Viewing restores pixels only" in studio
+    assert "generating from an old entry uses today's settings" in studio
+    # Fix 3: 50-entry ring in pushRender (single append point); the caller
+    # revokes the trimmed entries' blob URLs after the canvas has swapped.
+    assert "export const MAX_STACK_ENTRIES = 50;" in stack
+    assert "MAX_STACK_ENTRIES" in stack
+    assert "revokeStackUrls({ entries: prevStack.entries.filter(en => !stack.entries.includes(en)) })" in studio
