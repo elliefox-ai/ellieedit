@@ -272,8 +272,15 @@ function panelHTML() {
        big weight sliders, for complicated setups. */
     .st-loraoverlay { position: fixed; left: 0; right: 0; bottom: 0; z-index: 95; background: rgba(18,18,31,.97);
       border-top: 1px solid #4a4a6c; padding: 14px 20px 18px; transform: translateY(105%); transition: transform .25s ease;
-      max-height: 75vh; overflow-y: auto; }
+      max-height: 75vh; display: flex; flex-direction: column; overflow: hidden; }
     .st-loraoverlay.open { transform: translateY(0); }
+    /* header + close stay pinned (2026-11-27); only the list scrolls, with
+       the search/filter controls sticky at the top of it */
+    .st-loraoverlay > .st-striphead, .st-loraoverlay > .st-hintline { flex: 0 0 auto; }
+    .st-loraoverlay [data-id="loraovbody"] { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+    .st-lovctl { position: sticky; top: 0; z-index: 2; background: rgba(18,18,31,.98); padding: 8px 0 6px;
+      display: flex; flex-direction: column; gap: 6px; }
+    .st-lovctl .st-chip { min-height: 30px; padding: 4px 9px; }
     /* Generation history overlay (2026-11-27): the same bottom-sheet
        pattern as the LoRA inspector — the stack as a list, oldest
        first, with per-row View / Make base and one ↩ Back step. */
@@ -291,6 +298,7 @@ function panelHTML() {
     .st-histrow .mark { font-size: 11px; color: #b39ae0; letter-spacing: .08em; }
     .st-histrow button { min-height: 44px; min-width: 44px; }
     .st-lovsec { font-size: 11px; letter-spacing: .1em; color: #8a8aaa; margin: 14px 0 2px; }
+    .st-lovsec.act { color: #7ee0a0; } .st-lovsec.pau { color: #e0b34d; }
     .st-lovrow { padding: 10px 0; border-bottom: 1px solid #1c1c30; }
     .st-lovrow:last-child { border-bottom: 0; }
     .st-lovrow .fn { font-size: 13px; color: #d8d8ee; overflow-wrap: anywhere; }
@@ -524,7 +532,7 @@ function panelHTML() {
         <h2>LoRA inspector</h2>
         <button class="ee-btn" data-id="loraclose">✕ Close</button>
       </div>
-      <span class="st-hintline">Full names, full paths, big sliders — for complicated setups. These are the same pins as in the tray.</span>
+      <span class="st-hintline">Full names, full paths, big sliders — active and paused pins first, then everything else. Same pins as the tray.</span>
       <div data-id="loraovbody"></div>
     </div>
     <div class="st-historyoverlay" data-id="historyoverlay">
@@ -1751,7 +1759,8 @@ export function mountStudio(panel, jobbar) {
   const LORA_WF_FOLDER = { klein: '_Flux2Klein', krea2: '_Krea2', qwen21: '_Qwen21',
                            moss: 'moss', zengorestyle: '_Flux2Klein' };
   const loraUI = { q: '', auto: true, root: null, sub: null, openRoot: null,
-                   openActive: true, openPaused: false, ovQ: '' };
+                   openActive: true, openPaused: false, ovQ: '',
+                   ovStatus: 'all', ovRoot: null };
   const loraRootOf = n => (/[\\/]/.test(n) ? n.replace(/\\/g, '/').split('/')[0] : '(root)');
   const loraSubOf = n => { const p = n.replace(/\\/g, '/').split('/'); return p.length > 2 ? p[1] : null; };
   const loraDefFolder = () => LORA_WF_FOLDER[el.wf.value] || null;
@@ -2016,6 +2025,18 @@ export function mountStudio(panel, jobbar) {
   function renderLoraOverlay() {
     const body = el.loraovbody;
     body.innerHTML = '';
+    const baseName = n => n.replace(/\\/g, '/').split('/').pop().replace(/\.safetensors$/i, '');
+    const query = (loraUI.ovQ || '').trim().toLowerCase();
+    const roots = [...new Set(allLoras.map(loraRootOf))];
+    const defF = loraDefFolder();
+    roots.sort((x, y) => (x === defF ? -1 : y === defF ? 1 : x.localeCompare(y)));
+    if (loraUI.ovRoot && !roots.includes(loraUI.ovRoot)) loraUI.ovRoot = null;
+    const matches = n => (!query || n.toLowerCase().includes(query)) &&
+      (!loraUI.ovRoot || loraRootOf(n) === loraUI.ovRoot);
+
+    // Sticky controls: search + status filter + folder filter.
+    const ctl = document.createElement('div');
+    ctl.className = 'st-lovctl';
     const q = document.createElement('input');
     q.className = 'st-lq'; q.placeholder = 'search loras…'; q.value = loraUI.ovQ;
     q.setAttribute('inputmode', 'search');
@@ -2030,74 +2051,113 @@ export function mountStudio(panel, jobbar) {
       const nq = el.loraovbody.querySelector('.st-lq');
       if (nq) { nq.focus(); try { nq.setSelectionRange(pos, pos); } catch { /* ignore */ } }
     });
-    body.appendChild(q);
-    const roots = [...new Set(allLoras.map(loraRootOf))];
-    const defF = loraDefFolder();
-    roots.sort((a, b) => (a === defF ? -1 : b === defF ? 1 : a.localeCompare(b)));
-    const query = (loraUI.ovQ || '').trim().toLowerCase();
-    for (const root of roots) {
-      const inF = allLoras.filter(n => loraRootOf(n) === root &&
-        (!query || n.toLowerCase().includes(query)));
-      if (!inF.length) continue;
-      const sec = document.createElement('div');
-      sec.className = 'st-lovsec';
-      sec.textContent = `${root} — ${inF.length} loras`;
-      body.appendChild(sec);
-      for (const n of inF.slice(0, 100)) {
-        const pinnedA = pins.active.has(n), pinnedS = pins.suspended.has(n);
-        const val = pinnedA ? pins.active.get(n) : pinnedS ? pins.suspended.get(n) : null;
-        const row = document.createElement('div');
-        row.className = 'st-lovrow';
-        const fn = document.createElement('div');
-        fn.className = 'fn';
-        fn.textContent = (pinnedA ? '📌 ' : pinnedS ? '⏸ ' : '') +
-          n.replace(/\\/g, '/').split('/').pop().replace(/\.safetensors$/i, '');
-        row.appendChild(fn);
-        const fp = document.createElement('div');
-        fp.className = 'fp'; fp.textContent = n;
-        row.appendChild(fp);
-        const ctl = document.createElement('div');
-        ctl.className = 'ctl';
-        if (val !== null) {
-          const sl = document.createElement('input');
-          sl.type = 'range'; sl.className = 'st-lovslider'; sl.min = -1; sl.max = 2; sl.step = 0.05;
-          sl.value = val;
-          sl.setAttribute('aria-label', `strength for ${fn.textContent}`);
-          const tag = document.createElement('span');
-          tag.className = 'str'; tag.textContent = '×' + val.toFixed(2);
-          // Live-update the value in place while dragging; re-render
-          // once on release so the drag isn't destroyed mid-gesture.
-          sl.addEventListener('input', () => {
-            pins.setStrength(n, +sl.value);
-            tag.textContent = '×' + (+sl.value).toFixed(2);
-          });
-          sl.addEventListener('change', () => { renderLoras(); renderLoraOverlay(); });
-          ctl.append(sl, tag);
-        }
-        const btn = document.createElement('button');
-        btn.textContent = pinnedA ? '⏸' : pinnedS ? '▶' : '＋';
-        btn.title = pinnedA ? 'suspend' : pinnedS ? 'restore' : 'pin at 1.0';
-        btn.addEventListener('click', () => {
-          if (pinnedA) pins.suspend(n);
-          else if (pinnedS) pins.restore(n);
-          else pins.pin(n, 1.0);
-          renderLoras(); renderLoraOverlay();
-        });
-        ctl.appendChild(btn);
-        if (val !== null) {
-          const del = document.createElement('button');
-          del.textContent = '✕'; del.title = 'unpin';
-          del.addEventListener('click', () => { pins.remove(n); renderLoras(); renderLoraOverlay(); });
-          ctl.appendChild(del);
-        }
-        row.appendChild(ctl);
-        body.appendChild(row);
+    ctl.appendChild(q);
+    const chipRow = (items, isOn, onPick) => {
+      const row = document.createElement('div');
+      row.className = 'st-chips';
+      for (const [val, label] of items) {
+        const c = document.createElement('button');
+        c.type = 'button'; c.className = 'st-chip' + (isOn(val) ? ' on' : ''); c.textContent = label;
+        c.addEventListener('click', () => { onPick(val); renderLoraOverlay(); });
+        row.appendChild(c);
       }
-      if (inF.length > 100) {
-        const more = document.createElement('div');
-        more.className = 'st-hintline'; more.style.padding = '8px 0';
-        more.textContent = `+${inF.length - 100} more — use search`;
-        body.appendChild(more);
+      return row;
+    };
+    ctl.appendChild(chipRow(
+      [['all', 'All'], ['active', `Active (${pins.active.size})`],
+       ['paused', `Paused (${pins.suspended.size})`], ['off', 'Not pinned']],
+      v => loraUI.ovStatus === v, v => { loraUI.ovStatus = v; }));
+    if (roots.length > 1) {
+      ctl.appendChild(chipRow(
+        [[null, 'All folders'], ...roots.map(r => [r, r])],
+        v => loraUI.ovRoot === v, v => { loraUI.ovRoot = v; }));
+    }
+    body.appendChild(ctl);
+
+    // One row: full name, full path, strength slider (pinned), pin/suspend
+    // toggle, unpin. Same behavior as before the sections were split out.
+    const lovRow = n => {
+      const pinnedA = pins.active.has(n), pinnedS = pins.suspended.has(n);
+      const val = pinnedA ? pins.active.get(n) : pinnedS ? pins.suspended.get(n) : null;
+      const row = document.createElement('div');
+      row.className = 'st-lovrow';
+      const fn = document.createElement('div');
+      fn.className = 'fn';
+      fn.textContent = (pinnedA ? '📌 ' : pinnedS ? '⏸ ' : '') + baseName(n);
+      row.appendChild(fn);
+      const fp = document.createElement('div');
+      fp.className = 'fp'; fp.textContent = n;
+      row.appendChild(fp);
+      const rc = document.createElement('div');
+      rc.className = 'ctl';
+      if (val !== null) {
+        const sl = document.createElement('input');
+        sl.type = 'range'; sl.className = 'st-lovslider'; sl.min = -1; sl.max = 2; sl.step = 0.05;
+        sl.value = val;
+        sl.setAttribute('aria-label', `strength for ${baseName(n)}`);
+        const tag = document.createElement('span');
+        tag.className = 'str'; tag.textContent = '×' + val.toFixed(2);
+        // Live-update the value in place while dragging; re-render
+        // once on release so the drag isn't destroyed mid-gesture.
+        sl.addEventListener('input', () => {
+          pins.setStrength(n, +sl.value);
+          tag.textContent = '×' + (+sl.value).toFixed(2);
+        });
+        sl.addEventListener('change', () => { renderLoras(); renderLoraOverlay(); });
+        rc.append(sl, tag);
+      }
+      const btn = document.createElement('button');
+      btn.textContent = pinnedA ? '⏸' : pinnedS ? '▶' : '＋';
+      btn.title = pinnedA ? 'suspend' : pinnedS ? 'restore' : 'pin at 1.0';
+      btn.addEventListener('click', () => {
+        if (pinnedA) pins.suspend(n);
+        else if (pinnedS) pins.restore(n);
+        else pins.pin(n, 1.0);
+        renderLoras(); renderLoraOverlay();
+      });
+      rc.appendChild(btn);
+      if (val !== null) {
+        const del = document.createElement('button');
+        del.textContent = '✕'; del.title = 'unpin';
+        del.addEventListener('click', () => { pins.remove(n); renderLoras(); renderLoraOverlay(); });
+        rc.appendChild(del);
+      }
+      row.appendChild(rc);
+      return row;
+    };
+    const section = (cls, label) => {
+      const sec = document.createElement('div');
+      sec.className = 'st-lovsec ' + cls;
+      sec.textContent = label;
+      body.appendChild(sec);
+    };
+
+    const st = loraUI.ovStatus;
+    // ACTIVE — pinned and on; PAUSED — pinned but suspended. Both come
+    // first (pins keep their order), regardless of folder grouping below.
+    if (st === 'all' || st === 'active') {
+      const list = [...pins.active.keys()].filter(matches);
+      if (list.length) { section('act', `ACTIVE — ${list.length}`); for (const n of list) body.appendChild(lovRow(n)); }
+    }
+    if (st === 'all' || st === 'paused') {
+      const list = [...pins.suspended.keys()].filter(matches);
+      if (list.length) { section('pau', `PAUSED — ${list.length}`); for (const n of list) body.appendChild(lovRow(n)); }
+    }
+    // NOT PINNED — everything else, grouped by workflow folder
+    // (default folder first), capped per folder; search narrows.
+    if (st === 'all' || st === 'off') {
+      for (const root of roots) {
+        const inF = allLoras.filter(n => loraRootOf(n) === root && matches(n) &&
+          !pins.active.has(n) && !pins.suspended.has(n));
+        if (!inF.length) continue;
+        section('', `${root} — ${inF.length} not pinned`);
+        for (const n of inF.slice(0, 100)) body.appendChild(lovRow(n));
+        if (inF.length > 100) {
+          const more = document.createElement('div');
+          more.className = 'st-hintline'; more.style.padding = '8px 0';
+          more.textContent = `+${inF.length - 100} more — use search`;
+          body.appendChild(more);
+        }
       }
     }
     if (!body.querySelector('.st-lovrow')) {
