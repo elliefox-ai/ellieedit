@@ -1921,3 +1921,53 @@ def test_stage4_history_clipboard_pins():
     assert "export const MAX_STACK_ENTRIES = 50;" in stack
     assert "MAX_STACK_ENTRIES" in stack
     assert "revokeStackUrls({ entries: prevStack.entries.filter(en => !stack.entries.includes(en)) })" in studio
+
+
+def test_stage4_save_over_targeted_refresh_pins():
+    """Save-over targeted refresh + Gallery viewer refresh (2026-11-27,
+    Alexander's word: 'try the targeted refresh first' + 'a manual
+    refresh on a selected image ... when the image is selected and
+    zoomed'). No backend change: the Cache-Control headers stay as they
+    are. The mechanism is fetch(url, {cache:'reload'}) — a fresh network
+    fetch that also stores the fresh response back into the HTTP cache —
+    plus rebuilding the Studio stack entry's blob URL. Pins only — no
+    browser in this environment."""
+    HERE = Path(__file__).parent
+    studio = (HERE.parent / "frontend" / "js" / "modules" / "studio.js").read_text()
+    gallery = (HERE.parent / "frontend" / "js" / "modules" / "gallery.js").read_text()
+    # 1 — Studio: save-over re-fetches the overwritten file with
+    # cache:'reload' (the file fetch doubles as the cache refresh — its
+    # body becomes the new blob) and the thumbnail URL the same way;
+    # the stack original's blob URL is rebuilt, revoking only blob: URLs
+    assert "async function fetchWorkingBlob(path, { reload = false } = {})" in studio
+    assert "{ cache: 'reload' }" in studio
+    assert "await refreshOverwritten(orig)" in studio
+    assert "const blob = await fetchWorkingBlob(orig.path, { reload: true });" in studio
+    assert "first.url = URL.createObjectURL(blob);" in studio
+    assert "if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);" in studio
+    assert "`/api/gallery/thumb?path=${encodeURIComponent(orig.path)}`" in studio
+    # The refresh never fails the save: its own try/catch only reports
+    assert "refresh after save-over failed:" in studio
+    # A live preview already shows the saved render, and showCurrent()
+    # nulls previewUrl — so the canvas is left alone while a preview is
+    # up; otherwise showCurrent re-reads the entry URLs
+    assert "if (!previewed) showCurrent();" in studio
+    assert "renderCandidates();" in studio
+    # 2 — Gallery viewer: ↻ Refresh button in the viewer bar, wired to
+    # reload fetches of the file + thumb, swapping the viewer to a blob
+    # of the fresh bytes
+    assert 'data-act="viewer-refresh"' in gallery
+    assert "↻ Refresh" in gallery
+    assert "fetch(this.fileUrl(item), { cache: 'reload' })" in gallery
+    assert "fetch(this.thumbUrl(item), { cache: 'reload' })" in gallery
+    assert "this.el.viewerImg.src = URL.createObjectURL(blob);" in gallery
+    assert "if (old.startsWith('blob:')) URL.revokeObjectURL(old);" in gallery
+    # Zoom state is preserved: the refresh never resets the viewer zoom
+    # (reset() is openViewer's job for a new image) and never re-opens
+    # the viewer — it only swaps the img src
+    assert gallery.count("viewerZoom?.reset()") == 1
+    assert "toast('Image refreshed')" in gallery
+    assert "refresh failed:" in gallery
+    # The refresh blob URL is dropped when the viewer moves on / closes,
+    # so it does not leak
+    assert "if (this.el.viewerImg.src.startsWith('blob:')) URL.revokeObjectURL(this.el.viewerImg.src);" in gallery

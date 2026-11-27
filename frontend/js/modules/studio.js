@@ -781,8 +781,12 @@ export function mountStudio(panel, jobbar) {
   // Fetch a working image's bytes (foxden outputs live outside the
   // gallery jail — fall back to the candidate's own view URL; strip
   // thumbnails prove it serves fine).
-  async function fetchWorkingBlob(path) {
-    const r0 = await fetch(galleryFileUrl(path));
+  async function fetchWorkingBlob(path, { reload = false } = {}) {
+    // reload: force a fresh network fetch AND store the fresh response
+    // back into the HTTP cache (cache:'reload') — used after a
+    // save-over, when the bytes at this path have changed but the
+    // browser cache still holds the old ones.
+    const r0 = await fetch(galleryFileUrl(path), reload ? { cache: 'reload' } : undefined);
     const r = r0.ok ? r0 : await (cands.find(path)
       ? fetch(cands.find(path).url) : Promise.resolve(r0));
     if (!r.ok) throw new Error(r.status);
@@ -1170,6 +1174,10 @@ export function mountStudio(panel, jobbar) {
         if (d.overwritten === inputParent) { inputName = null; inputParent = null; inputDims = null; inputTs = null; }
         showToast(`Saved over ${d.overwritten}`);
         say(`saved over ${d.overwritten} (${d.bytes} bytes)`);
+        // Targeted refresh (2026-11-27): the bytes changed — make the
+        // browser cache and the stack entry show them. Failures only
+        // report; the save stands.
+        await refreshOverwritten(orig);
       } else if (kind === 'new') {
         const r = await fetch('/api/update/save-new', { method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1198,6 +1206,44 @@ export function mountStudio(panel, jobbar) {
       }
     } catch (err) {
       say(`save failed: ${err.message}`, true);
+    }
+  }
+  // Targeted refresh of an overwritten file (2026-11-27): Save Over
+  // replaces the bytes at the original's path, but the browser cache
+  // still holds the old ones (/file max-age=3600, /thumb max-age=86400,
+  // no cache-buster on either URL), and the stack's original entry
+  // still holds the blob URL fetched before the save. So: re-fetch
+  // the file with cache:'reload' — a fresh network fetch that also
+  // stores the fresh response back into the HTTP cache, so the
+  // Gallery grid (after a folder refresh), the viewer, and a Studio
+  // reload all show the new bytes — rebuild the entry's blob URL
+  // from those bytes, and refresh the thumbnail cache entry the same
+  // way. The save stands even if this fails: it only reports.
+  async function refreshOverwritten(orig) {
+    try {
+      const blob = await fetchWorkingBlob(orig.path, { reload: true });
+      const first = stack && stack.entries[0];
+      if (first && first.path === orig.path) {
+        const old = first.url;
+        first.url = URL.createObjectURL(blob);
+        if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
+      }
+      // Thumbnail cache entry for the same path (primary bank —
+      // mirrors Gallery.thumbUrl for a primary item).
+      try {
+        const tr = await fetch(`/api/gallery/thumb?path=${encodeURIComponent(orig.path)}`, { cache: 'reload' });
+        if (!tr.ok) say(`thumbnail refresh failed: ${tr.status}`, true);
+      } catch (err) { say(`thumbnail refresh failed: ${err.message}`, true); }
+      // Re-render so the canvas and the source slot show the fresh
+      // bytes. A live preview already shows the saved render — and
+      // showCurrent() nulls previewUrl — so while a preview is up the
+      // canvas is left alone (the hidden layer picks up the fresh
+      // entry URL the next time it renders); otherwise showCurrent
+      // re-reads the entry URLs.
+      renderCandidates();
+      if (!previewed) showCurrent();
+    } catch (err) {
+      say(`refresh after save-over failed: ${err.message} — the file was saved; reload the tab to see the new image`, true);
     }
   }
   wireSaveBars();
