@@ -54,7 +54,7 @@ test('setViewedAsBase: same as swap, viewed entry becomes the base', () => {
 });
 
 test('promote composition: pushRender + setViewedAsBase advances the run source', () => {
-  // The "Use as source" advance (studio.js promoteCandidate): each stage
+  // The ⬇ promote / advance (studio.js promoteCandidate): each stage
   // is pushed onto the stack first, then the run source moves to it — so
   // the next mask run renders FROM the promoted stage, not the original,
   // and the version history survives the advances.

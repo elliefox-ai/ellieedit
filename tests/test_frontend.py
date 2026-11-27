@@ -1587,9 +1587,10 @@ def test_stage4_batch_and_candidate_pins():
     assert "setBatch(1)" in studio                 # default 1
     # explicit candidate promote only (decision §7.2)
     # candidate promote moved to the explicit ⬇ on the source slot (§7.2/§10 review 2026-11-13);
-    # since 2026-11-16 both the ⬇ and the Mask panel's "Use as source" go
-    # through promoteCandidate, which pushes onto the stack first (history
-    # survives) and moves the run source with it
+    # the ⬇ goes through promoteCandidate, which pushes onto the stack first
+    # (history survives) and moves the run source with it (the Mask panel's
+    # separate "Use as source" button was removed 2026-11-27 — the ⬇ is the
+    # one path)
     assert "promoteCandidate(previewed)" in studio
     assert "studioState().set(c.path, 'foxden-output'" in studio
     assert "cands.startRun(collected)" in studio   # next run replaces the strip
@@ -1660,7 +1661,7 @@ def test_stage4_mask_and_provenance_pins():
     assert "/api/update/jobs/" in studio
     assert "async function runMask" in studio
     assert "cands.startRun([cand])" in studio
-    mask_run = studio[studio.index("async function runMask"):studio.index("el.madvance.addEventListener")]
+    mask_run = studio[studio.index("async function runMask"):studio.index("async function pollJob")]
     assert "cands.startRun" in mask_run and "previewed = cand" in mask_run
     assert "showCurrent" not in mask_run and "studioState().set" not in mask_run
     assert "pushRender" not in mask_run   # no auto-promote, no stack write
@@ -1707,13 +1708,16 @@ def test_stage4_mask_and_provenance_pins():
     assert "body.parent_image = inputParent" in studio
     # prepareInput no longer bails on denoise>=1 — edit graphs always inject (2026-11-13)
     assert "denoise gating lives in generate()" in studio
-    # explicit advance to source (multi-stage work): a labeled "Use as
-    # source" button in the Mask panel and the ⬇ both promote the viewed
-    # candidate — pushRender first (history survives), run source moves
-    # with it (setViewedAsBase), mask resets for the new source. Never
-    # automatic: the mask run itself still does no stack write.
-    assert 'data-id="madvance"' in studio
-    assert "Use as source" in studio
+    # explicit advance to source (multi-stage work): the ⬇ beside the source
+    # thumbnail promotes the viewed candidate — pushRender first (history
+    # survives), run source moves with it (setViewedAsBase), mask resets for
+    # the new source. Never automatic: the mask run itself still does no
+    # stack write. The Mask panel's duplicate "Use as source" button is gone
+    # (2026-11-27) — one promote path, not two.
+    assert 'data-id="madvance"' not in studio
+    assert "madvance" not in studio
+    assert "st-src-promote" in studio
+    assert "beside the source thumbnail" in studio
     assert "function promoteCandidate" in studio
     assert "promoteCandidate(previewed)" in studio
     assert "setViewedAsBase(stack)" in studio

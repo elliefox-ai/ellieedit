@@ -477,11 +477,8 @@ function panelHTML() {
               <div><label>Seed</label><input type="number" data-id="mseed" value="0"></div>
               <div style="display:flex;align-items:end;flex-wrap:wrap;min-width:0"><label style="margin:0 0 8px"><input type="checkbox" data-id="mrandom" checked style="width:auto"> random</label></div>
             </div>
-            <div class="st-row2" style="margin-top:14px">
-              <button data-id="madvance" disabled>⬇ Use as source</button>
-            </div>
-            <span class="st-hintline">Run from the button below — on the Mask tab it runs the mask edit.</span>
-            <span class="st-hintline">Use as source advances the viewed result to the working image, so the next mask edit starts from it. Never automatic — make as many attempts as you like first.</span>
+            <span class="st-hintline" style="margin-top:14px">Run from the button below — on the Mask tab it runs the mask edit.</span>
+            <span class="st-hintline">To continue from a result, promote it with the ⬇ beside the source thumbnail — the next mask edit then starts from it. Never automatic — make as many attempts as you like first.</span>
             <span class="st-hintline" data-id="mstatus"></span>
           </div>
 
@@ -565,7 +562,7 @@ export function mountStudio(panel, jobbar) {
     'preset-pick', 'preset-save', 'preset-del', 'reuse', 'save-all', 'saveall',
     'mmodel', 'mprompt', 'mdenoise', 'mdenoise-val', 'mseed', 'mrandom',
     'mask', 'mask-paint', 'mask-erase', 'brush', 'mask-clear', 'mask-undo', 'mask-hide', 'mask-last',
-    'madvance', 'mstatus',
+    'mstatus',
     'provtable', 'parentchain', 'runbtn', 'edgetab', 'genfab', 'fabring', 'fabinner',
     'bottomhandle', 'candoverlay', 'ovcands', 'loraoverlay', 'loraovbody', 'loraclose',
     'promptfab', 'promptdrawer', 'promptdrawer-text', 'promptdrawer-close',
@@ -1384,9 +1381,6 @@ export function mountStudio(panel, jobbar) {
     if (verb === 'mask') initMaskForSource();
     say(`working image: ${entry.name}`);
   }
-  function syncAdvance() {
-    if (el.madvance) el.madvance.disabled = !(previewed && previewed.path);
-  }
   function renderCandidates() {
     const list = cands.get();
     // The viewed candidate keeps its ring across the rebuild: the strips
@@ -1488,7 +1482,6 @@ export function mountStudio(panel, jobbar) {
     el.strip.classList.toggle('st-running', busy);
     // Save-all button: disabled while no candidate has a server path.
     el.saveall.disabled = !list.some(c => c.path);
-    syncAdvance();
   }
 
   // ── generate: batch N = N sequential runs, one candidate set ──
@@ -2479,7 +2472,7 @@ export function mountStudio(panel, jobbar) {
       syncComparer();
       showToast(`Mask edit complete — seed ${data.seed}`);
       openOverlayInImmersive();
-      say(`mask edit done (seed ${data.seed}) — Use as source to advance it to the working image`);
+      say(`mask edit done (seed ${data.seed}) — tap ⬇ by the source thumbnail to advance it to the working image`);
     } catch (err) {
       say('mask run failed: ' + err.message, true);
     }
@@ -2487,7 +2480,6 @@ export function mountStudio(panel, jobbar) {
     el.runbtn.disabled = false;
     setFabProgress(0, null);
   }
-  el.madvance.addEventListener('click', () => promoteCandidate(previewed));
   async function pollJob(jobId) {
     const started = Date.now();
     for (;;) {
