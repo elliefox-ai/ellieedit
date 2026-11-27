@@ -2,16 +2,22 @@
 // so node can test them. One shape serves both named presets and the
 // auto-remembered `_last` composition.
 
-const ASPECTS = ['landscape', 'portrait', 'square'];
+// 'landscape' = 16:9, 'portrait' = 9:16 (names kept so saved presets and
+// `_last` stay valid); '4:3' and '3:4' were added 2026-11-27.
+const ASPECTS = ['landscape', 'portrait', 'square', '4:3', '3:4'];
 
 // Stepped output sizes (issue #3, 2026-11-01). Each aspect keeps its ratio
 // exactly across steps; step 1 is the pre-existing default size for every
 // aspect, so old presets and the `_last` state keep their old dimensions.
-// Steps are standard 16:9 / 1:1 sizes, smallest to largest.
+// Steps are standard 16:9 / 4:3 / 1:1 sizes, smallest to largest; every
+// aspect shares the same long sides (768/1024/1280/1536) and all dims are
+// multiples of 16 (the backend snaps to 16).
 export const SIZES = {
   landscape: [[768, 432], [1024, 576], [1280, 720], [1536, 864]],
   portrait: [[432, 768], [576, 1024], [720, 1280], [864, 1536]],
   square: [[768, 768], [1024, 1024], [1280, 1280], [1536, 1536]],
+  '4:3': [[768, 576], [1024, 768], [1280, 960], [1536, 1152]],
+  '3:4': [[576, 768], [768, 1024], [960, 1280], [1152, 1536]],
 };
 
 export function sizeFor(aspect, idx) {

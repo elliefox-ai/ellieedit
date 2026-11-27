@@ -44,6 +44,18 @@ assert.deepEqual(sizeFor('square', 3), [1536, 1536]);
 assert.deepEqual(sizeFor('square', 99), [1536, 1536]);
 assert.deepEqual(sizeFor('square', -1), [768, 768]);
 assert.deepEqual(sizeFor('diagonal', 1), [1024, 576]);
+// 4:3 / 3:4 (2026-11-27): exact ratio, 16-aligned, same long sides as the rest
+assert.deepEqual(sizeFor('4:3', 1), [1024, 768]);
+assert.deepEqual(sizeFor('3:4', 1), [768, 1024]);
+for (const a of ['4:3', '3:4']) {
+  SIZES[a].forEach(([w, h], i) => {
+    assert.equal(w % 16, 0); assert.equal(h % 16, 0);
+    assert.equal(Math.max(w, h), Math.max(...SIZES.square[i]));
+  });
+}
+assert.equal(SIZES['4:3'][0][0] * 3, SIZES['4:3'][0][1] * 4);
+assert.equal(normalizeState({ aspect: '4:3' }).aspect, '4:3');
+assert.equal(normalizeState({ aspect: '3:4' }).aspect, '3:4');
 assert.equal(normalizeState({ size_idx: 3 }).size_idx, 3);
 assert.equal(normalizeState({ size_idx: 99 }).size_idx, 3);
 assert.equal(normalizeState({ size_idx: 'junk' }).size_idx, undefined);

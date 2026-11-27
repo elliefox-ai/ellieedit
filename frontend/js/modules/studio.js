@@ -189,6 +189,9 @@ function panelHTML() {
     .st-chip { font-size: 11px; padding: 6px 9px; border-radius: 12px; border: 1px solid #4a4a6c;
       color: #8a8aaa; cursor: pointer; background: #161628; min-height: 32px; }
     .st-chip.on { background: #5b4a8a; border-color: #7a6aaa; color: #fff; }
+    /* aspect chips: a little box drawn at the true ratio replaces the word */
+    .st-chip .st-ar { display: inline-block; border: 1.5px solid currentColor; border-radius: 2px;
+      margin-right: 5px; vertical-align: -2px; box-sizing: border-box; }
     /* ---- batch rocker (usability pass 2026-11-15: replaces the drag pips) ---- */
     .st-pips { display: flex; align-items: center; gap: 10px; border: 1px solid #4a4a6c; border-radius: 8px;
       background: #161628; padding: 8px 12px; min-height: 52px; touch-action: none; cursor: ns-resize;
@@ -392,9 +395,11 @@ function panelHTML() {
             <div class="st-row2">
               <div><label>Aspect</label>
                 <div class="st-chips" data-id="aspects">
-                  <button class="st-chip on" data-a="landscape">▭ Landscape</button>
-                  <button class="st-chip" data-a="portrait">▯ Portrait</button>
-                  <button class="st-chip" data-a="square">■ Square</button>
+                  <button class="st-chip on" data-a="landscape" title="Landscape 16:9"><i class="st-ar" style="width:16px;height:9px"></i>16:9</button>
+                  <button class="st-chip" data-a="4:3" title="Landscape 4:3"><i class="st-ar" style="width:14px;height:10.5px"></i>4:3</button>
+                  <button class="st-chip" data-a="square" title="Square 1:1"><i class="st-ar" style="width:12px;height:12px"></i>1:1</button>
+                  <button class="st-chip" data-a="3:4" title="Portrait 3:4"><i class="st-ar" style="width:10.5px;height:14px"></i>3:4</button>
+                  <button class="st-chip" data-a="portrait" title="Portrait 9:16"><i class="st-ar" style="width:9px;height:16px"></i>9:16</button>
                 </div>
                 <label>Size <span data-id="sizeval">1024×576</span></label>
                 <input type="range" data-id="size" min="0" max="3" step="1" value="1" aria-label="Output size step">
